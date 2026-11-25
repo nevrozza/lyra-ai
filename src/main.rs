@@ -2,7 +2,9 @@ mod ram;
 mod run;
 mod telemetry;
 
-use std::{convert::Infallible, net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible, io::SeekFrom, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -17,6 +19,7 @@ use axum::{
 };
 use clap::Parser;
 use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
     net::TcpListener,
     sync::{Mutex, watch},
 };
@@ -30,6 +33,9 @@ struct Options {
     /// Local dashboard port.
     #[arg(long, default_value_t = 8787)]
     port: u16,
+    /// Startup log supplied by the Windows launcher.
+    #[arg(long)]
+    startup_log: Option<PathBuf>,
 }
 
 fn model_name(name: &str) -> Result<String, String> {
@@ -52,6 +58,7 @@ struct App {
     task: watch::Sender<run::Snapshot>,
     metrics: Mutex<telemetry::Cache>,
     ram: Mutex<ram::Cache>,
+    startup_log: Option<PathBuf>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -73,6 +80,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         task: watch::channel(run::Snapshot::new(options.model)).0,
         metrics: Mutex::default(),
         ram: Mutex::default(),
+        startup_log: options.startup_log,
     });
     let router = Router::new()
         .route(
@@ -98,6 +106,11 @@ async fn serve(options: Options) -> std::io::Result<()> {
             }),
         )
         .route("/events", get(events))
+        .route(
+            "/startup-log",
+            get(|| async { Html(include_str!("../web/startup-log.html")) }),
+        )
+        .route("/startup-log/text", get(startup_log))
         .route("/metrics", get(metrics))
         .route("/ram", get(ram_usage))
         .route("/run", post(start))
@@ -111,6 +124,45 @@ async fn serve(options: Options) -> std::io::Result<()> {
         result = axum::serve(listener, router) => result,
         result = tokio::signal::ctrl_c() => result,
     }
+}
+
+async fn startup_log(State(app): State<Arc<App>>) -> Response {
+    let Some(path) = &app.startup_log else {
+        return "Журнал доступен при запуске через лаунчер Windows.".into_response();
+    };
+    match read_startup_log(path).await {
+        Ok(log) => ([(header::X_CONTENT_TYPE_OPTIONS, "nosniff")], log).into_response(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, "Журнал запуска ещё недоступен.").into_response()
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Не удалось прочитать журнал запуска.",
+        )
+            .into_response(),
+    }
+}
+
+async fn read_startup_log(path: &std::path::Path) -> std::io::Result<String> {
+    const MAX_BYTES: u64 = 256 * 1024;
+    let mut file = tokio::fs::File::open(path).await?;
+    let start = file.metadata().await?.len().saturating_sub(MAX_BYTES);
+    file.seek(SeekFrom::Start(start)).await?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES).read_to_end(&mut bytes).await?;
+    if start == 0 {
+        return Ok(String::from_utf8_lossy(&bytes)
+            .trim_start_matches('\u{feff}')
+            .to_owned());
+    }
+    let offset = bytes
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(0, |index| index + 1);
+    Ok(format!(
+        "Показаны последние 256 КБ журнала.\n\n{}",
+        String::from_utf8_lossy(&bytes[offset..])
+    ))
 }
 
 async fn local_only(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {

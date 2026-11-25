@@ -19,6 +19,10 @@ code, time, output, dd, .service, .mark { font-family: var(--mono); }
 code { color: #d7e9cf; }
 p, h1, h2 { margin: 0; }
 .shell { max-width: 1120px; padding: 0 32px 52px; margin: 0 auto; }
+.dashboard-footer { margin-top: 22px; font-size: .85rem; }
+.dashboard-footer a, .topbar a { color: var(--accent); }
+.startup-log-title { margin: 30px 0 20px; }
+.startup-log-frame { display: block; width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; color-scheme: dark; }
 .topbar, .hero, .panel-header, .facts > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .topbar { min-height: 75px; border-bottom: 1px solid var(--line); }
 .identity, .connection { display: flex; align-items: center; gap: 10px; font-size: .9rem; }
