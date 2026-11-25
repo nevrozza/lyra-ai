@@ -24,33 +24,42 @@ pub struct Record {
     pub context_tokens: Option<u32>,
     latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
-    average_run: Option<RunAverage>,
+    average_run: Option<TimingAverage>,
+    average_launch: Option<TimingAverage>,
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
-struct RunAverage {
+struct TimingAverage {
     samples: u64,
     mean_ms: f64,
 }
 
+impl TimingAverage {
+    fn with_sample(self, milliseconds: f64) -> Self {
+        let samples = self.samples + 1;
+        Self {
+            samples,
+            mean_ms: self.mean_ms + (milliseconds - self.mean_ms) / samples as f64,
+        }
+    }
+}
+
 impl Record {
-    fn average_run(&self) -> Option<RunAverage> {
+    fn average_run(&self) -> Option<TimingAverage> {
         // Earlier files only retained the latest measurement.
         self.average_run.or_else(|| {
-            self.latest.as_ref().map(|latest| RunAverage {
-                samples: 1,
-                mean_ms: latest.total_ms,
-            })
+            self.latest
+                .as_ref()
+                .map(|latest| TimingAverage::default().with_sample(latest.total_ms))
         })
     }
 
-    fn record_run_time(&mut self, total_ms: f64) {
-        let previous = self.average_run().unwrap_or_default();
-        let samples = previous.samples + 1;
-        self.average_run = Some(RunAverage {
-            samples,
-            mean_ms: previous.mean_ms + (total_ms - previous.mean_ms) / samples as f64,
-        });
+    fn average_launch(&self) -> Option<TimingAverage> {
+        self.average_launch.or_else(|| {
+            self.last_cold_load
+                .as_ref()
+                .map(|latest| TimingAverage::default().with_sample(latest.load_ms))
+        })
     }
 }
 
@@ -117,6 +126,7 @@ impl Store {
     pub fn get(&self, model: &str) -> io::Result<Record> {
         let mut record = self.read()?.remove(model).unwrap_or_default();
         record.average_run = record.average_run();
+        record.average_launch = record.average_launch();
         Ok(record)
     }
 
@@ -143,8 +153,20 @@ impl Store {
     pub fn save(&self, model: String, measurement: Measurement) -> io::Result<()> {
         self.update(|records| {
             let entry = records.entry(model).or_default();
-            entry.record_run_time(measurement.total_ms);
+            entry.average_run = Some(
+                entry
+                    .average_run()
+                    .unwrap_or_default()
+                    .with_sample(measurement.total_ms),
+            );
+            entry.average_launch = entry.average_launch();
             if !measurement.was_loaded {
+                entry.average_launch = Some(
+                    entry
+                        .average_launch
+                        .unwrap_or_default()
+                        .with_sample(measurement.load_ms),
+                );
                 entry.last_cold_load = Some(ColdLoad {
                     measured_at: measurement.measured_at.clone(),
                     load_ms: measurement.load_ms,
