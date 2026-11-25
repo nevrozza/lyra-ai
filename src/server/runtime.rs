@@ -3,7 +3,7 @@ use std::{convert::Infallible, io::SeekFrom, sync::Arc, time::Duration};
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
@@ -14,10 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::{ram, run, telemetry};
 
-use super::{
-    App, assets,
-    models::{control_model, matches_selection, model_context},
-};
+use super::{App, assets};
 
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
@@ -25,38 +22,12 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/startup-log/text", get(startup_log))
         .route("/metrics", get(metrics))
         .route("/ram", get(ram_usage))
-        .route("/run", post(start))
         .route("/shutdown", post(notify_shutdown))
 }
 
 async fn notify_shutdown(State(app): State<Arc<App>>) -> StatusCode {
     app.task.send_modify(run::Snapshot::close);
     StatusCode::NO_CONTENT
-}
-
-async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
-    let model = match control_model(&app, &headers).await {
-        Ok(model) => model,
-        Err(status) => return status,
-    };
-    if !app
-        .task
-        .send_if_modified(|snapshot| matches_selection(snapshot, &headers) && snapshot.start(model))
-    {
-        return StatusCode::CONFLICT;
-    }
-    tokio::spawn(async move {
-        let model = current_model(&app);
-        let store = app.clone();
-        let tokens = tokio::task::spawn_blocking(move || model_context(&store, &model))
-            .await
-            .unwrap_or_else(|error| Err(error.to_string()));
-        run::execute(app.task.clone(), app.pi_agent_dir.clone(), tokens, async {
-            app.metrics.lock().await.invalidate();
-        })
-        .await;
-    });
-    StatusCode::ACCEPTED
 }
 
 async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
@@ -108,14 +79,6 @@ pub(super) async fn register_benchmarks(app: Arc<App>, names: Vec<String>) {
 
 async fn ram_usage(State(app): State<Arc<App>>) -> Json<ram::Usage> {
     Json(app.ram.lock().await.sample().await)
-}
-
-fn current_model(app: &App) -> String {
-    app.task
-        .borrow()
-        .model()
-        .expect("running operation has a model")
-        .to_owned()
 }
 
 async fn startup_log(State(app): State<Arc<App>>) -> Response {

@@ -26,14 +26,14 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   });
 
   function isMemoryChanging() {
-    return session.pending || Boolean(modelSubmitting || session.run?.model_action || session.run?.benchmark_running ||
-      session.run?.delegated_model || session.run?.status === 'running');
+    return Boolean(modelSubmitting || session.run?.model_action || session.run?.benchmark_running ||
+      session.run?.delegated_model);
   }
 
   function isBlocked() {
-    return session.closed || !session.run || !session.online || session.pending ||
+    return session.closed || !session.run || !session.online ||
       modelSubmitting != null || session.run.model_action != null || session.run.benchmark_running ||
-      session.run.delegated_model != null || settings.saving || session.run.status === 'running';
+      session.run.delegated_model != null || settings.saving;
   }
 
   function renderControls() {
@@ -168,16 +168,13 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     } else if (delegated) {
       mode = 'running';
       label = 'Запрос Codex';
-    } else if (isTaskModel && session.run?.model_working) {
-      mode = 'running';
-      label = 'Работает';
     } else if (models == null) {
       mode = 'unknown';
       label = models === null ? 'Нет связи' : 'Проверяем…';
     } else if (action === 'unload') {
       mode = 'loading';
       label = 'Выгружается';
-    } else if (!loaded && ((isTaskModel && session.run?.status === 'running') || action === 'pin' || action === 'load')) {
+    } else if (!loaded && (action === 'pin' || action === 'load')) {
       mode = 'loading';
       label = 'Загружается';
     } else if (loaded) {
@@ -226,10 +223,6 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     render: renderModel,
     updateControls: renderControls,
     isMemoryChanging,
-    displayedModel,
-    canRun() {
-      return !isBlocked() && session.metrics?.installed_models?.includes(displayedModel());
-    },
     acceptRun() { modelSubmitting = undefined; },
     showClosed() {
       get('context-memory-warning').hidden = true;
@@ -238,7 +231,6 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     tick() {
       list.refreshCountdown(session.metrics?.installed_models, session.metrics?.models, observedModel);
     },
-    renderContext: settings.render,
     refreshMemoryWarning: settings.refreshMemoryWarning,
     beginMemorySample: settings.beginSample,
     acceptMemorySample: settings.acceptSample,

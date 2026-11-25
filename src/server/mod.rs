@@ -1,7 +1,9 @@
 mod assets;
 mod mcp;
 mod models;
+mod pi;
 mod runtime;
+mod sessions;
 
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
 
@@ -27,6 +29,7 @@ struct App {
     startup_log: Option<PathBuf>,
     pi_agent_dir: Option<PathBuf>,
     benchmarks: benchmark::Store,
+    sessions: std::sync::Mutex<sessions::History>,
 }
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
@@ -58,6 +61,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         startup_log: options.startup_log,
         pi_agent_dir: options.pi_agent_dir,
         benchmarks: benchmark::Store::new(options.benchmark_file),
+        sessions: std::sync::Mutex::default(),
     });
     if let Some(names) = catalog {
         runtime::register_benchmarks(app.clone(), names).await;
@@ -66,6 +70,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .merge(runtime::routes())
         .merge(models::routes())
         .merge(mcp::routes())
+        .merge(sessions::routes())
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 

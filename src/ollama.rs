@@ -54,9 +54,14 @@ pub(crate) struct ChatReply {
 #[derive(Deserialize)]
 struct ChatMessage {
     content: String,
+    thinking: Option<String>,
 }
 
 impl ChatReply {
+    pub(crate) fn thinking(&self) -> Option<&str> {
+        self.message.thinking.as_deref().filter(|text| !text.is_empty())
+    }
+
     pub(crate) fn into_text(self) -> Result<(String, bool), String> {
         if !self.done {
             return Err("Ollama returned an incomplete reply".into());

@@ -88,7 +88,7 @@ export function createTelemetry(session, { beginSample, onSample }) {
       if (!session.closed && session.run?.metrics_revision === revision) get('sampled').textContent = 'Нет связи';
     } finally {
       polling = false;
-      const delay = metricsRefreshPending ? 0 : (session.run?.status === 'running' ? 5_000 : 15_000);
+      const delay = metricsRefreshPending ? 0 : (session.run?.delegated_model || session.run?.benchmark_running ? 5_000 : 15_000);
       metricsRefreshPending = false;
       scheduleMetrics(delay);
     }

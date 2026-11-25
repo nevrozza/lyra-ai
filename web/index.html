@@ -85,25 +85,16 @@
         </section>
       </div>
 
-      <section class="hero" aria-labelledby="title">
-        <div>
-          <h2 id="title">Монитор Pi</h2>
-          <p>Встроенная задача создаёт и читает <code>smoke.txt</code>.</p>
+      <section class="panel activity" aria-labelledby="sessions-title">
+        <header class="panel-header"><h2 id="sessions-title">Сессии</h2></header>
+        <div class="panel-body sessions-body">
+          <p id="session-message" class="secondary">Сессии появятся после первого вызова Lyra MCP.</p>
+          <ul id="session-list" class="session-list" aria-label="Сессии Lyra"></ul>
+          <div id="session-detail" hidden>
+            <p id="session-omitted" class="secondary" hidden>Показаны последние события сессии.</p>
+            <ol id="session-events" class="session-events" aria-label="Хронология сессии"></ol>
+          </div>
         </div>
-        <button id="run" type="button" disabled>Запустить проверку</button>
-      </section>
-
-      <section class="panel activity" aria-labelledby="activity-title">
-        <header class="panel-header"><h2 id="activity-title">Ход выполнения</h2><time id="elapsed">—</time></header>
-        <div id="phase" class="phase" data-status="idle" role="status">Готов к запуску</div>
-        <ol id="timeline" aria-label="События Pi"></ol>
-        <p id="empty" class="empty">События появятся после запуска.</p>
-        <p id="result" class="result" hidden></p>
-        <div id="workspace-row" class="workspace" hidden><span>Тестовая папка</span><code id="workspace"></code></div>
-        <details id="thinking" class="thinking" hidden>
-          <summary>Вывод thinking <span>последний фрагмент</span></summary>
-          <pre id="trace"></pre>
-        </details>
       </section>
     </div>
   </main>
