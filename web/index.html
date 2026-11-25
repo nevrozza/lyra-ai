@@ -63,7 +63,16 @@
           <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
           <div class="panel-body system">
             <div class="metric"><label for="cpu">CPU</label><output id="cpu-value" for="cpu">—</output><meter id="cpu" max="100" hidden></meter></div>
-            <div class="metric"><label for="ram">RAM</label><output id="ram-value" for="ram">—</output><meter id="ram" max="100" hidden></meter></div>
+            <details id="ram-expand" class="ram-expand">
+              <summary class="metric"><span>RAM</span><span class="ram-total"><output id="ram-value" for="ram">—</output><span class="chevron" aria-hidden="true"></span></span><meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter></summary>
+              <div class="ram-breakdown">
+                <div id="ram-windows" class="ram-windows" hidden>
+                  <span>Windows · ядро и драйверы</span><output id="ram-windows-value"></output>
+                </div>
+                <p id="ram-message" class="secondary">Считаем память приложений…</p>
+                <ul id="ram-list" aria-label="Приложения по использованию RAM"></ul>
+              </div>
+            </details>
             <div id="gpus" class="gpus"></div>
             <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
           </div>

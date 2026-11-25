@@ -2,6 +2,7 @@ const get = (id) => document.getElementById(id);
 const runButton = get('run');
 const pinModel = get('pin-model');
 const unloadModel = get('unload-model');
+const ramExpand = get('ram-expand');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
 connection.lastChild.replaceWith(connectionLabel);
@@ -20,6 +21,8 @@ let metricsTimer;
 let metricsRefreshPending = false;
 let modelSubmitting;
 let modelRequestError = '';
+let ramTimer;
+let readingRam = false;
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -133,6 +136,10 @@ async function changeModel(action, path, payload) {
 
 function gib(value) {
   return `${oneDecimal.format(value / 2 ** 30)} ГиБ`;
+}
+
+function memoryAmount(bytes) {
+  return bytes >= 2 ** 30 ? gib(bytes) : `${whole.format(bytes / 2 ** 20)} МиБ`;
 }
 
 function memoryLabel(value) {
@@ -266,14 +273,54 @@ async function readMetrics() {
   }
 }
 
+function scheduleRam(delay) {
+  clearTimeout(ramTimer);
+  if (!document.hidden && ramExpand.open && !readingRam) ramTimer = setTimeout(readRam, delay);
+}
+
+async function readRam() {
+  if (document.hidden || !ramExpand.open) return;
+  readingRam = true;
+  const list = get('ram-list');
+  const message = get('ram-message');
+  const windows = get('ram-windows');
+  try {
+    const response = await fetch('/ram');
+    if (!response.ok) throw new Error();
+    const { applications: apps, windows_bytes: windowsBytes } = await response.json();
+    if (!ramExpand.open || document.hidden) return;
+    windows.hidden = windowsBytes == null;
+    if (windowsBytes != null) get('ram-windows-value').textContent = memoryAmount(windowsBytes);
+    list.replaceChildren(...(apps ?? []).map((app) => {
+      const row = element('li', '');
+      row.append(element('span', app.name), element('output', memoryAmount(app.bytes)));
+      return row;
+    }));
+    message.hidden = Boolean(apps?.length);
+    message.textContent = apps === null ? 'Данные по приложениям недоступны.' : 'Нет приложений от 300 МиБ.';
+  } catch {
+    windows.hidden = true;
+    list.replaceChildren();
+    message.hidden = false;
+    message.textContent = 'Не удалось получить список приложений.';
+  } finally {
+    readingRam = false;
+    scheduleRam(5_000);
+  }
+}
+
+ramExpand.addEventListener('toggle', () => scheduleRam(0));
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     stream?.close();
     stream = undefined;
     clearTimeout(metricsTimer);
+    clearTimeout(ramTimer);
   } else {
     if (!stream) connect();
     scheduleMetrics(0);
+    scheduleRam(0);
   }
 });
 

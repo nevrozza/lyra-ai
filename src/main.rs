@@ -1,3 +1,4 @@
+mod ram;
 mod run;
 mod telemetry;
 
@@ -50,6 +51,7 @@ struct App {
     origin: String,
     task: watch::Sender<run::Snapshot>,
     metrics: Mutex<telemetry::Cache>,
+    ram: Mutex<ram::Cache>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -70,6 +72,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         host,
         task: watch::channel(run::Snapshot::new(options.model)).0,
         metrics: Mutex::default(),
+        ram: Mutex::default(),
     });
     let router = Router::new()
         .route(
@@ -96,6 +99,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         )
         .route("/events", get(events))
         .route("/metrics", get(metrics))
+        .route("/ram", get(ram_usage))
         .route("/run", post(start))
         .route("/model/pin", post(pin_model))
         .route("/model/unload", post(unload_model))
@@ -158,6 +162,10 @@ async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
 
 async fn metrics(State(app): State<Arc<App>>) -> Json<telemetry::Metrics> {
     Json(app.metrics.lock().await.sample().await)
+}
+
+async fn ram_usage(State(app): State<Arc<App>>) -> Json<ram::Usage> {
+    Json(app.ram.lock().await.sample().await)
 }
 
 #[derive(serde::Deserialize)]
