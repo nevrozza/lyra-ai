@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Lyra</title>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="#688769"/>
+  <rect x="4.8" y="4.8" width="54.4" height="54.4" rx="12" fill="#1B2D20"/>
+  <path d="M20.5 17.5V45H41" fill="none" stroke="#C4EC92" stroke-width="7.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M43.5 11C44.8 18.9 47 21.2 54.4 22.5C47 23.8 44.8 26.1 43.5 34C42.2 26.1 40 23.8 32.6 22.5C40 21.2 42.2 18.9 43.5 11Z" fill="#E2FAC1"/>
+</svg>

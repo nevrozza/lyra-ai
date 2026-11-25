@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -22,22 +24,27 @@ namespace LyraTray
 
         private readonly string root, ollamaExecutable, requestedModel, logs, piDirectory, dashboard;
         private readonly int port;
+        private readonly bool closeStartupConsole;
         private readonly ProcessJob job;
-        private readonly NotifyIcon icon;
-        private readonly ContextMenuStrip menu;
         private readonly System.Windows.Forms.Timer timer;
         private readonly HttpClient http;
         private readonly JavaScriptSerializer json = new JavaScriptSerializer();
+        private readonly List<StreamReader> startupLogs = new List<StreamReader>();
+        private readonly char[] logBuffer = new char[16384];
+        private NotifyIcon icon;
+        private Icon trayImage;
+        private ContextMenuStrip menu;
+        private Exception startupError;
         private ProcessJob.Child build, ollama, lyra;
         private Task<string> probe;
         private Stage stage = Stage.Building;
         private long deadline;
-        private bool openWhenReady, stopped;
+        private bool stopped;
         private string waitingFor;
 
         private enum Stage { Building, WaitingForPorts, StartingOllama, StartingLyra, Ready }
 
-        public static void Run(string root, string cargo, string ollama, string model, int port)
+        public static void Run(string root, string cargo, string ollama, string model, int port, bool closeStartupConsole)
         {
             if (port == OllamaPort) throw new ArgumentException("The dashboard and Ollama need different ports.");
             using (var singleInstance = new Mutex(false, @"Local\LyraAI.Tray"))
@@ -47,22 +54,26 @@ namespace LyraTray
                 catch (AbandonedMutexException) { owned = true; }
                 if (!owned)
                 {
-                    MessageBox.Show("Lyra is already running. Use its tray icon.", "Lyra AI");
-                    return;
+                    throw new InvalidOperationException("Lyra is already starting or running.");
                 }
                 try
                 {
                     Application.EnableVisualStyles();
-                    using (var session = new Session(root, cargo, ollama, model, port)) Application.Run(session);
+                    using (var session = new Session(root, cargo, ollama, model, port, closeStartupConsole))
+                    {
+                        Application.Run(session);
+                        if (session.startupError != null) throw new InvalidOperationException(session.startupError.Message, session.startupError);
+                    }
                 }
                 finally { singleInstance.ReleaseMutex(); }
             }
         }
 
-        private Session(string root, string cargo, string ollama, string model, int port)
+        private Session(string root, string cargo, string ollama, string model, int port, bool closeStartupConsole)
         {
             this.root = root;
             this.port = port;
+            this.closeStartupConsole = closeStartupConsole;
             ollamaExecutable = ollama;
             requestedModel = model;
             dashboard = "http://127.0.0.1:" + port + "/";
@@ -73,17 +84,15 @@ namespace LyraTray
 
             job = new ProcessJob();
             http = new HttpClient(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(1) };
-            menu = new ContextMenuStrip();
-            menu.Items.Add("Quit", null, delegate { ExitThread(); });
-            icon = new NotifyIcon { Icon = SystemIcons.Application, Text = "Lyra AI: building", ContextMenuStrip = menu, Visible = true };
-            icon.MouseClick += OnTrayClick;
             timer = new System.Windows.Forms.Timer { Interval = 350 };
             timer.Tick += OnTick;
 
             try
             {
                 var target = Path.Combine(root, "target");
+                Console.WriteLine("Building Lyra in release mode...");
                 build = job.Start(cargo, "build --release --locked --bin local-agent --target-dir \"" + target + "\"", root, Log("build"));
+                FollowLog("build");
                 timer.Start();
             }
             catch
@@ -93,22 +102,24 @@ namespace LyraTray
             }
         }
 
-        private void OnTrayClick(object sender, MouseEventArgs e)
+        private void ShowTray()
         {
-            if (e.Button != MouseButtons.Left) return;
-            if (stage == Stage.Ready)
+            menu = new ContextMenuStrip();
+            menu.Items.Add("Quit", null, delegate { ExitThread(); });
+            trayImage = new Icon(Path.Combine(root, "assets", "lyra.ico"));
+            icon = new NotifyIcon { Icon = trayImage, Text = "Lyra AI: open dashboard", ContextMenuStrip = menu };
+            icon.MouseClick += delegate(object sender, MouseEventArgs click)
             {
-                OpenDashboard();
-                return;
-            }
-            openWhenReady = true;
-            icon.ShowBalloonTip(3500, "Lyra AI", waitingFor ?? "The dashboard will open when Lyra is ready.", ToolTipIcon.Info);
+                if (click.Button == MouseButtons.Left) OpenDashboard();
+            };
+            icon.Visible = true;
         }
 
         private void OnTick(object sender, EventArgs args)
         {
             try
             {
+                PrintLogs();
                 if (stage == Stage.Building)
                 {
                     if (build.Running) return;
@@ -116,6 +127,7 @@ namespace LyraTray
                     build.Dispose();
                     build = null;
                     if (exitCode != 0) throw new InvalidOperationException("Cargo build failed (exit code " + exitCode + "). See " + Log("build"));
+                    Console.WriteLine("Build finished.");
                     stage = Stage.WaitingForPorts;
                 }
 
@@ -129,15 +141,16 @@ namespace LyraTray
                             : null;
                     if (blocked != null)
                     {
-                        if (waitingFor != blocked) icon.ShowBalloonTip(8000, "Lyra AI", blocked, ToolTipIcon.Info);
+                        if (waitingFor != blocked) Console.WriteLine(blocked);
                         waitingFor = blocked;
-                        icon.Text = "Lyra AI: waiting for a port";
                         timer.Interval = 1000;
                         return;
                     }
                     waitingFor = null;
+                    Console.WriteLine("Starting Ollama at " + OllamaUrl + "...");
                     ollama = StartWithEnvironment(ollamaExecutable, "serve", "ollama", "OLLAMA_HOST", "127.0.0.1:11434");
-                    BeginProbe(Stage.StartingOllama, "Lyra AI: starting Ollama");
+                    FollowLog("ollama");
+                    BeginProbe(Stage.StartingOllama);
                 }
 
                 CheckAlive(ollama, "Ollama", Log("ollama"));
@@ -146,26 +159,31 @@ namespace LyraTray
                     string tags = ReadWhenReady(OllamaUrl + "/api/tags");
                     if (tags == null) return;
                     string model = ConfigurePi(tags);
+                    Console.WriteLine("Ollama is ready. Starting Lyra with " + model + "...");
                     string executable = Path.Combine(root, "target", "release", "local-agent.exe");
                     lyra = StartWithEnvironment(executable, "--model \"" + model + "\" --port " + port,
                         "lyra", "PI_CODING_AGENT_DIR", piDirectory);
-                    BeginProbe(Stage.StartingLyra, "Lyra AI: starting dashboard");
+                    FollowLog("lyra");
+                    BeginProbe(Stage.StartingLyra);
                 }
 
                 CheckAlive(lyra, "Lyra", Log("lyra"));
                 if (stage == Stage.StartingLyra)
                 {
                     if (ReadWhenReady(dashboard) == null) return;
+                    Console.WriteLine("Ready: " + dashboard);
+                    StopFollowingLogs();
+                    ShowTray();
                     stage = Stage.Ready;
                     timer.Interval = 2000;
-                    icon.Text = "Lyra AI: open dashboard";
-                    if (openWhenReady) OpenDashboard();
+                    if (closeStartupConsole) FreeConsole();
                 }
             }
             catch (Exception error)
             {
+                if (stage != Stage.Ready) startupError = error;
                 ExitThread();
-                MessageBox.Show(error.Message, "Lyra AI", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (startupError == null) MessageBox.Show(error.Message, "Lyra AI", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -215,15 +233,35 @@ namespace LyraTray
 
         private string Log(string name) { return Path.Combine(logs, name + ".log"); }
 
+        private void FollowLog(string name)
+        {
+            var file = new FileStream(Log(name), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            startupLogs.Add(new StreamReader(file, Encoding.UTF8));
+        }
+
+        private void PrintLogs()
+        {
+            foreach (var log in startupLogs)
+            {
+                int count = log.Read(logBuffer, 0, logBuffer.Length);
+                if (count > 0) Console.Write(logBuffer, 0, count);
+            }
+        }
+
+        private void StopFollowingLogs()
+        {
+            foreach (var log in startupLogs) log.Dispose();
+            startupLogs.Clear();
+        }
+
         private static void CheckAlive(ProcessJob.Child child, string name, string log)
         {
             if (!child.Running) throw new InvalidOperationException(name + " exited (code " + child.ExitCode + "). See " + log);
         }
 
-        private void BeginProbe(Stage next, string text)
+        private void BeginProbe(Stage next)
         {
             stage = next;
-            icon.Text = text;
             probe = null;
             deadline = Stopwatch.GetTimestamp() + 60 * Stopwatch.Frequency;
             timer.Interval = 350;
@@ -273,16 +311,20 @@ namespace LyraTray
             if (stopped) return;
             stopped = true;
             timer.Stop();
+            StopFollowingLogs();
             job.Dispose();
             if (build != null) build.Dispose();
             if (lyra != null) lyra.Dispose();
             if (ollama != null) ollama.Dispose();
             http.Dispose();
-            icon.Visible = false;
-            icon.Dispose();
-            menu.Dispose();
+            if (icon != null) { icon.Visible = false; icon.Dispose(); }
+            if (trayImage != null) trayImage.Dispose();
+            if (menu != null) menu.Dispose();
             timer.Dispose();
         }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FreeConsole();
 
         public sealed class OllamaLibrary { public ModelEntry[] models { get; set; } }
         public sealed class ModelEntry { public string name { get; set; } public string remote_host { get; set; } }
