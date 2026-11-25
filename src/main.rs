@@ -152,6 +152,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
         .route("/model/description", post(describe_model))
         .route("/model/context", post(set_model_context))
+        .route("/model/context/estimate", get(context_estimate))
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 
@@ -352,6 +353,24 @@ struct ContextRequest {
     context_tokens: Option<u32>,
 }
 
+#[derive(serde::Serialize)]
+struct ContextEstimate {
+    bytes_per_token_f16: Option<u64>,
+}
+
+async fn context_estimate(
+    Query(request): Query<SelectRequest>,
+) -> Result<Json<ContextEstimate>, StatusCode> {
+    model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bytes_per_token_f16 =
+        tokio::task::spawn_blocking(move || context::cache_bytes_per_token(&request.model))
+            .await
+            .ok()
+            .flatten();
+    Ok(Json(ContextEstimate {
+        bytes_per_token_f16,
+    }))
+}
 async fn set_model_context(
     State(app): State<Arc<App>>,
     headers: HeaderMap,

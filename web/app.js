@@ -35,6 +35,8 @@ let benchmarkRecord;
 let benchmarkRead = 0;
 let descriptionSaving = false;
 let contextSaving = false;
+let contextEstimateRequest = 0;
+let contextBytesPerToken;
 let ramTimer;
 let readingRam = false;
 let detailedRam;
@@ -112,6 +114,7 @@ function renderRun(next) {
   renderTime();
   renderModel(metrics?.models);
   if (modelChanged || benchmarkUpdated) readBenchmark(next.model, modelChanged);
+  if (modelChanged) readContextEstimate(next.model);
   if (justStarted || actionFinished || benchmarkUpdated) scheduleMetrics(0);
 }
 
@@ -177,9 +180,32 @@ function contextLabel(tokens) {
 }
 
 function renderContextChoice() {
-  const label = contextLabel(contextPresets[contextSize.value]);
+  const tokens = contextPresets[contextSize.value];
+  const estimated = tokens && contextBytesPerToken ? tokens * contextBytesPerToken : null;
+  const label = contextLabel(tokens) + (estimated ? ` · ≈ ${memoryAmount(estimated)}` : '');
   get('context-choice').textContent = label;
   contextSize.setAttribute('aria-valuetext', label);
+  get('context-note').textContent = estimated ?
+    'Оценка для KV-кэша в FP16. Веса модели и рабочие буферы занимают память дополнительно.' :
+    tokens && contextBytesPerToken === null ? 'Для этой модели оценка памяти недоступна.' :
+    'Лимит действует при следующей загрузке.';
+}
+
+async function readContextEstimate(model) {
+  const request = ++contextEstimateRequest;
+  contextBytesPerToken = undefined;
+  renderContextChoice();
+  if (!model) return;
+  let bytes = null;
+  try {
+    const response = await fetch(`/model/context/estimate?model=${encodeURIComponent(model)}`);
+    if (response.ok) bytes = (await response.json()).bytes_per_token_f16;
+  } catch {
+    // The slider still works if Ollama can't provide model metadata.
+  }
+  if (request !== contextEstimateRequest) return;
+  contextBytesPerToken = bytes;
+  renderContextChoice();
 }
 
 description.addEventListener('input', updateControls);

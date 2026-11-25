@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::telemetry;
 
@@ -48,5 +48,80 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
         Ok(alias)
     } else {
         Err(format!("Ollama не подготовила модель: {}", result.status))
+    }
+}
+
+pub fn cache_bytes_per_token(model: &str) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Show {
+        model_info: Value,
+    }
+    let info = telemetry::ollama_agent(Duration::from_secs(2))
+        .post("http://127.0.0.1:11434/api/show")
+        .send_json(json!({ "model": model, "verbose": false }))
+        .ok()?
+        .into_json::<Show>()
+        .ok()?;
+    estimate_f16(&info.model_info)
+}
+
+fn estimate_f16(info: &Value) -> Option<u64> {
+    let architecture = info["general.architecture"].as_str()?;
+    if !matches!(
+        architecture,
+        "llama" | "mistral" | "qwen2" | "qwen3" | "qwen3moe"
+    ) {
+        return None;
+    }
+    let field = |key| &info[format!("{architecture}.{key}")];
+    let number = |key| field(key).as_u64().filter(|&value| value > 0);
+    let sliding = field("attention.sliding_window");
+    if !sliding.is_null() && sliding.as_u64() != Some(0) {
+        return None;
+    }
+
+    let dimension = |key| {
+        if !field(key).is_null() {
+            return number(key);
+        }
+        let heads = number("attention.head_count")?;
+        let embedding = number("embedding_length")?;
+        (embedding >= heads && embedding % heads == 0).then_some(embedding / heads)
+    };
+    // Standard attention stores one key and one value per KV head, layer and token.
+    let head_bytes = dimension("attention.key_length")?
+        .checked_add(dimension("attention.value_length")?)?
+        .checked_mul(2)?; // f16
+    let kv_heads = if field("attention.head_count_kv").is_null() {
+        number("attention.head_count")?
+    } else {
+        number("attention.head_count_kv")?
+    };
+    head_bytes
+        .checked_mul(kv_heads)?
+        .checked_mul(number("block_count")?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimates_grouped_attention_and_explicit_key_value_sizes() {
+        let mut info = json!({
+            "general.architecture": "qwen2",
+            "qwen2.block_count": 28,
+            "qwen2.embedding_length": 3584,
+            "qwen2.attention.head_count": 28,
+            "qwen2.attention.head_count_kv": 4,
+        });
+        assert_eq!(estimate_f16(&info), Some(57_344));
+        info["qwen2.attention.key_length"] = json!(256);
+        info["qwen2.attention.value_length"] = json!(128);
+        assert_eq!(estimate_f16(&info), Some(86_016));
+        info["qwen2.attention.sliding_window"] = json!(4096);
+        assert_eq!(estimate_f16(&info), None);
+        info["general.architecture"] = json!("qwen35");
+        assert_eq!(estimate_f16(&info), None);
     }
 }

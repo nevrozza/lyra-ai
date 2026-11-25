@@ -72,7 +72,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 #selected-model { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--line); }
 .context-settings { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 7px 10px; margin-top: 14px; }
 .context-settings label { font-size: .85rem; }
-#context-choice { color: var(--accent); font-size: .8rem; }
+#context-choice { color: var(--accent); font-size: .8rem; text-align: right; }
 #context-size, #context-note { grid-column: 1 / -1; }
 #context-size { width: 100%; margin: 1px 0; accent-color: var(--accent); cursor: pointer; }
 #context-size:disabled { cursor: default; }
