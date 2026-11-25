@@ -41,6 +41,14 @@
         <section class="panel" aria-labelledby="model-title">
           <header class="panel-header"><h2 id="model-title">Модели</h2><span id="ollama" class="service">Ollama</span></header>
           <div class="panel-body">
+            <fieldset id="model-mode" class="model-mode">
+              <legend class="visually-hidden">Кто выбирает модель</legend>
+              <label><input type="radio" name="model-mode" value="manual" class="visually-hidden" checked><span>Вручную</span></label>
+              <label><input id="mode-codex" type="radio" name="model-mode" value="codex" class="visually-hidden"><span>Codex</span></label>
+            </fieldset>
+            <p id="codex-placeholder" class="secondary codex-placeholder" hidden>
+              Интеграция с Codex пока в разработке. Выбери модель из списка, чтобы посмотреть её сохранённые настройки и состояние.
+            </p>
             <ul id="model-list" class="model-list" aria-label="Установленные модели Ollama" hidden></ul>
             <p id="model-list-message" class="secondary">Получаем список моделей…</p>
             <div id="selected-model" hidden>

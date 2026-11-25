@@ -63,6 +63,12 @@ h2 { font-size: .96rem; font-weight: 650; }
 .thinking summary span { margin-left: 5px; color: var(--muted); font-size: .75rem; }
 .thinking pre { max-height: 230px; overflow: auto; margin-bottom: 0; font: .75rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .model-name { display: block; font: 600 .96rem/1.4 var(--mono); color: var(--accent); overflow-wrap: anywhere; }
+.model-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; min-inline-size: 0; margin: 0 0 10px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; }
+.model-mode label { cursor: pointer; }
+.model-mode span { display: block; padding: 6px 7px; border-radius: 5px; color: var(--muted); text-align: center; font-size: .82rem; }
+.model-mode label:hover span, .model-mode input:checked + span { background: #27372a; color: var(--accent); }
+.model-mode input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.codex-placeholder { margin-bottom: 10px; line-height: 1.5; }
 .model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .model-list button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 9px; color: inherit; background: transparent; border: 1px solid var(--line); text-align: left; white-space: normal; }
 .model-list button:hover:not(:disabled), .model-list button[aria-pressed="true"] { background: #27372a; border-color: #536453; }

@@ -160,27 +160,16 @@ pub fn installed_models() -> Option<Vec<String>> {
     Some(model_catalog()?.into_keys().collect())
 }
 
-fn model_catalog() -> Option<BTreeMap<String, Option<u64>>> {
-    #[derive(Deserialize)]
-    struct Catalog {
-        models: Vec<Entry>,
-    }
-    #[derive(Deserialize)]
-    struct Entry {
-        name: Option<String>,
-        model: Option<String>,
-        remote_host: Option<String>,
-        size: Option<u64>,
-    }
+#[derive(Deserialize)]
+struct CatalogEntry {
+    name: Option<String>,
+    model: Option<String>,
+    remote_host: Option<String>,
+    size: Option<u64>,
+}
 
-    let catalog = ollama_agent(Duration::from_millis(800))
-        .get("http://127.0.0.1:11434/api/tags")
-        .call()
-        .ok()?
-        .into_json::<Catalog>()
-        .ok()?;
-    let models = catalog
-        .models
+fn model_catalog() -> Option<BTreeMap<String, Option<u64>>> {
+    let models = model_tags()?
         .into_iter()
         .filter(|entry| entry.remote_host.as_deref().unwrap_or_default().is_empty())
         .filter_map(|entry| {
@@ -198,6 +187,29 @@ fn model_catalog() -> Option<BTreeMap<String, Option<u64>>> {
     Some(models)
 }
 
+pub(crate) fn model_tag_names() -> Option<Vec<String>> {
+    model_tags()?
+        .into_iter()
+        .map(|entry| entry.name.or(entry.model).filter(|name| !name.is_empty()))
+        .collect()
+}
+
+fn model_tags() -> Option<Vec<CatalogEntry>> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        models: Vec<CatalogEntry>,
+    }
+    Some(
+        ollama_agent(Duration::from_millis(800))
+            .get("http://127.0.0.1:11434/api/tags")
+            .call()
+            .ok()?
+            .into_json::<Catalog>()
+            .ok()?
+            .models,
+    )
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAction {
@@ -213,7 +225,7 @@ pub fn change_model(
 ) -> Result<(), String> {
     if matches!(action, ModelAction::Pin) {
         let backend = context::backend_model(model, context_tokens)?;
-        return set_keep_alive(&backend, serde_json::json!(-1));
+        return set_keep_alive(&backend, serde_json::json!(-1), Duration::from_secs(180));
     }
     let alias = context::alias(model);
     let loaded = ollama().ok_or("Ollama недоступна")?;
@@ -226,18 +238,26 @@ pub fn change_model(
         .iter()
         .filter(|entry| same_model(&entry.name, model) || entry.name == alias)
     {
-        set_keep_alive(&entry.name, keep_alive.clone())?;
+        set_keep_alive(&entry.name, keep_alive.clone(), Duration::from_secs(180))?;
     }
     Ok(())
 }
 
-fn set_keep_alive(model: &str, keep_alive: serde_json::Value) -> Result<(), String> {
+pub(crate) fn unload_profile(model: &str) -> Result<(), String> {
+    set_keep_alive(model, serde_json::json!(0), Duration::from_secs(4))
+}
+
+fn set_keep_alive(
+    model: &str,
+    keep_alive: serde_json::Value,
+    timeout: Duration,
+) -> Result<(), String> {
     #[derive(Deserialize)]
     struct Acknowledgement {
         done: bool,
     }
 
-    let acknowledgement = ollama_agent(Duration::from_secs(180))
+    let acknowledgement = ollama_agent(timeout)
         .post("http://127.0.0.1:11434/api/generate")
         .send_json(serde_json::json!({ "model": model, "prompt": "", "stream": false, "keep_alive": keep_alive }))
         .map_err(|error| format!("Ollama отклонила команду: {error}"))?

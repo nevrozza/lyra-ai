@@ -24,6 +24,34 @@ pub struct Record {
     pub context_tokens: Option<u32>,
     latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
+    average_run: Option<RunAverage>,
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+struct RunAverage {
+    samples: u64,
+    mean_ms: f64,
+}
+
+impl Record {
+    fn average_run(&self) -> Option<RunAverage> {
+        // Earlier files only retained the latest measurement.
+        self.average_run.or_else(|| {
+            self.latest.as_ref().map(|latest| RunAverage {
+                samples: 1,
+                mean_ms: latest.total_ms,
+            })
+        })
+    }
+
+    fn record_run_time(&mut self, total_ms: f64) {
+        let previous = self.average_run().unwrap_or_default();
+        let samples = previous.samples + 1;
+        self.average_run = Some(RunAverage {
+            samples,
+            mean_ms: previous.mean_ms + (total_ms - previous.mean_ms) / samples as f64,
+        });
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,7 +115,13 @@ impl Store {
     }
 
     pub fn get(&self, model: &str) -> io::Result<Record> {
-        Ok(self.read()?.remove(model).unwrap_or_default())
+        let mut record = self.read()?.remove(model).unwrap_or_default();
+        record.average_run = record.average_run();
+        Ok(record)
+    }
+
+    pub(crate) fn known_models(&self) -> io::Result<Vec<String>> {
+        Ok(self.read()?.into_keys().collect())
     }
 
     pub fn describe(&self, model: String, description: String) -> io::Result<()> {
@@ -109,6 +143,7 @@ impl Store {
     pub fn save(&self, model: String, measurement: Measurement) -> io::Result<()> {
         self.update(|records| {
             let entry = records.entry(model).or_default();
+            entry.record_run_time(measurement.total_ms);
             if !measurement.was_loaded {
                 entry.last_cold_load = Some(ColdLoad {
                     measured_at: measurement.measured_at.clone(),

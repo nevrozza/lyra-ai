@@ -1,12 +1,13 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, sync::Mutex, time::Duration};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::telemetry;
+use crate::{benchmark::Store, telemetry};
 
 pub const PRESETS: [u32; 7] = [2048, 4096, 8192, 16384, 32768, 65536, 131072];
 const ALIAS_PREFIX: &str = "lyra-context/model:";
+static PROFILES: Mutex<()> = Mutex::new(());
 
 pub fn is_alias(model: &str) -> bool {
     model
@@ -27,6 +28,12 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
     let Some(tokens) = tokens else {
         return Ok(model.to_owned());
     };
+    let _profiles = PROFILES.lock().map_err(|error| error.to_string())?;
+    let installed =
+        telemetry::installed_models().ok_or("Не удалось получить список моделей Ollama.")?;
+    if !installed.iter().any(|name| same_source(name, model)) {
+        return Err(format!("Модель больше не установлена в Ollama: {model}."));
+    }
     // Pi uses the OpenAI-compatible API, where Ollama takes num_ctx from the model.
     let alias = alias(model);
     #[derive(Deserialize)]
@@ -48,6 +55,88 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
         Ok(alias)
     } else {
         Err(format!("Ollama не подготовила модель: {}", result.status))
+    }
+}
+
+fn same_source(left: &str, right: &str) -> bool {
+    fn normalize(name: &str) -> &str {
+        let name = name.strip_prefix("registry.ollama.ai/").unwrap_or(name);
+        let name = name
+            .strip_prefix("library/")
+            .filter(|name| !name.contains('/'))
+            .unwrap_or(name);
+        name.strip_suffix(":latest").unwrap_or(name)
+    }
+    normalize(left).eq_ignore_ascii_case(normalize(right))
+}
+
+fn orphan_profiles(installed: &[String], known: &[String]) -> BTreeSet<String> {
+    installed
+        .iter()
+        .filter(|name| is_alias(name))
+        .filter(|profile| {
+            let mut sources = known
+                .iter()
+                .filter(|source| !is_alias(source) && alias(source) == profile.as_str())
+                .peekable();
+            sources.peek().is_some()
+                && sources.all(|source| !installed.iter().any(|name| same_source(name, source)))
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn clean_orphans(store: &Store, previous: BTreeSet<String>) -> BTreeSet<String> {
+    let Ok(_profiles) = PROFILES.lock() else {
+        return BTreeSet::new();
+    };
+    let Some(installed) = telemetry::model_tag_names() else {
+        return BTreeSet::new();
+    };
+    if !installed.iter().any(|model| is_alias(model)) {
+        return BTreeSet::new();
+    }
+    let Ok(known) = store.known_models() else {
+        return BTreeSet::new();
+    };
+    let mut missing = orphan_profiles(&installed, &known);
+    // A profile must be orphaned in two successful, separate Ollama snapshots.
+    let confirmed: Vec<_> = missing.intersection(&previous).cloned().collect();
+    for profile in confirmed {
+        match delete_profile(&profile) {
+            Ok(true) => {
+                missing.remove(&profile);
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("Could not remove orphaned Ollama profile {profile}: {error}"),
+        }
+    }
+    missing
+}
+
+fn delete_profile(profile: &str) -> Result<bool, String> {
+    let is_loaded = || {
+        telemetry::ollama()
+            .map(|models| {
+                models
+                    .iter()
+                    .any(|entry| telemetry::same_model(&entry.name, profile))
+            })
+            .ok_or("could not read Ollama's loaded models")
+    };
+    if is_loaded()? {
+        telemetry::unload_profile(profile)?;
+        // Ollama can acknowledge an unload before the runner releases the files.
+        if is_loaded()? {
+            return Ok(false);
+        }
+    }
+    match telemetry::ollama_agent(Duration::from_secs(4))
+        .delete("http://127.0.0.1:11434/api/delete")
+        .send_json(json!({ "model": profile }))
+    {
+        Ok(_) | Err(ureq::Error::Status(404, _)) => Ok(true),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -105,6 +194,24 @@ fn estimate_f16(info: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_selects_known_profiles_with_missing_source_models() {
+        let known = vec!["alpha:latest".into(), "team/beta:q4".into()];
+        let alpha = alias("alpha");
+        let beta = alias("team/beta:q4");
+        let unrelated = alias("unrelated");
+        let installed = vec![
+            "registry.ollama.ai/library/Alpha:latest".into(),
+            "team/beta:q8".into(),
+            alpha.clone(),
+            beta.clone(),
+            unrelated,
+        ];
+        assert_eq!(orphan_profiles(&installed, &known), BTreeSet::from([beta]));
+        assert!(orphan_profiles(&installed, &[]).is_empty());
+        assert!(is_alias(&alpha));
+    }
 
     #[test]
     fn estimates_grouped_attention_and_explicit_key_value_sizes() {

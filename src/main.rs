@@ -5,7 +5,8 @@ mod run;
 mod telemetry;
 
 use std::{
-    convert::Infallible, io::SeekFrom, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration,
+    collections::BTreeSet, convert::Infallible, io::SeekFrom, net::Ipv4Addr, path::PathBuf,
+    sync::Arc, time::Duration,
 };
 
 use axum::{
@@ -157,9 +158,30 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .with_state(app.clone());
 
     println!("Dashboard: {}", app.origin);
-    tokio::select! {
+    let cleanup = tokio::spawn(clean_context_profiles(app));
+    let result = tokio::select! {
         result = axum::serve(listener, router) => result,
         result = tokio::signal::ctrl_c() => result,
+    };
+    cleanup.abort();
+    result
+}
+
+async fn clean_context_profiles(app: Arc<App>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(15));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut seen_orphans = BTreeSet::new();
+    loop {
+        ticker.tick().await;
+        if app.task.borrow().busy() {
+            continue;
+        }
+        let store = app.clone();
+        seen_orphans = tokio::task::spawn_blocking(move || {
+            context::clean_orphans(&store.benchmarks, seen_orphans)
+        })
+        .await
+        .unwrap_or_default();
     }
 }
 
