@@ -6,6 +6,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, time::timeout};
 
+use crate::context;
+
 #[derive(Default)]
 pub struct Cache {
     snapshot: Option<(Instant, Metrics)>,
@@ -39,7 +41,7 @@ struct Gpu {
 pub(crate) struct Model {
     pub(crate) name: String,
     size_vram: Option<u64>,
-    context_length: Option<u64>,
+    pub(crate) context_length: Option<u64>,
     pub(crate) expires_at: Option<String>,
 }
 
@@ -87,12 +89,28 @@ impl Cache {
             tokio::task::spawn_blocking(installed_models),
             nvidia(),
         );
+        let installed_models = installed_models.ok().flatten();
+        let mut models = models.ok().flatten();
+        if let (Some(loaded), Some(installed)) = (&mut models, &installed_models) {
+            let aliases: std::collections::HashMap<_, _> = installed
+                .iter()
+                .map(|model| (context::alias(model), model))
+                .collect();
+            for entry in loaded
+                .iter_mut()
+                .filter(|entry| context::is_alias(&entry.name))
+            {
+                if let Some(source) = aliases.get(&entry.name) {
+                    entry.name = (*source).clone();
+                }
+            }
+        }
         let metrics = Metrics {
             cpu_percent,
             ram: local.ram,
             gpus,
-            models: models.ok().flatten(),
-            installed_models: installed_models.ok().flatten(),
+            models,
+            installed_models,
         };
         self.snapshot = Some((Instant::now(), metrics.clone()));
         metrics
@@ -149,7 +167,9 @@ pub fn installed_models() -> Option<Vec<String>> {
         .filter(|entry| entry.remote_host.as_deref().unwrap_or_default().is_empty())
         .filter_map(|entry| entry.name.or(entry.model))
         .filter(|name| {
-            !name.to_ascii_lowercase().ends_with(":cloud") && crate::model_name(name).is_ok()
+            !context::is_alias(name)
+                && !name.to_ascii_lowercase().ends_with(":cloud")
+                && crate::model_name(name).is_ok()
         })
         .collect();
     names.sort_unstable();
@@ -165,24 +185,37 @@ pub enum ModelAction {
     Unload,
 }
 
-pub fn change_model(model: &str, action: ModelAction) -> Result<(), String> {
+pub fn change_model(
+    model: &str,
+    action: ModelAction,
+    context_tokens: Option<u32>,
+) -> Result<(), String> {
+    if matches!(action, ModelAction::Pin) {
+        let backend = context::backend_model(model, context_tokens)?;
+        return set_keep_alive(&backend, serde_json::json!(-1));
+    }
+    let alias = context::alias(model);
+    let loaded = ollama().ok_or("Ollama недоступна")?;
+    let keep_alive = if matches!(action, ModelAction::Unload) {
+        serde_json::json!(0)
+    } else {
+        serde_json::json!("5m")
+    };
+    for entry in loaded
+        .iter()
+        .filter(|entry| same_model(&entry.name, model) || entry.name == alias)
+    {
+        set_keep_alive(&entry.name, keep_alive.clone())?;
+    }
+    Ok(())
+}
+
+fn set_keep_alive(model: &str, keep_alive: serde_json::Value) -> Result<(), String> {
     #[derive(Deserialize)]
     struct Acknowledgement {
         done: bool,
     }
 
-    if matches!(action, ModelAction::Unpin) {
-        let loaded = ollama().ok_or("Ollama недоступна")?;
-        if !loaded.iter().any(|entry| same_model(&entry.name, model)) {
-            return Ok(());
-        }
-    }
-
-    let keep_alive = match action {
-        ModelAction::Pin => serde_json::json!(-1),
-        ModelAction::Unpin => serde_json::json!("5m"),
-        ModelAction::Unload => serde_json::json!(0),
-    };
     let acknowledgement = ollama_agent(Duration::from_secs(180))
         .post("http://127.0.0.1:11434/api/generate")
         .send_json(serde_json::json!({ "model": model, "prompt": "", "stream": false, "keep_alive": keep_alive }))

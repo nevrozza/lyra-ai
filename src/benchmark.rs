@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::telemetry;
+use crate::{context, telemetry};
 
 const PROMPT: &str = "Explain how a hash table works to a beginner. Cover hashing, collisions, and resizing. Give a short example and then describe the time complexity.";
 const TOKEN_LIMIT: u32 = 128;
@@ -21,6 +21,7 @@ const SEED: u32 = 42;
 #[serde(default)]
 pub struct Record {
     description: String,
+    pub context_tokens: Option<u32>,
     latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
 }
@@ -29,12 +30,16 @@ pub struct Record {
 struct ColdLoad {
     measured_at: String,
     load_ms: f64,
+    #[serde(default)]
+    context_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Measurement {
     measured_at: String,
     was_loaded: bool,
+    #[serde(default)]
+    context_tokens: Option<u32>,
     load_ms: f64,
     total_ms: f64,
     prompt_ms: f64,
@@ -92,6 +97,15 @@ impl Store {
         })
     }
 
+    pub fn set_context(&self, model: String, tokens: Option<u32>) -> io::Result<()> {
+        self.update(|records| {
+            let record = records.entry(model).or_default();
+            let changed = record.context_tokens != tokens;
+            record.context_tokens = tokens;
+            changed
+        })
+    }
+
     pub fn save(&self, model: String, measurement: Measurement) -> io::Result<()> {
         self.update(|records| {
             let entry = records.entry(model).or_default();
@@ -99,6 +113,7 @@ impl Store {
                 entry.last_cold_load = Some(ColdLoad {
                     measured_at: measurement.measured_at.clone(),
                     load_ms: measurement.load_ms,
+                    context_tokens: measurement.context_tokens,
                 });
             }
             entry.latest = Some(measurement);
@@ -174,17 +189,26 @@ struct Generation {
     eval_duration: u64,
 }
 
-pub fn measure(model: &str) -> Result<Measurement, String> {
+pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, String> {
+    let backend = context::backend_model(model, context_tokens)?;
     let loaded = telemetry::ollama().ok_or("Не удалось проверить память Ollama.")?;
     let resident = loaded
         .iter()
-        .find(|entry| telemetry::same_model(&entry.name, model));
+        .find(|entry| telemetry::same_model(&entry.name, &backend));
+    let was_loaded = resident.is_some_and(|entry| {
+        context_tokens
+            .zip(entry.context_length)
+            .is_none_or(|(expected, actual)| u64::from(expected) == actual)
+    });
     let mut request = json!({
-        "model": model,
+        "model": backend,
         "prompt": PROMPT,
         "stream": false,
         "options": { "num_predict": TOKEN_LIMIT, "seed": SEED, "temperature": 0.0 }
     });
+    if let Some(tokens) = context_tokens {
+        request["options"]["num_ctx"] = json!(tokens);
+    }
     if let Some(keep_alive) = retention(resident) {
         request["keep_alive"] = keep_alive;
     }
@@ -218,7 +242,8 @@ pub fn measure(model: &str) -> Result<Measurement, String> {
     };
     Ok(Measurement {
         measured_at: response.created_at,
-        was_loaded: resident.is_some(),
+        was_loaded,
+        context_tokens,
         load_ms: ms(response.load_duration),
         total_ms: ms(response.total_duration),
         prompt_ms: ms(prompt_duration),

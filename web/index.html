@@ -54,6 +54,14 @@
                 <div><dt>Контекст</dt><dd id="context">—</dd></div>
                 <div><dt>VRAM модели</dt><dd id="model-vram">—</dd></div>
               </dl>
+              <form id="context-form" class="context-settings">
+                <label for="context-size">Размер контекста</label>
+                <output id="context-choice" for="context-size">Авто</output>
+                <input id="context-size" type="range" min="0" max="7" step="1" value="0" aria-describedby="context-note" disabled>
+                <p id="context-note" class="secondary">Больше токенов требуют больше памяти. Лимит действует при следующей загрузке.</p>
+                <button id="save-context" class="unload" type="submit" disabled>Применить</button>
+                <span id="context-feedback" class="secondary" role="status"></span>
+              </form>
               <div class="model-actions">
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>

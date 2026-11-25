@@ -1,4 +1,5 @@
 mod benchmark;
+mod context;
 mod ram;
 mod run;
 mod telemetry;
@@ -150,6 +151,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .route("/model/select", post(select_model))
         .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
         .route("/model/description", post(describe_model))
+        .route("/model/context", post(set_model_context))
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 
@@ -226,7 +228,14 @@ async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
     {
         return StatusCode::CONFLICT;
     }
-    tokio::spawn(run::execute(app.task.clone(), app.pi_agent_dir.clone()));
+    tokio::spawn(async move {
+        let model = current_model(&app);
+        let store = app.clone();
+        let tokens = tokio::task::spawn_blocking(move || model_context(&store, &model))
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
+        run::execute(app.task.clone(), app.pi_agent_dir.clone(), tokens).await;
+    });
     StatusCode::ACCEPTED
 }
 
@@ -338,6 +347,61 @@ async fn describe_model(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ContextRequest {
+    context_tokens: Option<u32>,
+}
+
+async fn set_model_context(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<ContextRequest>,
+) -> StatusCode {
+    if request
+        .context_tokens
+        .is_some_and(|tokens| !context::PRESETS.contains(&tokens))
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+    let model = {
+        let snapshot = app.task.borrow();
+        if !matches_selection(&snapshot, &headers) || snapshot.busy() {
+            return StatusCode::CONFLICT;
+        }
+        let Some(model) = snapshot.model() else {
+            return StatusCode::CONFLICT;
+        };
+        model.to_owned()
+    };
+    let store = app.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.benchmarks.set_context(model, request.context_tokens)
+    })
+    .await
+    {
+        Ok(Ok(())) => {
+            app.task.send_modify(run::Snapshot::model_record_changed);
+            StatusCode::NO_CONTENT
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn current_model(app: &App) -> String {
+    app.task
+        .borrow()
+        .model()
+        .expect("running operation has a model")
+        .to_owned()
+}
+
+fn model_context(app: &App, model: &str) -> Result<Option<u32>, String> {
+    app.benchmarks
+        .get(model)
+        .map(|record| record.context_tokens)
+        .map_err(|error| format!("Не удалось прочитать настройки модели: {error}"))
+}
+
 async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
     if !app.task.send_if_modified(|snapshot| {
         matches_selection(snapshot, &headers) && snapshot.begin_benchmark()
@@ -346,14 +410,10 @@ async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> Sta
     }
     tokio::spawn(async move {
         let store = app.clone();
-        let model = app
-            .task
-            .borrow()
-            .model()
-            .expect("benchmark has a model")
-            .to_owned();
+        let model = current_model(&app);
         let result = tokio::task::spawn_blocking(move || {
-            let measurement = benchmark::measure(&model)?;
+            let tokens = model_context(&store, &model)?;
+            let measurement = benchmark::measure(&model, tokens)?;
             store
                 .benchmarks
                 .save(model, measurement)
@@ -405,15 +465,18 @@ fn change_model(app: Arc<App>, headers: &HeaderMap, action: telemetry::ModelActi
     }
 
     tokio::spawn(async move {
-        let model = app
-            .task
-            .borrow()
-            .model()
-            .expect("model action has a selection")
-            .to_owned();
-        let result = tokio::task::spawn_blocking(move || telemetry::change_model(&model, action))
-            .await
-            .unwrap_or_else(|error| Err(error.to_string()));
+        let model = current_model(&app);
+        let store = app.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let tokens = if matches!(action, telemetry::ModelAction::Pin) {
+                model_context(&store, &model)?
+            } else {
+                None
+            };
+            telemetry::change_model(&model, action, tokens)
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
         app.metrics.lock().await.invalidate();
         app.task
             .send_modify(|snapshot| snapshot.finish_model_action(action, result));

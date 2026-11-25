@@ -6,6 +6,8 @@ const modelList = get('model-list');
 const benchmarkRun = get('benchmark-run');
 const description = get('model-description');
 const saveDescription = get('save-description');
+const contextSize = get('context-size');
+const saveContext = get('save-context');
 const ramExpand = get('ram-expand');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
@@ -16,6 +18,7 @@ const whole = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const benchmarkDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
+const contextPresets = [null, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 let stream;
 let state;
 let metrics;
@@ -31,6 +34,7 @@ let modelRows = new Map();
 let benchmarkRecord;
 let benchmarkRead = 0;
 let descriptionSaving = false;
+let contextSaving = false;
 let ramTimer;
 let readingRam = false;
 let detailedRam;
@@ -49,7 +53,7 @@ function connectionState(value, label) {
 
 function updateControls() {
   const blocked = !state || connection.dataset.state !== 'online' || pending || selectingModel != null ||
-    modelSubmitting != null || state.model_action != null || state.benchmark_running || state.status === 'running';
+    modelSubmitting != null || state.model_action != null || state.benchmark_running || contextSaving || state.status === 'running';
   const installed = metrics?.installed_models?.includes(state?.model);
   runButton.disabled = blocked || !installed;
   pinModel.disabled = blocked || !installed || metrics?.models == null;
@@ -58,6 +62,8 @@ function updateControls() {
   description.disabled = !installed || !benchmarkRecord || descriptionSaving;
   saveDescription.disabled = description.disabled || description.value === benchmarkRecord?.description ||
     connection.dataset.state !== 'online';
+  contextSize.disabled = blocked || !installed || !benchmarkRecord;
+  saveContext.disabled = contextSize.disabled || contextPresets[contextSize.value] === benchmarkRecord?.context_tokens;
   for (const { button } of modelRows.values()) button.disabled = blocked;
 }
 
@@ -137,6 +143,45 @@ pinModel.addEventListener('change', () => {
 
 unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
 benchmarkRun.addEventListener('click', () => changeModel('benchmark', '/model/benchmark'));
+contextSize.addEventListener('input', () => {
+  get('context-feedback').textContent = '';
+  renderContextChoice();
+  updateControls();
+});
+get('context-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (saveContext.disabled || !state?.model) return;
+  const model = state.model;
+  const tokens = contextPresets[contextSize.value];
+  const feedback = get('context-feedback');
+  contextSaving = true;
+  feedback.textContent = '';
+  updateControls();
+  try {
+    const response = await postModel('/model/context', model, { context_tokens: tokens });
+    if (!response.ok) throw new Error(modelResponseError(response));
+    if (state?.model === model) {
+      if (benchmarkRecord) benchmarkRecord.context_tokens = tokens;
+      feedback.textContent = 'Сохранено';
+    }
+  } catch (error) {
+    if (state?.model === model) feedback.textContent = error.message;
+  } finally {
+    contextSaving = false;
+    updateControls();
+  }
+});
+
+function contextLabel(tokens) {
+  return tokens == null ? 'Авто' : `${whole.format(tokens)} токенов`;
+}
+
+function renderContextChoice() {
+  const label = contextLabel(contextPresets[contextSize.value]);
+  get('context-choice').textContent = label;
+  contextSize.setAttribute('aria-valuetext', label);
+}
+
 description.addEventListener('input', updateControls);
 get('model-description-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -163,6 +208,9 @@ async function readBenchmark(model, modelChanged) {
   if (modelChanged) {
     benchmarkRecord = undefined;
     description.value = '';
+    contextSize.value = '0';
+    get('context-feedback').textContent = '';
+    renderContextChoice();
     renderBenchmark('Загружаем результаты…');
   }
   if (!model) return;
@@ -172,6 +220,10 @@ async function readBenchmark(model, modelChanged) {
     const record = await response.json();
     if (request !== benchmarkRead) return;
     if (description.value === (benchmarkRecord?.description ?? '')) description.value = record.description;
+    if (contextPresets[contextSize.value] === (benchmarkRecord?.context_tokens ?? null)) {
+      contextSize.value = String(Math.max(0, contextPresets.indexOf(record.context_tokens)));
+      renderContextChoice();
+    }
     benchmarkRecord = record;
     renderBenchmark();
   } catch {
@@ -192,6 +244,7 @@ function renderBenchmark(message) {
     const elapsed = (ms) => ms < 1000 ? `${oneDecimal.format(ms)} мс` : `${oneDecimal.format(ms / 1000)} с`;
     const rate = (tokens) => tokens == null ? '—' : `${oneDecimal.format(tokens)} ток/с`;
     const rows = [
+      ['Контекст прогона', contextLabel(result.context_tokens)],
       ['Загрузка в этом прогоне', elapsed(result.load_ms)],
       ['Последняя холодная загрузка', cold ? elapsed(cold.load_ms) : '—'],
       ['Скорость генерации', rate(result.generated_tokens_per_second)],
@@ -276,7 +329,9 @@ function meter(node, value) {
 }
 
 function loadedModel(models, name) {
-  return models?.find((model) => model.name === name || model.name === `${name}:latest` || `${model.name}:latest` === name);
+  const matches = models?.filter((model) => model.name === name || model.name === `${name}:latest` || `${model.name}:latest` === name);
+  const desired = name === state?.model ? benchmarkRecord?.context_tokens : null;
+  return matches?.find((model) => desired != null && model.context_length === desired) ?? matches?.[0];
 }
 
 function renderModelList(names, loaded) {

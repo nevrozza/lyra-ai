@@ -14,7 +14,7 @@ use tokio::{
     sync::watch,
 };
 
-use crate::telemetry::ModelAction;
+use crate::{context, telemetry::ModelAction};
 
 const PROMPT: &str = "Create smoke.txt in the current directory with exactly this line: Pi работает\nThen use the read tool to read the file and report its content. Only access this file.";
 const EXPECTED: &str = "Pi работает";
@@ -93,7 +93,7 @@ impl Snapshot {
         self.model.as_deref()
     }
 
-    fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         self.status == "running" || self.model_action.is_some() || self.benchmark_running
     }
 
@@ -136,9 +136,13 @@ impl Snapshot {
     pub fn finish_benchmark(&mut self, result: Result<(), String>) {
         self.benchmark_running = false;
         match result {
-            Ok(()) => self.benchmark_revision += 1,
+            Ok(()) => self.model_record_changed(),
             Err(error) => self.model_error = Some(error),
         }
+    }
+
+    pub fn model_record_changed(&mut self) {
+        self.benchmark_revision += 1;
     }
 
     fn log(&mut self, at_ms: u128, kind: &'static str, mut text: String) {
@@ -150,14 +154,21 @@ impl Snapshot {
     }
 }
 
-pub async fn execute(state: watch::Sender<Snapshot>, pi_agent_dir: Option<PathBuf>) {
+pub async fn execute(
+    state: watch::Sender<Snapshot>,
+    pi_agent_dir: Option<PathBuf>,
+    context_tokens: Result<Option<u32>, String>,
+) {
     let started = Instant::now();
     let model = state
         .borrow()
         .model
         .clone()
         .expect("running task has a model");
-    let result = run_pi(&state, &model, pi_agent_dir.as_deref(), started).await;
+    let result = match context_tokens {
+        Ok(tokens) => run_pi(&state, &model, pi_agent_dir.as_deref(), tokens, started).await,
+        Err(error) => Err(error),
+    };
     let elapsed_ms = started.elapsed().as_millis();
     state.send_modify(|state| {
         state.elapsed_ms = Some(elapsed_ms);
@@ -181,6 +192,7 @@ async fn run_pi(
     state: &watch::Sender<Snapshot>,
     model: &str,
     pi_agent_dir: Option<&Path>,
+    context_tokens: Option<u32>,
     started: Instant,
 ) -> Result<(), String> {
     let workspace = tokio::task::spawn_blocking(create_workspace)
@@ -189,12 +201,19 @@ async fn run_pi(
         .map_err(|error| format!("Не удалось создать тестовую папку: {error}"))?;
     state.send_modify(|state| state.workspace = Some(workspace.display().to_string()));
 
-    if let Some(directory) = pi_agent_dir {
-        configure_pi(directory, model)
+    let temporary_config = workspace.join("pi-agent");
+    let config = pi_agent_dir.or(context_tokens.map(|_| temporary_config.as_path()));
+    let source = model.to_owned();
+    let backend =
+        tokio::task::spawn_blocking(move || context::backend_model(&source, context_tokens))
+            .await
+            .map_err(|error| error.to_string())??;
+    if let Some(directory) = config {
+        configure_pi(directory, &backend, model, context_tokens)
             .await
             .map_err(|error| format!("Не удалось настроить модель для Pi: {error}"))?;
     }
-    let mut child = spawn_pi(&workspace, model, pi_agent_dir).map_err(|error| {
+    let mut child = spawn_pi(&workspace, &backend, config).map_err(|error| {
         format!("Не удалось запустить Pi. Проверьте `pi --version` в терминале: {error}")
     })?;
     let mut stdin = child.stdin.take().expect("piped stdin");
@@ -332,14 +351,25 @@ fn create_workspace() -> io::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-async fn configure_pi(directory: &Path, model: &str) -> io::Result<()> {
+async fn configure_pi(
+    directory: &Path,
+    model: &str,
+    name: &str,
+    context_tokens: Option<u32>,
+) -> io::Result<()> {
+    let mut entry = serde_json::json!({ "id": model });
+    if let Some(tokens) = context_tokens {
+        entry["name"] = serde_json::json!(name);
+        entry["contextWindow"] = serde_json::json!(tokens);
+        entry["maxTokens"] = serde_json::json!((tokens / 2).min(16_384));
+    }
     let config = serde_json::json!({
         "providers": {
             "ollama": {
                 "baseUrl": "http://127.0.0.1:11434/v1",
                 "api": "openai-completions",
                 "apiKey": "ollama",
-                "models": [{ "id": model }]
+                "models": [entry]
             }
         }
     });
