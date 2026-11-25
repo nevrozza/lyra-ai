@@ -147,6 +147,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .route("/metrics", get(metrics))
         .route("/ram", get(ram_usage))
         .route("/run", post(start))
+        .route("/shutdown", post(notify_shutdown))
         .route("/model/pin", post(pin_model))
         .route("/model/unload", post(unload_model))
         .route("/model/select", post(select_model))
@@ -236,12 +237,23 @@ async fn local_only(State(app): State<Arc<App>>, request: Request, next: Next) -
     if !valid_host || (request.method() == axum::http::Method::POST && !valid_origin) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if request.method() == axum::http::Method::POST
+        && request.uri().path() != "/shutdown"
+        && app.task.borrow().closed()
+    {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+async fn notify_shutdown(State(app): State<Arc<App>>) -> StatusCode {
+    app.task.send_modify(run::Snapshot::close);
+    StatusCode::NO_CONTENT
 }
 
 async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
@@ -269,7 +281,9 @@ async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
         |(mut rx, initial)| async move {
             if !initial {
                 rx.changed().await.ok()?;
-                tokio::time::sleep(Duration::from_millis(180)).await;
+                if !rx.borrow().closed() {
+                    tokio::time::sleep(Duration::from_millis(180)).await;
+                }
             }
             let data = serde_json::to_string(&*rx.borrow_and_update()).ok()?;
             Some((
@@ -316,11 +330,11 @@ async fn pin_model(
     } else {
         telemetry::ModelAction::Unpin
     };
-    change_model(app, &headers, action)
+    change_model(app, &headers, action).await
 }
 
 async fn unload_model(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
-    change_model(app, &headers, telemetry::ModelAction::Unload)
+    change_model(app, &headers, telemetry::ModelAction::Unload).await
 }
 
 #[derive(serde::Deserialize)]
@@ -352,15 +366,9 @@ async fn describe_model(
     if request.description.chars().count() > 2_000 {
         return StatusCode::BAD_REQUEST;
     }
-    let model = {
-        let snapshot = app.task.borrow();
-        if !matches_selection(&snapshot, &headers) {
-            return StatusCode::CONFLICT;
-        }
-        let Some(model) = snapshot.model() else {
-            return StatusCode::CONFLICT;
-        };
-        model.to_owned()
+    let model = match control_model(&app, &headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
     };
     match tokio::task::spawn_blocking(move || app.benchmarks.describe(model, request.description))
         .await
@@ -404,16 +412,13 @@ async fn set_model_context(
     {
         return StatusCode::BAD_REQUEST;
     }
-    let model = {
-        let snapshot = app.task.borrow();
-        if !matches_selection(&snapshot, &headers) || snapshot.busy() {
-            return StatusCode::CONFLICT;
-        }
-        let Some(model) = snapshot.model() else {
-            return StatusCode::CONFLICT;
-        };
-        model.to_owned()
+    let model = match control_model(&app, &headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
     };
+    if app.task.borrow().busy() {
+        return StatusCode::CONFLICT;
+    }
     let store = app.clone();
     match tokio::task::spawn_blocking(move || {
         store.benchmarks.set_context(model, request.context_tokens)
@@ -444,14 +449,17 @@ fn model_context(app: &App, model: &str) -> Result<Option<u32>, String> {
 }
 
 async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    let model = match control_model(&app, &headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
+    };
     if !app.task.send_if_modified(|snapshot| {
-        matches_selection(snapshot, &headers) && snapshot.begin_benchmark()
+        matches_selection(snapshot, &headers) && snapshot.begin_benchmark(model.clone())
     }) {
         return StatusCode::CONFLICT;
     }
     tokio::spawn(async move {
         let store = app.clone();
-        let model = current_model(&app);
         let result = tokio::task::spawn_blocking(move || {
             let tokens = model_context(&store, &model)?;
             let measurement = benchmark::measure(&model, tokens)?;
@@ -498,15 +506,47 @@ fn matches_selection(snapshot: &run::Snapshot, headers: &HeaderMap) -> bool {
     })
 }
 
-fn change_model(app: Arc<App>, headers: &HeaderMap, action: telemetry::ModelAction) -> StatusCode {
+async fn control_model(app: &App, headers: &HeaderMap) -> Result<String, StatusCode> {
+    let explicit = if let Some(value) = headers.get("x-lyra-target-model") {
+        let model = model_name(value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?)
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let installed = tokio::task::spawn_blocking(telemetry::installed_models)
+            .await
+            .ok()
+            .flatten()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        if !installed.contains(&model) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Some(model)
+    } else {
+        None
+    };
+    let snapshot = app.task.borrow();
+    if !matches_selection(&snapshot, headers) || snapshot.closed() {
+        return Err(StatusCode::CONFLICT);
+    }
+    explicit
+        .or_else(|| snapshot.model().map(str::to_owned))
+        .ok_or(StatusCode::CONFLICT)
+}
+
+async fn change_model(
+    app: Arc<App>,
+    headers: &HeaderMap,
+    action: telemetry::ModelAction,
+) -> StatusCode {
+    let model = match control_model(&app, headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
+    };
     if !app.task.send_if_modified(|snapshot| {
-        matches_selection(snapshot, headers) && snapshot.begin_model_action(action)
+        matches_selection(snapshot, headers) && snapshot.begin_model_action(model.clone(), action)
     }) {
         return StatusCode::CONFLICT;
     }
 
     tokio::spawn(async move {
-        let model = current_model(&app);
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
             let tokens = if matches!(action, telemetry::ModelAction::Pin) {

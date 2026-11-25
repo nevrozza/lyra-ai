@@ -39,6 +39,7 @@ namespace LyraTray
         private Stage stage = Stage.Building;
         private long deadline;
         private bool stopped;
+        private bool quitting;
         private bool openingDashboard;
         private long lastDashboardLaunch;
         private string waitingFor;
@@ -106,7 +107,7 @@ namespace LyraTray
         private void ShowTray()
         {
             menu = new ContextMenuStrip();
-            menu.Items.Add("Quit", null, delegate { ExitThread(); });
+            menu.Items.Add("Quit", null, async delegate { await QuitAsync(); });
             trayImage = new Icon(Path.Combine(root, "assets", "lyra.ico"));
             icon = new NotifyIcon { Icon = trayImage, Text = "Lyra AI: open dashboard", ContextMenuStrip = menu };
             icon.MouseClick += delegate(object sender, MouseEventArgs click)
@@ -284,13 +285,13 @@ namespace LyraTray
 
         private async void OpenDashboard()
         {
-            if (openingDashboard) return;
+            if (openingDashboard || quitting) return;
             if (lastDashboardLaunch != 0 && Stopwatch.GetTimestamp() - lastDashboardLaunch < 2 * Stopwatch.Frequency) return;
             openingDashboard = true;
             try
             {
                 IntPtr window = await Task.Run(() => BrowserTab.SelectExisting());
-                if (stopped) return;
+                if (stopped || quitting) return;
                 if (window != IntPtr.Zero)
                 {
                     BrowserTab.Activate(window);
@@ -304,6 +305,28 @@ namespace LyraTray
                 if (!stopped) icon.ShowBalloonTip(5000, "Lyra AI", error.Message, ToolTipIcon.Error);
             }
             finally { openingDashboard = false; }
+        }
+
+        private async Task QuitAsync()
+        {
+            if (quitting || stopped) return;
+            quitting = true;
+            timer.Stop();
+            try
+            {
+                using (var request = new HttpRequestMessage(HttpMethod.Post, dashboard + "shutdown"))
+                {
+                    request.Headers.TryAddWithoutValidation("Origin", dashboard.TrimEnd('/'));
+                    using (var response = await http.SendAsync(request))
+                    {
+                        // Keep the dashboard alive long enough to deliver its final SSE update.
+                        if (response.IsSuccessStatusCode) await Task.Delay(500);
+                    }
+                }
+            }
+            catch (HttpRequestException) { }
+            catch (TaskCanceledException) { }
+            finally { ExitThread(); }
         }
 
         protected override void ExitThreadCore()

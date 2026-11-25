@@ -8,7 +8,7 @@ const description = get('model-description');
 const saveDescription = get('save-description');
 const contextSize = get('context-size');
 const saveContext = get('save-context');
-const codexMode = get('mode-codex');
+const orchestratorMode = get('mode-orchestrator');
 const ramExpand = get('ram-expand');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
@@ -21,6 +21,7 @@ const benchmarkDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', ti
 const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 const contextPresets = [null, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 let stream;
+let applicationClosed = false;
 let state;
 let metrics;
 let lastTimeline;
@@ -57,26 +58,27 @@ function connectionState(value, label) {
 }
 
 function updateControls() {
-  const blocked = codexMode.checked || !state || connection.dataset.state !== 'online' || pending || selectingModel != null ||
+  const blocked = applicationClosed || !state || connection.dataset.state !== 'online' || pending || selectingModel != null ||
     modelSubmitting != null || state.model_action != null || state.benchmark_running || contextSaving || state.status === 'running';
-  const installed = metrics?.installed_models?.includes(state?.model);
-  runButton.disabled = blocked || !installed;
+  const installed = metrics?.installed_models?.includes(observedModel);
+  runButton.disabled = blocked || orchestratorMode.checked || !metrics?.installed_models?.includes(state?.model);
   pinModel.disabled = blocked || !installed || metrics?.models == null;
-  unloadModel.disabled = blocked || !installed || !loadedModel(metrics?.models, state?.model);
+  unloadModel.disabled = blocked || !installed || !loadedModel(metrics?.models, observedModel);
   benchmarkRun.disabled = blocked || !installed || metrics?.models == null;
-  description.readOnly = codexMode.checked;
-  description.disabled = !metrics?.installed_models?.includes(observedModel) || !benchmarkRecord || descriptionSaving;
-  saveDescription.disabled = codexMode.checked || description.disabled || description.value === benchmarkRecord?.description ||
+  description.readOnly = applicationClosed;
+  description.disabled = !installed || !benchmarkRecord || descriptionSaving;
+  saveDescription.disabled = applicationClosed || description.disabled || description.value === benchmarkRecord?.description ||
     connection.dataset.state !== 'online';
   contextSize.disabled = blocked || !installed || !benchmarkRecord;
   saveContext.disabled = contextSize.disabled || contextPresets[contextSize.value] === benchmarkRecord?.context_tokens;
-  for (const { button } of modelRows.values()) button.disabled = !codexMode.checked && blocked;
+  for (const { button } of modelRows.values()) button.disabled = applicationClosed || (!orchestratorMode.checked && blocked);
+  get('model-mode').disabled = applicationClosed;
 }
 
 get('model-mode').addEventListener('change', () => renderModel(metrics?.models));
 
 function displayedModel() {
-  if (!codexMode.checked) return state?.model;
+  if (!orchestratorMode.checked) return state?.model;
   const installed = metrics?.installed_models;
   if (installed?.includes(inspectedModel)) return inspectedModel;
   return installed?.includes(state?.model) ? state.model : installed?.[0];
@@ -129,9 +131,48 @@ function renderRun(next) {
 
 function connect() {
   stream = new EventSource('/events');
-  stream.onopen = () => connectionState('online', 'Подключено');
-  stream.onerror = () => connectionState('waiting', 'Переподключение');
-  stream.onmessage = (event) => renderRun(JSON.parse(event.data));
+  stream.onopen = () => {
+    if (!applicationClosed) connectionState('online', 'Подключено');
+  };
+  stream.onerror = () => {
+    if (!applicationClosed) connectionState('waiting', 'Переподключение');
+  };
+  stream.onmessage = (event) => {
+    const next = JSON.parse(event.data);
+    if (next.closed) {
+      showClosed();
+      return;
+    }
+    const restarted = applicationClosed;
+    applicationClosed = false;
+    if (restarted) {
+      selectingModel = undefined;
+      connectionState('online', 'Подключено');
+    }
+    renderRun(next);
+    if (restarted) {
+      scheduleMetrics(0);
+      scheduleRam(0);
+    }
+  };
+}
+
+function showClosed() {
+  applicationClosed = true;
+  clearTimeout(metricsTimer);
+  clearTimeout(ramTimer);
+  connectionState('closed', 'Остановлена');
+  get('phase').dataset.status = 'closed';
+  get('phase').textContent = 'Lyra закрыта';
+  get('sampled').textContent = 'Остановлено';
+  renderModelList(metrics?.installed_models, metrics?.models);
+  runButton.textContent = 'Запустить проверку';
+  if (document.hidden) disconnect();
+}
+
+function disconnect() {
+  stream?.close();
+  stream = undefined;
 }
 
 runButton.addEventListener('click', async () => {
@@ -162,15 +203,15 @@ contextSize.addEventListener('input', () => {
 });
 get('context-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (saveContext.disabled || !state?.model) return;
-  const model = state.model;
+  const model = displayedModel();
+  if (saveContext.disabled || !model) return;
   const tokens = contextPresets[contextSize.value];
   const feedback = get('context-feedback');
   contextSaving = true;
   feedback.textContent = '';
   updateControls();
   try {
-    const response = await postModel('/model/context', model, { context_tokens: tokens });
+    const response = await postModel('/model/context', state?.model, { context_tokens: tokens }, model);
     if (!response.ok) throw new Error(modelResponseError(response));
     if (displayedModel() === model) {
       if (benchmarkRecord) benchmarkRecord.context_tokens = tokens;
@@ -269,14 +310,14 @@ async function readContextEstimate(model) {
 description.addEventListener('input', updateControls);
 get('model-description-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (saveDescription.disabled || !state?.model || !benchmarkRecord) return;
-  const model = state.model;
+  const model = displayedModel();
+  if (saveDescription.disabled || !model || !benchmarkRecord) return;
   const text = description.value;
   descriptionSaving = true;
   modelRequestError = '';
   renderModel(metrics?.models);
   try {
-    const response = await postModel('/model/description', model, { description: text });
+    const response = await postModel('/model/description', state?.model, { description: text }, model);
     if (!response.ok) throw new Error(modelResponseError(response));
     if (displayedModel() === model && benchmarkRecord) benchmarkRecord.description = text;
   } catch (error) {
@@ -344,8 +385,9 @@ function renderBenchmark(message) {
   updateControls();
 }
 
-function postModel(path, selected, payload) {
+function postModel(path, selected, payload, target) {
   const options = { method: 'POST', headers: { 'X-Lyra-Model': selected ?? '' } };
+  if (target && target !== selected) options.headers['X-Lyra-Target-Model'] = target;
   if (payload) {
     options.headers['Content-Type'] = 'application/json';
     options.body = JSON.stringify(payload);
@@ -361,8 +403,9 @@ function modelResponseError(response) {
 }
 
 async function selectModel(model) {
-  if (codexMode.checked) {
+  if (orchestratorMode.checked) {
     inspectedModel = model;
+    modelRequestError = '';
     renderModel(metrics?.models);
     return;
   }
@@ -382,15 +425,17 @@ async function selectModel(model) {
 }
 
 async function changeModel(action, path, payload) {
-  modelSubmitting = action;
+  const model = displayedModel();
+  if (!model) return;
+  modelSubmitting = { model, action };
   modelRequestError = '';
   renderModel(metrics?.models);
   try {
-    const response = await postModel(path, state.model, payload);
+    const response = await postModel(path, state?.model, payload, model);
     if (!response.ok) throw new Error(modelResponseError(response));
   } catch (error) {
     modelSubmitting = undefined;
-    modelRequestError = error.message;
+    if (displayedModel() === model) modelRequestError = error.message;
     renderModel(metrics?.models);
   }
 }
@@ -422,27 +467,80 @@ function loadedModel(models, name) {
   return matches?.find((model) => desired != null && model.context_length === desired) ?? matches?.[0];
 }
 
+function modelStatus(name, models) {
+  const loaded = loadedModel(models, name);
+  const isTaskModel = name === state?.model;
+  const isOperationModel = name === state?.operation_model;
+  const action = modelSubmitting?.model === name ? modelSubmitting.action :
+    isOperationModel ? state?.model_action : undefined;
+  const benchmarking = action === 'benchmark' || (isOperationModel && state?.benchmark_running);
+  const expiry = Date.parse(loaded?.expires_at);
+  const remaining = expiry - Date.now();
+  // Ollama represents indefinite retention with a deadline centuries ahead.
+  const pinned = Boolean(loaded && (Number.isFinite(expiry) && expiry > 0 ? remaining > farFuture : isTaskModel && state?.pinned));
+  let mode = 'idle';
+  let label = 'На диске';
+  if (applicationClosed) {
+    label = 'Остановлена';
+  } else if (benchmarking) {
+    mode = 'running';
+    label = 'Бенчмарк';
+  } else if (isTaskModel && state?.model_working) {
+    mode = 'running';
+    label = 'Работает';
+  } else if (models == null) {
+    mode = 'unknown';
+    label = models === null ? 'Нет связи' : 'Проверяем…';
+  } else if (action === 'unload') {
+    mode = 'loading';
+    label = 'Выгружается';
+  } else if (!loaded && ((isTaskModel && state?.status === 'running') || action === 'pin')) {
+    mode = 'loading';
+    label = 'Загружается';
+  } else if (loaded) {
+    mode = 'resident';
+    label = pinned ? 'В памяти · закреплена' : 'В памяти';
+  }
+  const countdown = mode === 'resident' && !pinned && remaining > 0 ? `до выгрузки ≈ ${duration(remaining)}` : '';
+  return { loaded, mode, label, countdown, pinned, benchmarking, action };
+}
+
 function renderModelList(names, loaded) {
   const installed = names ?? [];
   if (installed.length !== modelRows.size || installed.some((name) => !modelRows.has(name))) {
     modelRows = new Map(installed.map((name) => {
       const row = element('li', '');
       const button = element('button', '');
+      const modelName = element('span', name);
+      modelName.className = 'list-model-name';
+      const badge = element('span', '');
+      badge.className = 'list-model-status';
+      const statusLine = element('span', '');
+      statusLine.className = 'list-model-state';
+      const dot = element('span', '');
+      dot.className = 'model-dot';
+      dot.setAttribute('aria-hidden', 'true');
       const status = element('span', '');
+      const countdown = element('span', '');
+      countdown.className = 'list-model-countdown';
       button.type = 'button';
-      button.append(element('span', name), status);
+      statusLine.append(dot, status);
+      badge.append(statusLine, countdown);
+      button.append(modelName, badge);
       button.addEventListener('click', () => selectModel(name));
       row.append(button);
-      return [name, { row, button, status }];
+      return [name, { row, button, dot, status, countdown }];
     }));
     modelList.replaceChildren(...Array.from(modelRows.values(), ({ row }) => row));
   }
-  for (const [name, { button, status }] of modelRows) {
+  for (const [name, { button, dot, status, countdown }] of modelRows) {
     const selected = name === observedModel;
-    const resident = loadedModel(loaded, name);
+    const view = modelStatus(name, loaded);
     button.setAttribute('aria-pressed', String(selected));
-    status.textContent = name === state?.model && state?.model_working ? 'Работает' :
-      resident ? 'В памяти' : loaded == null ? '—' : 'На диске';
+    dot.dataset.state = view.mode;
+    if (status.textContent !== view.label) status.textContent = view.label;
+    countdown.hidden = !view.countdown;
+    if (countdown.textContent !== view.countdown) countdown.textContent = view.countdown;
   }
   modelList.hidden = installed.length === 0;
   const message = get('model-list-message');
@@ -456,57 +554,19 @@ function renderModel(models, benchmarkUpdated = false) {
   const model = displayedModel();
   const modelChanged = model !== observedModel;
   observedModel = model;
-  if (modelChanged || (benchmarkUpdated && model === state?.model)) readBenchmark(model, modelChanged);
+  if (modelChanged || benchmarkUpdated) readBenchmark(model, modelChanged);
   if (modelChanged) readContextEstimate(model);
   renderModelList(names, models);
-  get('codex-placeholder').hidden = !codexMode.checked;
+  get('models-panel').dataset.mode = orchestratorMode.checked ? 'orchestrator' : 'manual';
+  get('orchestrator-placeholder').hidden = !orchestratorMode.checked;
   get('selected-model').hidden = !names?.includes(model);
   get('model-name').textContent = model ?? '';
   renderContextChoice();
-  const loaded = loadedModel(models, model);
-  const isTaskModel = model === state?.model;
-  const action = isTaskModel ? modelSubmitting ?? state?.model_action : undefined;
-  const benchmarking = action === 'benchmark' || (isTaskModel && state?.benchmark_running);
+  const { loaded, action, benchmarking, pinned } = modelStatus(model, models);
   benchmarkRun.textContent = benchmarking ? 'Бенчмарк выполняется…' : 'Запустить бенчмарк';
-  const expiry = Date.parse(loaded?.expires_at);
-  const remaining = expiry - Date.now();
-  // Ollama represents indefinite retention with a deadline centuries ahead.
-  const pinned = Boolean(loaded && (Number.isFinite(expiry) && expiry > 0 ? remaining > farFuture : isTaskModel && state?.pinned));
-  const dot = get('model-dot');
-  const status = get('model-state');
-  let mode = 'idle';
-  let label = 'Модель выгружена';
-  if (benchmarking) {
-    mode = 'running';
-    label = 'Выполняется бенчмарк';
-  } else if (isTaskModel && state?.model_working) {
-    mode = 'running';
-    label = 'Работает';
-  } else if (models === null) {
-    mode = 'unknown';
-    label = 'Проверьте, запущена ли Ollama';
-  } else if (action === 'unload') {
-    mode = 'loading';
-    label = 'Выгружается';
-  } else if (!loaded && ((isTaskModel && state?.status === 'running') || action === 'pin')) {
-    mode = 'loading';
-    label = 'Загружается';
-  } else if (loaded) {
-    mode = 'resident';
-    label = pinned ? 'В памяти · закреплена' : 'В памяти';
-  } else if (models === undefined) {
-    mode = 'unknown';
-    label = 'Проверяем Ollama…';
-  }
-  dot.dataset.state = mode;
-  dot.parentElement.title = label;
-  status.classList.toggle('visually-hidden', mode === 'idle');
-  if (status.textContent !== label) status.textContent = label;
-  const countdown = get('model-countdown');
-  countdown.textContent = mode === 'resident' && !pinned && remaining > 0 ? `· до выгрузки ≈ ${duration(remaining)}` : '';
   get('ollama').textContent = models === null ? 'Ollama недоступна' : 'Ollama';
   pinModel.checked = action === 'pin' || (action !== 'unpin' && pinned);
-  const modelError = isTaskModel ? modelRequestError || state?.model_error : '';
+  const modelError = modelRequestError || (model === state?.operation_model ? state?.model_error : '');
   get('model-error').hidden = !modelError;
   get('model-error').textContent = modelError ?? '';
   get('model-details').hidden = !loaded;
@@ -561,7 +621,7 @@ function renderRamTotal(ram) {
 
 function scheduleMetrics(delay) {
   clearTimeout(metricsTimer);
-  if (document.hidden) return;
+  if (applicationClosed || document.hidden) return;
   if (polling) {
     metricsRefreshPending ||= delay === 0;
   } else {
@@ -570,14 +630,15 @@ function scheduleMetrics(delay) {
 }
 
 async function readMetrics() {
-  if (document.hidden) return;
+  if (applicationClosed || document.hidden) return;
   polling = true;
   try {
     const response = await fetch('/metrics');
     if (!response.ok) throw new Error();
-    renderMetrics(await response.json());
+    const next = await response.json();
+    if (!applicationClosed) renderMetrics(next);
   } catch {
-    get('sampled').textContent = 'Нет связи';
+    if (!applicationClosed) get('sampled').textContent = 'Нет связи';
   } finally {
     polling = false;
     const delay = metricsRefreshPending ? 0 : (state?.status === 'running' ? 5_000 : 15_000);
@@ -588,11 +649,11 @@ async function readMetrics() {
 
 function scheduleRam(delay) {
   clearTimeout(ramTimer);
-  if (!document.hidden && ramExpand.open && !readingRam) ramTimer = setTimeout(readRam, delay);
+  if (!applicationClosed && !document.hidden && ramExpand.open && !readingRam) ramTimer = setTimeout(readRam, delay);
 }
 
 async function readRam() {
-  if (document.hidden || !ramExpand.open) return;
+  if (applicationClosed || document.hidden || !ramExpand.open) return;
   readingRam = true;
   const list = get('ram-list');
   const message = get('ram-message');
@@ -600,7 +661,7 @@ async function readRam() {
     const response = await fetch('/ram');
     if (!response.ok) throw new Error();
     const usage = await response.json();
-    if (!ramExpand.open || document.hidden) return;
+    if (applicationClosed || !ramExpand.open || document.hidden) return;
     const apps = usage.applications;
     detailedRam = usage.physical;
     renderRamTotal(detailedRam ?? metrics?.ram);
@@ -615,6 +676,7 @@ async function readRam() {
     message.hidden = Boolean(apps?.length);
     message.textContent = apps === null ? 'Данные по приложениям недоступны.' : 'Нет приложений от 300 МиБ.';
   } catch {
+    if (applicationClosed) return;
     detailedRam = undefined;
     renderRamTotal(metrics?.ram);
     for (const id of ['ram-windows', 'ram-other', 'ram-unattributed']) renderRamRow(id, null);
@@ -642,8 +704,8 @@ ramExpand.addEventListener('toggle', () => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    stream?.close();
-    stream = undefined;
+    // Keep the event stream open until Quit, even with telemetry polling paused.
+    if (applicationClosed) disconnect();
     clearTimeout(metricsTimer);
     clearTimeout(ramTimer);
   } else {
@@ -654,12 +716,12 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setInterval(() => {
-  if (document.hidden) return;
+  if (applicationClosed || document.hidden) return;
   if (state?.status === 'running') renderTime();
-  if (get('model-countdown').textContent) renderModel(metrics?.models);
+  if ([...modelRows.values()].some(({ countdown }) => !countdown.hidden)) {
+    renderModelList(metrics?.installed_models, metrics?.models);
+  }
 }, 1_000);
 
-if (!document.hidden) {
-  connect();
-  scheduleMetrics(0);
-}
+connect();
+scheduleMetrics(0);

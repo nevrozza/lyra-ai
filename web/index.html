@@ -38,26 +38,21 @@
       </section>
 
       <aside class="sidebar" aria-label="Телеметрия">
-        <section class="panel" aria-labelledby="model-title">
+        <section id="models-panel" class="panel models-panel" aria-labelledby="model-title">
           <header class="panel-header"><h2 id="model-title">Модели</h2><span id="ollama" class="service">Ollama</span></header>
           <div class="panel-body">
             <fieldset id="model-mode" class="model-mode">
               <legend class="visually-hidden">Кто выбирает модель</legend>
               <label><input type="radio" name="model-mode" value="manual" class="visually-hidden" checked><span>Вручную</span></label>
-              <label><input id="mode-codex" type="radio" name="model-mode" value="codex" class="visually-hidden"><span>Codex</span></label>
+              <label><input id="mode-orchestrator" type="radio" name="model-mode" value="orchestrator" class="visually-hidden"><span>Оркестратор</span></label>
             </fieldset>
-            <p id="codex-placeholder" class="secondary codex-placeholder" hidden>
-              Интеграция с Codex пока в разработке. Выбери модель из списка, чтобы посмотреть её сохранённые настройки и состояние.
+            <p id="orchestrator-placeholder" class="secondary orchestrator-placeholder" hidden>
+              Интеграция с оркестратором пока в разработке. Настройки моделей доступны вручную.
             </p>
             <ul id="model-list" class="model-list" aria-label="Установленные модели Ollama" hidden></ul>
             <p id="model-list-message" class="secondary">Получаем список моделей…</p>
             <div id="selected-model" hidden>
               <strong id="model-name" class="model-name">—</strong>
-              <div class="model-status secondary">
-                <span id="model-dot" class="model-dot" data-state="unknown" aria-hidden="true"></span>
-                <span id="model-state" role="status">Проверяем Ollama…</span>
-                <span id="model-countdown"></span>
-              </div>
               <dl id="model-details" class="facts" hidden>
                 <div><dt>Контекст</dt><dd id="context">—</dd></div>
                 <div><dt>VRAM модели</dt><dd id="model-vram">—</dd></div>

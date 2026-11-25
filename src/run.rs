@@ -24,9 +24,11 @@ const EVENT_LIMIT: usize = 32;
 #[derive(Serialize)]
 pub struct Snapshot {
     model: Option<String>,
+    closed: bool,
     model_working: bool,
     pinned: Option<bool>,
     model_action: Option<ModelAction>,
+    operation_model: Option<String>,
     model_error: Option<String>,
     benchmark_running: bool,
     benchmark_revision: u64,
@@ -51,9 +53,11 @@ impl Snapshot {
     pub fn new(model: Option<String>) -> Self {
         Self {
             model,
+            closed: false,
             model_working: false,
             pinned: None,
             model_action: None,
+            operation_model: None,
             model_error: None,
             benchmark_running: false,
             benchmark_revision: 0,
@@ -93,8 +97,19 @@ impl Snapshot {
         self.model.as_deref()
     }
 
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
+
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
     pub fn busy(&self) -> bool {
-        self.status == "running" || self.model_action.is_some() || self.benchmark_running
+        self.closed
+            || self.status == "running"
+            || self.model_action.is_some()
+            || self.benchmark_running
     }
 
     pub fn select_model(&mut self, model: String) -> bool {
@@ -107,11 +122,12 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_model_action(&mut self, action: ModelAction) -> bool {
-        if self.model.is_none() || self.busy() {
+    pub fn begin_model_action(&mut self, model: String, action: ModelAction) -> bool {
+        if self.busy() {
             return false;
         }
         self.model_action = Some(action);
+        self.operation_model = Some(model);
         self.model_error = None;
         true
     }
@@ -119,16 +135,20 @@ impl Snapshot {
     pub fn finish_model_action(&mut self, action: ModelAction, result: Result<(), String>) {
         self.model_action = None;
         match result {
-            Ok(()) => self.pinned = Some(matches!(action, ModelAction::Pin)),
+            Ok(()) if self.operation_model == self.model => {
+                self.pinned = Some(matches!(action, ModelAction::Pin))
+            }
+            Ok(()) => {}
             Err(error) => self.model_error = Some(error),
         }
     }
 
-    pub fn begin_benchmark(&mut self) -> bool {
-        if self.model.is_none() || self.busy() {
+    pub fn begin_benchmark(&mut self, model: String) -> bool {
+        if self.busy() {
             return false;
         }
         self.benchmark_running = true;
+        self.operation_model = Some(model);
         self.model_error = None;
         true
     }
