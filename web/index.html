@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Локальный агент</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="identity"><span class="mark" aria-hidden="true">›_</span> Локальный агент</div>
+      <div id="connection" class="connection" data-state="waiting"><span></span>Подключение</div>
+    </header>
+
+    <section class="hero" aria-labelledby="title">
+      <div>
+        <h1 id="title">Монитор Pi</h1>
+        <p>Встроенная задача создаёт и читает <code>smoke.txt</code>.</p>
+      </div>
+      <button id="run" type="button" disabled>Запустить проверку</button>
+    </section>
+
+    <div class="layout">
+      <section class="panel activity" aria-labelledby="activity-title">
+        <header class="panel-header"><h2 id="activity-title">Ход выполнения</h2><time id="elapsed">—</time></header>
+        <div id="phase" class="phase" data-status="idle" role="status">Готов к запуску</div>
+        <ol id="timeline" aria-label="События Pi"></ol>
+        <p id="empty" class="empty">События появятся после запуска.</p>
+        <p id="result" class="result" hidden></p>
+        <div id="workspace-row" class="workspace" hidden><span>Тестовая папка</span><code id="workspace"></code></div>
+        <details id="thinking" class="thinking" hidden>
+          <summary>Вывод thinking <span>последний фрагмент</span></summary>
+          <pre id="trace"></pre>
+        </details>
+      </section>
+
+      <aside class="sidebar" aria-label="Телеметрия">
+        <section class="panel" aria-labelledby="model-title">
+          <header class="panel-header"><h2 id="model-title">Модель</h2><span id="ollama" class="service">Ollama</span></header>
+          <div class="panel-body">
+            <strong id="model-name" class="model-name">—</strong>
+            <div id="model-state" class="secondary">Проверяем Ollama…</div>
+            <dl id="model-details" class="facts" hidden>
+              <div><dt>Контекст</dt><dd id="context">—</dd></div>
+              <div><dt>VRAM модели</dt><dd id="model-vram">—</dd></div>
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="system-title">
+          <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
+          <div class="panel-body system">
+            <div class="metric"><label for="cpu">CPU</label><output id="cpu-value" for="cpu">—</output><meter id="cpu" max="100" hidden></meter></div>
+            <div class="metric"><label for="ram">RAM</label><output id="ram-value" for="ram">—</output><meter id="ram" max="100" hidden></meter></div>
+            <div id="gpus" class="gpus"></div>
+            <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>
