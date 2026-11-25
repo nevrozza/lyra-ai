@@ -70,17 +70,23 @@ async fn describe_model(
     headers: HeaderMap,
     Json(request): Json<DescriptionRequest>,
 ) -> StatusCode {
-    if request.description.chars().count() > 2_000 {
-        return StatusCode::BAD_REQUEST;
-    }
     let model = match control_model(&app, &headers).await {
         Ok(model) => model,
         Err(status) => return status,
     };
-    match tokio::task::spawn_blocking(move || app.benchmarks.describe(model, request.description))
-        .await
-    {
-        Ok(Ok(())) => StatusCode::NO_CONTENT,
+    save_description(app, model, request.description).await
+}
+
+pub(super) async fn save_description(app: Arc<App>, model: String, description: String) -> StatusCode {
+    if description.chars().count() > 2_000 {
+        return StatusCode::BAD_REQUEST;
+    }
+    let store = app.clone();
+    match tokio::task::spawn_blocking(move || store.benchmarks.describe(model, description)).await {
+        Ok(Ok(())) => {
+            app.task.send_modify(run::Snapshot::model_record_changed);
+            StatusCode::NO_CONTENT
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -222,7 +228,7 @@ async fn control_model(app: &App, headers: &HeaderMap) -> Result<String, StatusC
         None
     };
     let snapshot = app.task.borrow();
-    if !matches_selection(&snapshot, headers) || snapshot.closed() {
+    if !matches_selection(&snapshot, headers) || snapshot.closed() || snapshot.mode() != run::Mode::Manual {
         return Err(StatusCode::CONFLICT);
     }
     explicit

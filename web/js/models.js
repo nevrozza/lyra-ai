@@ -21,6 +21,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
+  let modeSaving = false;
 
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
@@ -28,12 +29,14 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   });
 
   function isMemoryChanging() {
-    return session.pending || Boolean(modelSubmitting || session.run?.model_action || session.run?.benchmark_running || session.run?.status === 'running');
+    return session.pending || Boolean(modelSubmitting || session.run?.model_action || session.run?.benchmark_running ||
+      session.run?.delegated_model || session.run?.status === 'running');
   }
 
   function isBlocked() {
     return session.closed || !session.run || !session.online || session.pending || selectingModel != null ||
-      modelSubmitting != null || session.run.model_action != null || session.run.benchmark_running || settings.saving || session.run.status === 'running';
+      modelSubmitting != null || session.run.model_action != null || session.run.benchmark_running ||
+      session.run.delegated_model != null || settings.saving || session.run.status === 'running';
   }
 
   function renderControls() {
@@ -52,15 +55,37 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       !session.online;
     settings.updateControls(actionsBlocked, installed);
     list.setDisabled(session.closed || (!readOnly && blocked));
-    get('model-mode').disabled = session.closed;
+    get('model-mode').disabled = session.closed || !session.online || !session.run || modeSaving;
   }
 
-  get('model-mode').addEventListener('change', () => {
-    if (orchestratorMode.checked) {
+  function syncMode() {
+    if (!session.run) return;
+    const readOnly = session.run.mode === 'orchestrator';
+    if (readOnly && get('models-panel').dataset.mode !== 'orchestrator') {
       description.value = benchmarkRecord?.description ?? '';
       settings.reset(benchmarkRecord?.context_tokens);
     }
-    renderModel(session.metrics?.models);
+    get(readOnly ? 'mode-orchestrator' : 'mode-manual').checked = true;
+  }
+
+  get('model-mode').addEventListener('change', async () => {
+    const mode = orchestratorMode.checked ? 'orchestrator' : 'manual';
+    syncMode();
+    modeSaving = true;
+    refreshControls();
+    try {
+      const response = await fetch('/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mode),
+      });
+      if (!response.ok) throw new Error(modelResponseError(response));
+    } catch (error) {
+      modelRequestError = `Не удалось сменить режим. ${error.message}`;
+    } finally {
+      modeSaving = false;
+      renderModel(session.metrics?.models);
+    }
   });
 
   function displayedModel() {
@@ -195,6 +220,9 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     } else if (benchmarking) {
       mode = 'running';
       label = 'Бенчмарк';
+    } else if (name != null && name === session.run?.delegated_model) {
+      mode = 'running';
+      label = 'Запрос Codex';
     } else if (isTaskModel && session.run?.model_working) {
       mode = 'running';
       label = 'Работает';
@@ -221,6 +249,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   }
 
   function renderModel(models, benchmarkUpdated = false) {
+    syncMode();
     const names = session.metrics?.installed_models;
     const model = displayedModel();
     const modelChanged = model !== observedModel;

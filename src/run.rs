@@ -21,11 +21,21 @@ const EXPECTED: &str = "Pi работает";
 const TRACE_LIMIT: usize = 6_000;
 const EVENT_LIMIT: usize = 32;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Manual,
+    Orchestrator,
+}
+
 #[derive(Serialize)]
 pub struct Snapshot {
     model: Option<String>,
+    mode: Mode,
     closed: bool,
     model_working: bool,
+    delegated_model: Option<String>,
     pinned: Option<bool>,
     model_action: Option<ModelAction>,
     operation_model: Option<String>,
@@ -54,8 +64,10 @@ impl Snapshot {
     pub fn new(model: Option<String>) -> Self {
         Self {
             model,
+            mode: Mode::default(),
             closed: false,
             model_working: false,
+            delegated_model: None,
             pinned: None,
             model_action: None,
             operation_model: None,
@@ -75,10 +87,11 @@ impl Snapshot {
     }
 
     pub fn start(&mut self) -> bool {
-        if self.model.is_none() || self.busy() {
+        if self.mode != Mode::Manual || self.model.is_none() || self.busy() {
             return false;
         }
         *self = Self {
+            mode: self.mode,
             pinned: self.pinned,
             benchmark_revision: self.benchmark_revision,
             ..Self::new(self.model.clone())
@@ -99,6 +112,18 @@ impl Snapshot {
         self.model.as_deref()
     }
 
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) -> bool {
+        if self.closed || self.mode == mode {
+            return false;
+        }
+        self.mode = mode;
+        true
+    }
+
     pub fn closed(&self) -> bool {
         self.closed
     }
@@ -110,12 +135,13 @@ impl Snapshot {
     pub fn busy(&self) -> bool {
         self.closed
             || self.status == "running"
+            || self.delegated_model.is_some()
             || self.model_action.is_some()
             || self.benchmark_running
     }
 
     pub fn select_model(&mut self, model: String) -> bool {
-        if self.busy() {
+        if self.mode != Mode::Manual || self.busy() {
             return false;
         }
         self.model = Some(model);
@@ -124,8 +150,20 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_model_action(&mut self, model: String, action: ModelAction) -> bool {
+    pub fn begin_delegation(&mut self, model: String) -> bool {
         if self.busy() {
+            return false;
+        }
+        self.delegated_model = Some(model);
+        true
+    }
+
+    pub fn finish_delegation(&mut self) {
+        self.delegated_model = None;
+    }
+
+    pub fn begin_model_action(&mut self, model: String, action: ModelAction) -> bool {
+        if self.mode != Mode::Manual || self.busy() {
             return false;
         }
         self.model_action = Some(action);
@@ -146,7 +184,7 @@ impl Snapshot {
     }
 
     pub fn begin_benchmark(&mut self, model: String) -> bool {
-        if self.busy() {
+        if self.mode != Mode::Manual || self.busy() {
             return false;
         }
         self.benchmark_running = true;

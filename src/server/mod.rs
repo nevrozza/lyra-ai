@@ -1,4 +1,5 @@
 mod assets;
+mod mcp;
 mod models;
 mod runtime;
 
@@ -64,6 +65,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     let router = assets::routes()
         .merge(runtime::routes())
         .merge(models::routes())
+        .merge(mcp::routes())
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 
@@ -82,11 +84,14 @@ async fn local_only(State(app): State<Arc<App>>, request: Request, next: Next) -
         .headers()
         .get(header::HOST)
         .is_some_and(|value| value == app.host.as_str());
-    let valid_origin = request
-        .headers()
-        .get(header::ORIGIN)
-        .is_some_and(|value| value == app.origin.as_str());
-    if !valid_host || (request.method() == axum::http::Method::POST && !valid_origin) {
+    let origin = request.headers().get(header::ORIGIN);
+    let valid_origin = if request.uri().path() == "/mcp" {
+        origin.is_none()
+    } else {
+        request.method() != axum::http::Method::POST
+            || origin.is_some_and(|value| value == app.origin.as_str())
+    };
+    if !valid_host || !valid_origin {
         return StatusCode::FORBIDDEN.into_response();
     }
     if request.method() == axum::http::Method::POST

@@ -20,12 +20,12 @@ pub struct Cache {
 
 #[derive(Clone, Serialize)]
 pub struct Metrics {
-    cpu_percent: Option<f64>,
-    ram: Option<Memory>,
-    gpus: Vec<Gpu>,
-    models: Option<Vec<Model>>,
+    pub(crate) cpu_percent: Option<f64>,
+    pub(crate) ram: Option<Memory>,
+    pub(crate) gpus: Vec<Gpu>,
+    pub(crate) models: Option<Vec<Model>>,
     installed_models: Option<Vec<String>>,
-    model_sizes: Option<BTreeMap<String, u64>>,
+    pub(crate) model_sizes: Option<BTreeMap<String, u64>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -35,10 +35,10 @@ pub(crate) struct Memory {
 }
 
 #[derive(Clone, Serialize)]
-struct Gpu {
-    name: String,
-    load: Option<u8>,
-    vram: Option<Memory>,
+pub(crate) struct Gpu {
+    pub(crate) name: String,
+    pub(crate) load: Option<u8>,
+    pub(crate) vram: Option<Memory>,
     temperature: Option<u8>,
 }
 

@@ -25,8 +25,14 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/startup-log/text", get(startup_log))
         .route("/metrics", get(metrics))
         .route("/ram", get(ram_usage))
+        .route("/mode", post(set_mode))
         .route("/run", post(start))
         .route("/shutdown", post(notify_shutdown))
+}
+
+async fn set_mode(State(app): State<Arc<App>>, Json(mode): Json<run::Mode>) -> StatusCode {
+    app.task.send_if_modified(|snapshot| snapshot.set_mode(mode));
+    StatusCode::NO_CONTENT
 }
 
 async fn notify_shutdown(State(app): State<Arc<App>>) -> StatusCode {

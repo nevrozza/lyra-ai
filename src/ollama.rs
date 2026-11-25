@@ -1,6 +1,11 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime},
+};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::context;
 
@@ -19,6 +24,90 @@ impl Model {
     pub(crate) fn ram_bytes(&self) -> Option<u64> {
         Some(self.size?.saturating_sub(self.size_vram?))
     }
+
+    pub(crate) fn remaining_keep_alive(&self) -> Option<Value> {
+        let expires = DateTime::parse_from_rfc3339(self.expires_at.as_deref()?).ok()?;
+        let remaining = expires.signed_duration_since(DateTime::<Utc>::from(SystemTime::now()));
+        if remaining.num_days() > 36_500 {
+            return Some(json!(-1));
+        }
+        Some(json!(format!("{}ms", remaining.num_milliseconds().max(1))))
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ChatReply {
+    message: ChatMessage,
+    done: bool,
+    done_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatMessage {
+    content: String,
+}
+
+impl ChatReply {
+    pub(crate) fn into_text(self) -> Result<(String, bool), String> {
+        if !self.done {
+            return Err("Ollama returned an incomplete reply".into());
+        }
+        let truncated = self.done_reason.as_deref() == Some("length");
+        if self.message.content.trim().is_empty() {
+            return Err(if truncated {
+                "The model reached its output limit before returning text"
+            } else {
+                "The model returned no text"
+            }
+            .into());
+        }
+        Ok((self.message.content, truncated))
+    }
+}
+
+pub(crate) fn chat(
+    model: &str,
+    prompt: &str,
+    max_output_tokens: u32,
+    context_tokens: Option<u32>,
+) -> Result<ChatReply, String> {
+    let backend = context::backend_model(model, context_tokens)?;
+    let resident = running_models().and_then(|models| {
+        models
+            .into_iter()
+            .find(|entry| same_model(&entry.name, &backend))
+    });
+    let mut request = json!({
+        "model": backend,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+        "options": {"num_predict": max_output_tokens}
+    });
+    if let Some(tokens) = context_tokens {
+        request["options"]["num_ctx"] = json!(tokens);
+    }
+    if let Some(keep_alive) = resident.and_then(|entry| entry.remaining_keep_alive()) {
+        request["keep_alive"] = keep_alive;
+    }
+    agent(Duration::from_secs(120))
+        .post("http://127.0.0.1:11434/api/chat")
+        .send_json(request)
+        .map_err(|error| match error {
+            ureq::Error::Status(status, response) => {
+                let detail = response.into_json::<Value>().ok().and_then(|body| {
+                    body["error"]
+                        .as_str()
+                        .map(|error| error.chars().take(300).collect::<String>())
+                });
+                format!(
+                    "Ollama HTTP {status}: {}",
+                    detail.as_deref().unwrap_or("Chat request failed")
+                )
+            }
+            ureq::Error::Transport(error) => format!("Ollama chat failed: {error}"),
+        })?
+        .into_json()
+        .map_err(|error| format!("Could not read Ollama reply: {error}"))
 }
 
 #[derive(Deserialize)]

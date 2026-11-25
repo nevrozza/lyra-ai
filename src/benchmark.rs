@@ -4,10 +4,9 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     sync::Mutex,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -33,7 +32,7 @@ pub enum Stage {
 pub struct Record {
     description: String,
     pub context_tokens: Option<u32>,
-    latest: Option<Measurement>,
+    pub latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
     average_run: Option<TimingAverage>,
     average_launch: Option<TimingAverage>,
@@ -113,6 +112,12 @@ pub struct Measurement {
     temperature: f64,
 }
 
+impl Measurement {
+    pub fn auto_context_tokens(&self) -> Option<u64> {
+        self.context_tokens.is_none().then_some(self.measured_context_tokens).flatten()
+    }
+}
+
 type Records = BTreeMap<String, Record>;
 
 pub struct Store {
@@ -149,6 +154,21 @@ impl Store {
         record.average_run = record.average_run();
         record.average_launch = record.average_launch();
         Ok(record)
+    }
+
+    pub fn summaries(&self, names: &[String]) -> io::Result<Vec<(Option<f64>, Option<f64>)>> {
+        let records = self.read()?;
+        Ok(names
+            .iter()
+            .map(|name| {
+                records.get(name).map_or((None, None), |record| {
+                    (
+                        record.average_launch().map(|timing| timing.mean_ms),
+                        record.latest.as_ref().and_then(|run| run.generated_tokens_per_second),
+                    )
+                })
+            })
+            .collect())
     }
 
     pub(crate) fn known_models(&self) -> io::Result<Vec<String>> {
@@ -408,10 +428,5 @@ fn retention(resident: Option<&ollama::Model>) -> Option<Value> {
         // Leave time to sample /api/ps before unloading the cold benchmark.
         return Some(json!("10s"));
     };
-    let expires = DateTime::parse_from_rfc3339(model.expires_at.as_deref()?).ok()?;
-    let remaining = expires.signed_duration_since(DateTime::<Utc>::from(SystemTime::now()));
-    if remaining.num_days() > 36_500 {
-        return Some(json!(-1));
-    }
-    Some(json!(format!("{}ms", remaining.num_milliseconds().max(1))))
+    model.remaining_keep_alive()
 }
