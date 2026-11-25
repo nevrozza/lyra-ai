@@ -34,25 +34,11 @@
           <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
           <div class="panel-body system">
             <div class="system-host">
-              <div class="metric"><label for="cpu">CPU</label><output id="cpu-value" for="cpu">—</output><meter id="cpu" max="100" hidden></meter></div>
-              <details id="ram-expand" class="ram-expand">
-                <summary class="metric"><span>RAM</span><span class="ram-total"><output id="ram-value" for="ram">—</output><span class="chevron" aria-hidden="true"></span></span><meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter></summary>
-                <div class="ram-breakdown">
-                  <div id="ram-windows" class="ram-windows" hidden>
-                    <span>Windows · ядро и драйверы</span><output id="ram-windows-value"></output>
-                  </div>
-                  <p id="ram-message" class="secondary">Считаем память приложений…</p>
-                  <ul id="ram-list" aria-label="Приложения по использованию RAM"></ul>
-                  <dl class="ram-remainder">
-                    <div id="ram-other" hidden>
-                      <dt title="Собственная физическая память измеренных процессов ниже порога или за пределами топ-7">Другие процессы</dt><dd id="ram-other-value"></dd>
-                    </div>
-                    <div id="ram-unattributed" hidden>
-                      <dt title="Разница между общей занятой RAM и измеренными строками. Сюда может входить общая память, сжатая память и системные выделения.">Прочая память</dt><dd id="ram-unattributed-value"></dd>
-                    </div>
-                  </dl>
-                </div>
-              </details>
+              <div class="metric"><span>CPU</span><output id="cpu-value">—</output></div>
+              <button id="ram-expand" class="metric ram-trigger" type="button" aria-haspopup="dialog" aria-controls="ram-dialog">
+                <span>RAM</span><span class="ram-total"><output id="ram-value">—</output><span class="chevron" aria-hidden="true"></span></span>
+                <meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter>
+              </button>
             </div>
             <div id="gpus" class="gpus"></div>
             <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
@@ -123,5 +109,26 @@
       </aside>
     </div>
   </main>
+  <dialog id="ram-dialog" class="ram-dialog" aria-labelledby="ram-title">
+    <header class="panel-header">
+      <h2 id="ram-title">Использование RAM</h2>
+      <form method="dialog"><button class="unload" type="submit">Закрыть</button></form>
+    </header>
+    <div class="ram-breakdown">
+      <div id="ram-windows" class="ram-windows" hidden>
+        <span>Windows · ядро и драйверы</span><output id="ram-windows-value"></output>
+      </div>
+      <p id="ram-message" class="secondary">Считаем память приложений…</p>
+      <ul id="ram-list" aria-label="Приложения по использованию RAM"></ul>
+      <dl class="ram-remainder">
+        <div id="ram-other" hidden>
+          <dt title="Собственная физическая память измеренных процессов ниже порога или за пределами топ-7">Другие процессы</dt><dd id="ram-other-value"></dd>
+        </div>
+        <div id="ram-unattributed" hidden>
+          <dt title="Разница между общей занятой RAM и измеренными строками. Сюда может входить общая память, сжатая память и системные выделения.">Прочая память</dt><dd id="ram-unattributed-value"></dd>
+        </div>
+      </dl>
+    </div>
+  </dialog>
 </body>
 </html>

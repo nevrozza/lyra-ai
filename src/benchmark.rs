@@ -77,6 +77,14 @@ pub struct Measurement {
     was_loaded: bool,
     #[serde(default)]
     context_tokens: Option<u32>,
+    #[serde(default)]
+    measured_context_tokens: Option<u64>,
+    #[serde(default)]
+    model_ram_bytes: Option<u64>,
+    #[serde(default)]
+    token_memory_bytes_f16: Option<u64>,
+    #[serde(default)]
+    context_memory_bytes_f16: Option<u64>,
     load_ms: f64,
     total_ms: f64,
     prompt_ms: f64,
@@ -286,11 +294,29 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
         .into_json::<Generation>()
         .map_err(|error| format!("Не удалось прочитать замеры Ollama: {error}"))?;
 
+    let measured_model = telemetry::ollama().and_then(|models| {
+        models
+            .into_iter()
+            .find(|entry| telemetry::same_model(&entry.name, &backend))
+    });
+    if resident.is_none()
+        && let Err(error) = telemetry::unload_profile(&backend)
+    {
+        eprintln!("Could not unload benchmark model {backend}: {error}");
+    }
     if !response.done || response.eval_count == 0 {
         return Err("Ollama не сгенерировала токены для замера.".into());
     }
     let prompt_tokens = response.prompt_eval_count.unwrap_or_default();
     let prompt_duration = response.prompt_eval_duration.unwrap_or_default();
+    let measured_context_tokens = measured_model
+        .as_ref()
+        .and_then(|entry| entry.context_length);
+    let context_capacity = measured_context_tokens.or(context_tokens.map(u64::from));
+    let token_count = prompt_tokens.saturating_add(response.eval_count);
+    let occupied_tokens =
+        context_capacity.map_or(token_count, |capacity| capacity.min(token_count));
+    let bytes_per_token = context::cache_bytes_per_token(model);
     let uncached =
         prompt_tokens.saturating_sub(response.prompt_eval_cached_count.unwrap_or_default());
     let ms = |nanos| nanos as f64 / 1_000_000.0;
@@ -301,6 +327,15 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
         measured_at: response.created_at,
         was_loaded,
         context_tokens,
+        measured_context_tokens,
+        model_ram_bytes: measured_model
+            .as_ref()
+            .and_then(telemetry::Model::ram_bytes),
+        token_memory_bytes_f16: bytes_per_token
+            .and_then(|bytes| bytes.checked_mul(occupied_tokens)),
+        context_memory_bytes_f16: context_capacity
+            .zip(bytes_per_token)
+            .and_then(|(tokens, bytes)| bytes.checked_mul(tokens)),
         load_ms: ms(response.load_duration),
         total_ms: ms(response.total_duration),
         prompt_ms: ms(prompt_duration),
@@ -319,8 +354,8 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
 
 fn retention(resident: Option<&telemetry::Model>) -> Option<Value> {
     let Some(model) = resident else {
-        // A cold benchmark returns the model to its previous unloaded state.
-        return Some(json!(0));
+        // Leave time to sample /api/ps before unloading the cold benchmark.
+        return Some(json!("10s"));
     };
     let expires = DateTime::parse_from_rfc3339(model.expires_at.as_deref()?).ok()?;
     let remaining = expires.signed_duration_since(DateTime::<Utc>::from(SystemTime::now()));

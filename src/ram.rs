@@ -91,7 +91,9 @@ fn rank(processes: impl IntoIterator<Item = (String, u64)>) -> RankedApplication
     let total_bytes = totals.values().sum::<u64>();
     let mut apps: Vec<_> = totals
         .into_iter()
-        .filter_map(|(name, bytes)| (bytes >= 300_000_000).then_some(Application { name, bytes }))
+        .filter_map(|(name, bytes)| {
+            (bytes >= 300 * 1024 * 1024).then_some(Application { name, bytes })
+        })
         .collect();
     apps.sort_unstable_by(|left, right| {
         right
@@ -328,24 +330,24 @@ mod tests {
 
     #[test]
     fn groups_before_filtering_and_caps_the_sorted_list() {
-        const MB: u64 = 1_000_000;
+        const MIB: u64 = 1024 * 1024;
         let mut readings = vec![
-            ("browser".into(), 200 * MB),
-            ("browser".into(), 100 * MB),
-            ("small".into(), 299 * MB),
+            ("browser".into(), 200 * MIB),
+            ("browser".into(), 100 * MIB),
+            ("small".into(), 299 * MIB),
         ];
         let apps = rank(readings.clone());
         assert_eq!(apps.top.len(), 1);
         assert_eq!(apps.top[0].name, "browser");
-        assert_eq!(apps.top[0].bytes, 300 * MB);
-        assert_eq!(apps.other_bytes, 299 * MB);
+        assert_eq!(apps.top[0].bytes, 300 * MIB);
+        assert_eq!(apps.other_bytes, 299 * MIB);
 
-        readings.extend((1..=8).map(|n| (format!("app{n}"), (300 + n) * MB)));
+        readings.extend((1..=8).map(|n| (format!("app{n}"), (300 + n) * MIB)));
         let apps = rank(readings);
         assert_eq!(apps.top.len(), 7);
         assert_eq!(apps.top[0].name, "app8");
         assert_eq!(apps.top[6].name, "app2");
-        assert_eq!(apps.other_bytes, 900 * MB);
+        assert_eq!(apps.other_bytes, 900 * MIB);
     }
 
     #[test]

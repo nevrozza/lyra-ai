@@ -11,6 +11,7 @@ const contextSize = get('context-size');
 const saveContext = get('save-context');
 const orchestratorMode = get('mode-orchestrator');
 const ramExpand = get('ram-expand');
+const ramDialog = get('ram-dialog');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
 connection.lastChild.replaceWith(connectionLabel);
@@ -76,6 +77,7 @@ function updateControls() {
   saveContext.disabled = contextSize.disabled || contextPresets[contextSize.value] === benchmarkRecord?.context_tokens;
   for (const { button } of modelRows.values()) button.disabled = applicationClosed || (!orchestratorMode.checked && blocked);
   get('model-mode').disabled = applicationClosed;
+  ramExpand.disabled = applicationClosed;
 }
 
 get('model-mode').addEventListener('change', () => renderModel(metrics?.models));
@@ -167,6 +169,7 @@ function connect() {
 
 function showClosed() {
   applicationClosed = true;
+  if (ramDialog.open) ramDialog.close();
   clearTimeout(metricsTimer);
   clearTimeout(ramTimer);
   connectionState('closed', 'Остановлена');
@@ -240,7 +243,7 @@ function contextLabel(tokens) {
 function renderContextChoice() {
   const tokens = contextPresets[contextSize.value];
   const estimated = tokens && contextBytesPerToken ? tokens * contextBytesPerToken : null;
-  const label = contextLabel(tokens) + (estimated ? ` · ≈ ${memoryAmount(estimated)}` : '');
+  const label = contextLabel(tokens) + (estimated ? ` ≈ ${memoryAmount(estimated)}` : '');
   get('context-choice').textContent = label;
   contextSize.setAttribute('aria-valuetext', label);
   get('context-note').textContent = estimated ?
@@ -260,8 +263,8 @@ function contextMemoryWarning(snapshot, model, resident, contextBytes) {
   const weights = snapshot?.model_sizes?.[model];
   if (!Number.isFinite(weights) || weights <= 0 || snapshot.models == null) return '';
   const estimate = weights + (contextBytes ?? 0);
-  const compute = Math.max(512e6, Math.ceil(estimate * 0.1));
-  const systemReserve = 1e9;
+  const compute = Math.max(512 * 2 ** 20, Math.ceil(estimate * 0.1));
+  const systemReserve = 2 ** 30;
   const needs = estimate + compute;
   const scope = contextBytes == null ? ' · без оценки контекста' : '';
   const gpus = snapshot.gpus.filter((gpu) => gpu.vram?.total > 0);
@@ -377,10 +380,15 @@ function renderBenchmark(message) {
     const elapsed = (ms) => ms < 1000 ? `${oneDecimal.format(ms)} мс` : `${oneDecimal.format(ms / 1000)} с`;
     const rate = (tokens) => tokens == null ? '—' : oneDecimal.format(tokens);
     const launch = benchmarkRecord.average_launch?.mean_ms;
+    const measuredContext = result.measured_context_tokens;
     const rows = [
-      ['Контекст прогона', contextLabel(result.context_tokens)],
+      ['Контекст прогона', measuredContext != null
+        ? (result.context_tokens == null ? `Авто · ${contextLabel(measuredContext)}` : contextLabel(measuredContext))
+        : contextLabel(result.context_tokens)],
       ['Среднее время запуска', launch == null ? '—' : elapsed(launch), 'Среднее время загрузки модели в память по холодным запускам'],
       ['Скорость • вход / выход', `${rate(result.prompt_tokens_per_second)} / ${rate(result.generated_tokens_per_second)} ток/с`],
+      ['ОЗУ модели', result.model_ram_bytes == null ? '—' : memoryAmount(result.model_ram_bytes), 'Разность между общим размером загруженной модели и её VRAM по данным Ollama'],
+      ['Память токенов', result.token_memory_bytes_f16 == null ? '—' : `≈ ${memoryAmount(result.token_memory_bytes_f16)}`, 'Оценка KV-кэша FP16 для входных и сгенерированных токенов этого замера'],
     ];
     facts.replaceChildren(...rows.map(([label, value, hint]) => {
       const row = document.createElement('div');
@@ -449,13 +457,13 @@ async function changeModel(action, path, payload) {
 }
 
 function memoryAmount(bytes) {
-  return bytes >= 1e9 ? `${oneDecimal.format(bytes / 1e9)} ГБ` : `${whole.format(bytes / 1e6)} МБ`;
+  return bytes >= 2 ** 30 ? `${oneDecimal.format(bytes / 2 ** 30)} ГБ` : `${oneDecimal.format(bytes / 2 ** 20)} МБ`;
 }
 
 function memoryLabel(value) {
   if (!value) return '—';
-  const inGigabytes = value.total >= 1e9;
-  const unit = inGigabytes ? 1e9 : 1e6;
+  const inGigabytes = value.total >= 2 ** 30;
+  const unit = inGigabytes ? 2 ** 30 : 2 ** 20;
   const format = inGigabytes ? oneDecimal : whole;
   return `${format.format(value.used / unit)} / ${format.format(value.total / unit)} ${inGigabytes ? 'ГБ' : 'МБ'}`;
 }
@@ -618,8 +626,7 @@ function renderMetrics(next) {
   metrics = next;
   get('sampled').textContent = clock.format(new Date());
   get('cpu-value').textContent = next.cpu_percent == null ? '—' : `${whole.format(next.cpu_percent)}%`;
-  meter(get('cpu'), next.cpu_percent);
-  renderRamTotal((ramExpand.open && detailedRam) || next.ram);
+  renderRamTotal((ramDialog.open && detailedRam) || next.ram);
   get('gpus').replaceChildren(...next.gpus.map(gpuCard));
   get('no-gpu').hidden = next.gpus.length > 0;
   get('no-gpu').textContent = 'Данные NVIDIA GPU недоступны.';
@@ -661,11 +668,11 @@ async function readMetrics() {
 
 function scheduleRam(delay) {
   clearTimeout(ramTimer);
-  if (!applicationClosed && !document.hidden && ramExpand.open && !readingRam) ramTimer = setTimeout(readRam, delay);
+  if (!applicationClosed && !document.hidden && ramDialog.open && !readingRam) ramTimer = setTimeout(readRam, delay);
 }
 
 async function readRam() {
-  if (applicationClosed || document.hidden || !ramExpand.open) return;
+  if (applicationClosed || document.hidden || !ramDialog.open) return;
   readingRam = true;
   const list = get('ram-list');
   const message = get('ram-message');
@@ -673,7 +680,7 @@ async function readRam() {
     const response = await fetch('/ram');
     if (!response.ok) throw new Error();
     const usage = await response.json();
-    if (applicationClosed || !ramExpand.open || document.hidden) return;
+    if (applicationClosed || !ramDialog.open || document.hidden) return;
     const apps = usage.applications;
     detailedRam = usage.physical;
     renderRamTotal(detailedRam ?? metrics?.ram);
@@ -688,7 +695,7 @@ async function readRam() {
     message.hidden = Boolean(apps?.length);
     message.textContent = apps === null ? 'Данные по приложениям недоступны.' : 'Нет приложений от 300 МБ.';
   } catch {
-    if (applicationClosed) return;
+    if (applicationClosed || !ramDialog.open) return;
     detailedRam = undefined;
     renderRamTotal(metrics?.ram);
     for (const id of ['ram-windows', 'ram-other', 'ram-unattributed']) renderRamRow(id, null);
@@ -706,12 +713,14 @@ function renderRamRow(id, bytes) {
   if (bytes != null) get(`${id}-value`).textContent = memoryAmount(bytes);
 }
 
-ramExpand.addEventListener('toggle', () => {
-  if (!ramExpand.open) {
-    detailedRam = undefined;
-    renderRamTotal(metrics?.ram);
-  }
+ramExpand.addEventListener('click', () => {
+  ramDialog.showModal();
   scheduleRam(0);
+});
+ramDialog.addEventListener('close', () => {
+  detailedRam = undefined;
+  renderRamTotal(metrics?.ram);
+  clearTimeout(ramTimer);
 });
 
 document.addEventListener('visibilitychange', () => {

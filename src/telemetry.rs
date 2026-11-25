@@ -48,6 +48,12 @@ pub(crate) struct Model {
     pub(crate) expires_at: Option<String>,
 }
 
+impl Model {
+    pub(crate) fn ram_bytes(&self) -> Option<u64> {
+        Some(self.size?.saturating_sub(self.size_vram?))
+    }
+}
+
 #[derive(Deserialize)]
 struct OllamaPs {
     models: Vec<Model>,
