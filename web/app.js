@@ -806,5 +806,91 @@ setInterval(() => {
   }
 }, 1_000);
 
+function enableColumnResize(handle, grid, pane, property) {
+  const storageKey = `lyra.layout.${pane.id}.width`;
+  let drag;
+  try {
+    const savedWidth = Number(localStorage.getItem(storageKey));
+    if (savedWidth > 0 && savedWidth <= 100) grid.style.setProperty(property, `${savedWidth}%`);
+  } catch {
+    // The layout is still adjustable when browser storage is disabled.
+  }
+
+  function limits() {
+    const style = getComputedStyle(grid);
+    const width = grid.clientWidth;
+    const min = parseFloat(style.getPropertyValue('--column-min'));
+    const max = width - parseFloat(style.getPropertyValue('--neighbor-min')) - parseFloat(style.columnGap);
+    return { width, min, max };
+  }
+
+  function resize(size, { width, min, max }) {
+    const percent = 100 * Math.max(min, Math.min(size, max)) / width;
+    grid.style.setProperty(property, `${percent}%`);
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(storageKey, parseFloat(grid.style.getPropertyValue(property)));
+    } catch {
+      // Keep the current width for this session.
+    }
+  }
+
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    handle.focus({ preventScroll: true });
+    handle.setPointerCapture(event.pointerId);
+    drag = { id: event.pointerId, start: event.clientX, size: pane.getBoundingClientRect().width,
+      range: limits(), previous: grid.style.getPropertyValue(property) };
+    event.preventDefault();
+  });
+  handle.addEventListener('pointermove', (event) => {
+    if (drag?.id === event.pointerId) resize(drag.size + drag.start - event.clientX, drag.range);
+  });
+  handle.addEventListener('pointerup', (event) => {
+    if (drag?.id !== event.pointerId) return;
+    if (event.clientX !== drag.start || grid.style.getPropertyValue(property) !== drag.previous) {
+      resize(drag.size + drag.start - event.clientX, drag.range);
+      save();
+    }
+    drag = undefined;
+  });
+  handle.addEventListener('lostpointercapture', (event) => {
+    if (drag?.id !== event.pointerId) return;
+    grid.style.setProperty(property, drag.previous);
+    drag = undefined;
+  });
+  handle.addEventListener('keydown', (event) => {
+    if (drag || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const range = limits();
+    const size = pane.getBoundingClientRect().width;
+    const target = {
+      ArrowLeft: size + 24,
+      ArrowRight: size - 24,
+      Home: range.min,
+      End: range.max,
+    }[event.key];
+    resize(target, range);
+    save();
+  });
+
+  const observer = new ResizeObserver(() => {
+    if (!handle.offsetWidth) return;
+    const { min, max } = limits();
+    const width = Math.round(pane.getBoundingClientRect().width);
+    handle.setAttribute('aria-valuemin', min);
+    handle.setAttribute('aria-valuemax', max);
+    handle.setAttribute('aria-valuenow', width);
+  });
+  observer.observe(grid);
+  observer.observe(pane);
+}
+
+const modelWorkspace = get('model-workspace');
+enableColumnResize(get('workspace-resizer'), get('dashboard-layout'), modelWorkspace, '--workspace-width');
+enableColumnResize(get('benchmark-resizer'), modelWorkspace, get('benchmark-panel'), '--benchmark-width');
+
 connect();
 scheduleMetrics(0);

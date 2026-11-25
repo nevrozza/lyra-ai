@@ -45,9 +45,10 @@ button:disabled { color: #aeb9ad; background: #333d34; cursor: default; }
   align-items: start;
   padding-top: 16px;
 }
-.system-panel { grid-area: system; }
+.system-panel { grid-area: system; container: hardware / inline-size; }
 .model-workspace { grid-area: models; min-width: 0; }
 .activity { grid-area: activity; }
+.column-resizer { display: none; }
 .panel { border: 1px solid var(--line); background: var(--panel); border-radius: 12px; min-width: 0; }
 .panel-header { min-height: 57px; padding: 0 19px; border-bottom: 1px solid var(--line); }
 h2 { font-size: .96rem; font-weight: 650; }
@@ -102,12 +103,14 @@ h2 { font-size: .96rem; font-weight: 650; }
 #save-context { justify-self: start; }
 #context-feedback { text-align: right; }
 .memory-warning { grid-column: 1 / -1; padding: 8px 10px; border: 1px solid #725d38; border-radius: 6px; color: #f0cd91; background: #2a2319; font-size: .8rem; line-height: 1.45; }
+.model-benchmark { container: benchmark / inline-size; }
 .benchmark-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 #benchmark-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #model-description-form { display: grid; justify-items: start; gap: 6px; margin-top: 8px; }
 #model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
 #benchmark-summary { margin-top: 8px; }
-#benchmark-results dd { text-align: right; }
+#benchmark-results > div { align-items: baseline; gap: 8px; }
+#benchmark-results dd { overflow-wrap: anywhere; text-align: right; }
 .model-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #708075; }
 .model-dot[data-state="loading"] { background: #e1c580; }
 .model-dot[data-state="resident"] { background: #82a490; }
@@ -160,14 +163,64 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 .gpu-heading output { color: var(--muted); font-size: .78rem; white-space: nowrap; }
 .gpu-empty { line-height: 1.45; }
 
+@container benchmark (width < 320px) {
+  #benchmark-results > div { display: grid; justify-content: stretch; gap: 3px; }
+  #benchmark-results dd { text-align: left; }
+}
+
+@container hardware (width < 395px) {
+  .gpu { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 721px) {
+  .layout {
+    --column-min: 270px;
+    --neighbor-min: 300px;
+    --default-column-width: max(270px, calc((100% - 16px) / 2.75));
+    grid-template-columns: minmax(0, 1fr) clamp(var(--column-min), var(--workspace-width, var(--default-column-width)), calc(100% - var(--neighbor-min) - 16px));
+  }
+  .model-workspace { position: relative; }
+  #workspace-resizer { display: block; }
+  .column-resizer {
+    position: absolute;
+    inset: 0 auto 0 -16px;
+    width: 16px;
+    cursor: col-resize;
+    touch-action: none;
+    user-select: none;
+    z-index: 1;
+  }
+  .column-resizer::before {
+    content: "";
+    position: absolute;
+    top: 16px;
+    left: calc(50% - 1px);
+    width: 2px;
+    height: 25px;
+    border-radius: 2px;
+    background: #536453;
+  }
+  .column-resizer:is(:hover, :focus-visible, :active)::before { background: var(--accent); }
+  .column-resizer:focus-visible { outline: 1px solid var(--accent); outline-offset: -3px; }
+}
+
 @media (min-width: 1180px) {
   .shell { max-width: 1440px; }
-  .layout { grid-template-columns: minmax(0, 1fr) minmax(590px, 45%); }
-  .model-workspace:has(.model-benchmark:not([hidden])) { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .layout { --neighbor-min: 350px; --default-column-width: max(620px, 47%); }
+  .layout:has(.model-benchmark:not([hidden])) { --column-min: 516px; }
+  .model-workspace:has(.model-benchmark:not([hidden])) {
+    --column-min: 250px;
+    --neighbor-min: 250px;
+    --default-column-width: max(290px, 47%);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) clamp(var(--column-min), var(--benchmark-width, var(--default-column-width)), calc(100% - var(--neighbor-min) - 16px));
+    gap: 16px;
+    align-items: start;
+  }
+  .model-benchmark { position: relative; }
+  #benchmark-resizer { display: block; left: -17px; }
   .benchmark-heading { min-height: 57px; padding: 0 19px; border-bottom: 1px solid var(--line); }
   .benchmark-body { padding: 17px 19px 20px; }
-  #benchmark-results > div { align-items: baseline; gap: 8px; }
-  #benchmark-results dd { flex: none; max-width: 60%; }
 }
 
 @media (width < 1180px) {

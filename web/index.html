@@ -21,7 +21,7 @@
       </div>
     </header>
 
-    <div class="layout">
+    <div id="dashboard-layout" class="layout">
       <section class="panel system-panel" aria-labelledby="system-title">
         <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
         <div class="panel-body system">
@@ -37,7 +37,8 @@
         </div>
       </section>
 
-      <div class="model-workspace">
+      <div id="model-workspace" class="model-workspace">
+        <div id="workspace-resizer" class="column-resizer" role="separator" aria-orientation="vertical" aria-labelledby="model-title" aria-controls="model-workspace" title="Потяните, чтобы изменить ширину" tabindex="0"></div>
         <section id="models-panel" class="panel models-panel" aria-labelledby="model-title">
           <header class="panel-header"><h2 id="model-title">Модели</h2><span id="ollama" class="service">Ollama</span></header>
           <div class="panel-body">
@@ -79,6 +80,7 @@
           </div>
         </section>
         <section id="benchmark-panel" class="panel model-benchmark" aria-labelledby="benchmark-title" hidden>
+          <div id="benchmark-resizer" class="column-resizer" role="separator" aria-orientation="vertical" aria-labelledby="benchmark-title" aria-controls="benchmark-panel" title="Потяните, чтобы изменить ширину" tabindex="0"></div>
           <header class="benchmark-heading">
             <h2 id="benchmark-title">Бенчмарк</h2>
             <span id="benchmark-model" class="service"></span>
