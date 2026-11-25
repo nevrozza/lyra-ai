@@ -4,7 +4,11 @@ param(
     [int]$Port = 8787,
     [switch]$CloseStartupConsole,
     [string]$WorkerDirectory,
-    [string]$BuildDirectory
+    [string]$BuildDirectory,
+    [switch]$UpdateAndRestart,
+    [int]$PreviousWorkerId,
+    [string]$RunningRevision,
+    [string]$UpdateResult
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +26,7 @@ function Update-LyraShortcut($Directory) {
 
 function Start-LyraWorker($SourceRoot, $Directory) {
     $arguments = '-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "{0}" -Port {1} -WorkerDirectory "{2}" -BuildDirectory "{3}"' -f
-        (Join-Path $SourceRoot 'Start-Lyra.ps1'), $Port, $Directory, (Join-Path $PSScriptRoot 'target')
+        (Join-Path $SourceRoot 'Start-Lyra.ps1'), $Port, $Directory, $BuildDirectory
     if ($Model) {
         if ($Model -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9._:/-]*\z') { throw 'Invalid model name.' }
         $arguments += ' -Model "' + $Model + '"'
@@ -54,6 +58,25 @@ function Start-LyraWorker($SourceRoot, $Directory) {
     } finally { $worker.Dispose() }
 }
 
+function Get-LyraRevision($Directory) {
+    $archive = Split-Path -Leaf $Directory
+    if ($archive -cmatch '^[0-9a-f]{40}$' -and (Split-Path -Parent $Directory) -eq (Join-Path $BuildDirectory 'lyra-updates')) {
+        return $archive
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Directory '.git'))) { return }
+    $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($git) {
+        $revision = & $git.Source -C $Directory rev-parse --verify HEAD
+        if ($LASTEXITCODE -eq 0 -and $revision -cmatch '^[0-9a-f]{40}$') { return $revision }
+    }
+}
+
+function Write-UpdateResult($Status, $Message = '') {
+    $pending = $UpdateResult + '.tmp'
+    [IO.File]::WriteAllText($pending, "$Status`n$Message")
+    [IO.File]::Move($pending, $UpdateResult)
+}
+
 function Find-Application($Names, $Fallbacks) {
     $command = Get-Command -Name $Names -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command) { return $command.Source }
@@ -65,15 +88,25 @@ function Find-Application($Names, $Fallbacks) {
 
 try {
     if (-not $WorkerDirectory) {
+        if ($UpdateAndRestart) {
+            if (-not $BuildDirectory -or -not $UpdateResult -or $PreviousWorkerId -le 0) {
+                throw 'Missing tray restart parameters.'
+            }
+            $previousWorker = [Diagnostics.Process]::GetProcessById($PreviousWorkerId)
+        } else {
+            $BuildDirectory = Join-Path $PSScriptRoot 'target'
+        }
+        $installation = [IO.Path]::GetDirectoryName($BuildDirectory)
         Write-Host 'Lyra AI startup'
         $startup = [Threading.Mutex]::new($false, 'Local\LyraAI.Startup')
         $ownsStartup = $false
         try {
-            try { $ownsStartup = $startup.WaitOne(0) }
+            $startupWait = if ($UpdateAndRestart) { 5000 } else { 0 }
+            try { $ownsStartup = $startup.WaitOne($startupWait) }
             catch [Threading.AbandonedMutexException] { $ownsStartup = $true }
             if (-not $ownsStartup) { throw 'Lyra is already starting.' }
             $tray = $null
-            if ([Threading.Mutex]::TryOpenExisting('Local\LyraAI.Tray', [ref]$tray)) {
+            if (-not $UpdateAndRestart -and [Threading.Mutex]::TryOpenExisting('Local\LyraAI.Tray', [ref]$tray)) {
                 $tray.Dispose()
                 throw 'Lyra is already running. Use its tray icon.'
             }
@@ -85,12 +118,26 @@ try {
             [void][IO.Directory]::CreateDirectory($session)
             $startupLog = Join-Path $session 'startup.log'
             Set-Content -LiteralPath $startupLog -Encoding UTF8 -Value 'Lyra AI startup'
-            $source = $PSScriptRoot
-            try { $source = & "$PSScriptRoot\windows\Update-Lyra.ps1" -Root $PSScriptRoot -Log $startupLog }
-            catch {
-                $message = "Update check failed. Starting the installed version. $($_.Exception.Message)"
-                Write-Warning $message
-                Add-Content -LiteralPath $startupLog -Encoding UTF8 -Value $message
+            $source = $installation
+            if ($UpdateAndRestart) {
+                $source = & "$PSScriptRoot\windows\Update-Lyra.ps1" -Root $installation -Log $startupLog -RequireCheck
+                $revision = Get-LyraRevision $source
+                if (-not $revision) { throw 'Could not identify the available Lyra version.' }
+                if ($revision -eq $RunningRevision) {
+                    Write-UpdateResult 'current'
+                    return
+                }
+                Write-UpdateResult 'restart'
+                $restartRequested = $true
+                # The tray shuts down its child processes before this worker exits.
+                if (-not $previousWorker.WaitForExit(30000)) { throw 'The previous Lyra process did not exit.' }
+            } else {
+                try { $source = & "$PSScriptRoot\windows\Update-Lyra.ps1" -Root $installation -Log $startupLog }
+                catch {
+                    $message = "Update check failed. Starting the installed version. $($_.Exception.Message)"
+                    Write-Warning $message
+                    Add-Content -LiteralPath $startupLog -Encoding UTF8 -Value $message
+                }
             }
             Start-LyraWorker $source $session
         } finally {
@@ -122,11 +169,24 @@ try {
         Add-Type -Path @("$PSScriptRoot\windows\ProcessJob.cs", "$PSScriptRoot\windows\Tray.cs",
             "$PSScriptRoot\windows\BrowserTab.cs", "$PSScriptRoot\windows\InstalledDashboard.cs") -ReferencedAssemblies $references
     }
-    [LyraTray.Session]::Run($PSScriptRoot, $cargo, $ollama, $Model, $Port, $WorkerDirectory, $BuildDirectory)
+    $revision = ''
+    try { $revision = [string](Get-LyraRevision $PSScriptRoot) }
+    catch { [Console]::WriteLine("Could not identify this Lyra version: $($_.Exception.Message)") }
+    [LyraTray.Session]::Run($PSScriptRoot, $cargo, $ollama, $Model, $Port, $WorkerDirectory, $BuildDirectory, $revision)
 } catch {
-    [Console]::WriteLine($_.Exception.GetBaseException().Message)
+    $message = $_.Exception.GetBaseException().Message
+    if ($UpdateAndRestart -and $UpdateResult) {
+        if ($restartRequested) {
+            Add-Type -AssemblyName System.Windows.Forms
+            [void][Windows.Forms.MessageBox]::Show("$message`n`nStartup log: $startupLog", 'Lyra AI update')
+        } else {
+            Write-UpdateResult 'error' $message
+        }
+    }
+    [Console]::WriteLine($message)
     if ($CloseStartupConsole) { [void](Read-Host 'Press Enter to close') }
     exit 1
 } finally {
+    if ($previousWorker) { $previousWorker.Dispose() }
     if ($logWriter) { $logWriter.Dispose() }
 }

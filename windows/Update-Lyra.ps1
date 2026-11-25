@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$Root,
-    [Parameter(Mandatory)][string]$Log
+    [Parameter(Mandatory)][string]$Log,
+    [switch]$RequireCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,10 +50,12 @@ $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinu
 if ($git -and (Test-Path -LiteralPath (Join-Path $Root '.git'))) {
     $changes = & $git.Source -C $Root status --porcelain --untracked-files=no
     if ($LASTEXITCODE -ne 0) {
+        if ($RequireCheck) { throw 'Could not check the Git working tree.' }
         Write-Update 'Could not check the Git working tree. Starting the installed version.'
         return $Root
     }
     if ($changes) {
+        if ($RequireCheck) { throw 'Local Git changes detected. Finish those changes before updating Lyra.' }
         Write-Update 'Local Git changes detected. Skipping updates and starting the working copy.'
         return $Root
     }
@@ -93,6 +96,10 @@ try {
     $installed = $version
     Write-Update "GitHub archive version: $revision"
 } catch {
+    if ($RequireCheck) {
+        Write-Update ('Archive update unavailable. ' + $_.Exception.Message)
+        throw
+    }
     Write-Update ('Archive update unavailable. Starting the installed version. ' + $_.Exception.Message)
 }
 return $installed

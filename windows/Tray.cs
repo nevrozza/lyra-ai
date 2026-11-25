@@ -24,7 +24,7 @@ namespace LyraTray
 
         private readonly string root, ollamaExecutable, requestedModel, logs, piDirectory, dashboard;
         private readonly int port;
-        private readonly string startupDirectory, target;
+        private readonly string startupDirectory, target, revision;
         private readonly ProcessJob job;
         private readonly System.Windows.Forms.Timer timer;
         private readonly HttpClient http;
@@ -34,6 +34,7 @@ namespace LyraTray
         private NotifyIcon icon;
         private Icon trayImage;
         private ContextMenuStrip menu;
+        private ToolStripItem updateItem, quitItem;
         private Exception startupError;
         private ProcessJob.Child build, ollama, lyra;
         private Task<string> probe;
@@ -48,7 +49,7 @@ namespace LyraTray
 
         private enum Stage { Building, WaitingForPorts, StartingOllama, StartingLyra, Ready }
 
-        public static void Run(string root, string cargo, string ollama, string model, int port, string startupDirectory, string target)
+        public static void Run(string root, string cargo, string ollama, string model, int port, string startupDirectory, string target, string revision)
         {
             if (port == OllamaPort) throw new ArgumentException("The dashboard and Ollama need different ports.");
             using (var singleInstance = new Mutex(false, @"Local\LyraAI.Tray"))
@@ -63,7 +64,7 @@ namespace LyraTray
                 try
                 {
                     Application.EnableVisualStyles();
-                    using (var session = new Session(root, cargo, ollama, model, port, startupDirectory, target))
+                    using (var session = new Session(root, cargo, ollama, model, port, startupDirectory, target, revision))
                     {
                         Application.Run(session);
                         if (session.startupError != null) throw new InvalidOperationException(session.startupError.Message, session.startupError);
@@ -73,12 +74,13 @@ namespace LyraTray
             }
         }
 
-        private Session(string root, string cargo, string ollama, string model, int port, string startupDirectory, string target)
+        private Session(string root, string cargo, string ollama, string model, int port, string startupDirectory, string target, string revision)
         {
             this.root = root;
             this.port = port;
             this.startupDirectory = startupDirectory;
             this.target = target;
+            this.revision = revision;
             ollamaExecutable = ollama;
             requestedModel = model;
             dashboard = "http://127.0.0.1:" + port + "/";
@@ -110,7 +112,8 @@ namespace LyraTray
         private void ShowTray()
         {
             menu = new ContextMenuStrip();
-            menu.Items.Add("Quit", null, async delegate { await QuitAsync(); });
+            updateItem = menu.Items.Add("Update && Restart", null, async delegate { await UpdateAndRestartAsync(); });
+            quitItem = menu.Items.Add("Quit", null, async delegate { await QuitAsync(); });
             trayImage = new Icon(Path.Combine(root, "assets", "lyra.ico"));
             icon = new NotifyIcon { Icon = trayImage, Text = "Lyra AI: open dashboard", ContextMenuStrip = menu };
             icon.MouseClick += delegate(object sender, MouseEventArgs click)
@@ -118,6 +121,66 @@ namespace LyraTray
                 if (click.Button == MouseButtons.Left) OpenDashboard();
             };
             icon.Visible = true;
+        }
+
+        private async Task UpdateAndRestartAsync()
+        {
+            if (stopped || quitting || !updateItem.Enabled) return;
+            updateItem.Enabled = false;
+            updateItem.Text = "Checking for updates...";
+            quitItem.Enabled = false;
+            string resultPath = Path.Combine(startupDirectory, "update-" + Guid.NewGuid().ToString("N") + ".txt");
+            try
+            {
+                ProcessStartInfo startInfo;
+                using (var current = Process.GetCurrentProcess())
+                {
+                    string arguments = "-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File \"" +
+                        Path.Combine(root, "Start-Lyra.ps1") + "\" -UpdateAndRestart -PreviousWorkerId " + current.Id +
+                        " -Port " + port + " -BuildDirectory \"" + target + "\" -UpdateResult \"" + resultPath + "\"";
+                    if (!string.IsNullOrEmpty(revision)) arguments += " -RunningRevision " + revision;
+                    if (!string.IsNullOrEmpty(requestedModel)) arguments += " -Model \"" + requestedModel + "\"";
+                    startInfo = new ProcessStartInfo(current.MainModule.FileName, arguments)
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WorkingDirectory = Path.GetDirectoryName(target)
+                    };
+                }
+                using (var updater = Process.Start(startInfo))
+                {
+                    if (updater == null) throw new InvalidOperationException("Could not start the Lyra updater.");
+                    while (!File.Exists(resultPath) && !updater.HasExited && !stopped) await Task.Delay(150);
+                    if (stopped) return;
+                    if (!File.Exists(resultPath)) throw new InvalidOperationException("Lyra update check exited without a result.");
+                }
+                string[] result = File.ReadAllLines(resultPath);
+                string status = result.Length == 0 ? "" : result[0];
+                if (status == "restart")
+                {
+                    await QuitAsync();
+                    return;
+                }
+                if (status != "current")
+                    throw new InvalidOperationException(result.Length > 1 ? result[1] : "Could not check for Lyra updates.");
+                icon.ShowBalloonTip(3500, "Lyra AI", "Lyra is up to date.", ToolTipIcon.Info);
+            }
+            catch (Exception error)
+            {
+                if (!stopped) icon.ShowBalloonTip(6000, "Lyra AI update", error.Message, ToolTipIcon.Error);
+            }
+            finally
+            {
+                try { File.Delete(resultPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                if (!stopped)
+                {
+                    updateItem.Text = "Update && Restart";
+                    updateItem.Enabled = true;
+                    quitItem.Enabled = true;
+                }
+            }
         }
 
         private void OnTick(object sender, EventArgs args)
