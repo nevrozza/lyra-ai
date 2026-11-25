@@ -28,6 +28,8 @@ pub struct Snapshot {
     pinned: Option<bool>,
     model_action: Option<ModelAction>,
     model_error: Option<String>,
+    benchmark_running: bool,
+    benchmark_revision: u64,
     status: &'static str,
     phase: String,
     started_at: Option<u128>,
@@ -53,6 +55,8 @@ impl Snapshot {
             pinned: None,
             model_action: None,
             model_error: None,
+            benchmark_running: false,
+            benchmark_revision: 0,
             status: "idle",
             phase: "Готов к запуску".into(),
             started_at: None,
@@ -70,6 +74,7 @@ impl Snapshot {
         }
         *self = Self {
             pinned: self.pinned,
+            benchmark_revision: self.benchmark_revision,
             ..Self::new(self.model.clone())
         };
         self.status = "running";
@@ -89,7 +94,7 @@ impl Snapshot {
     }
 
     fn busy(&self) -> bool {
-        self.status == "running" || self.model_action.is_some()
+        self.status == "running" || self.model_action.is_some() || self.benchmark_running
     }
 
     pub fn select_model(&mut self, model: String) -> bool {
@@ -115,6 +120,23 @@ impl Snapshot {
         self.model_action = None;
         match result {
             Ok(()) => self.pinned = Some(matches!(action, ModelAction::Pin)),
+            Err(error) => self.model_error = Some(error),
+        }
+    }
+
+    pub fn begin_benchmark(&mut self) -> bool {
+        if self.model.is_none() || self.busy() {
+            return false;
+        }
+        self.benchmark_running = true;
+        self.model_error = None;
+        true
+    }
+
+    pub fn finish_benchmark(&mut self, result: Result<(), String>) {
+        self.benchmark_running = false;
+        match result {
+            Ok(()) => self.benchmark_revision += 1,
             Err(error) => self.model_error = Some(error),
         }
     }

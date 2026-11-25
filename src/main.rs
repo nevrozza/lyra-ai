@@ -1,3 +1,4 @@
+mod benchmark;
 mod ram;
 mod run;
 mod telemetry;
@@ -8,7 +9,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -39,6 +40,9 @@ struct Options {
     /// Startup log supplied by the Windows launcher.
     #[arg(long)]
     startup_log: Option<PathBuf>,
+    /// Path to the JSON file for model descriptions and benchmark results.
+    #[arg(long)]
+    benchmark_file: Option<PathBuf>,
 }
 
 fn model_name(name: &str) -> Result<String, String> {
@@ -63,6 +67,7 @@ struct App {
     ram: Mutex<ram::Cache>,
     startup_log: Option<PathBuf>,
     pi_agent_dir: Option<PathBuf>,
+    benchmarks: benchmark::Store,
 }
 
 fn main() -> std::io::Result<()> {
@@ -80,7 +85,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .await
         .ok()
         .flatten();
-    let model = match catalog {
+    let model = match catalog.as_ref() {
         Some(names) => names
             .iter()
             .find(|name| {
@@ -103,7 +108,11 @@ async fn serve(options: Options) -> std::io::Result<()> {
         ram: Mutex::default(),
         startup_log: options.startup_log,
         pi_agent_dir: options.pi_agent_dir,
+        benchmarks: benchmark::Store::new(options.benchmark_file),
     });
+    if let Some(names) = catalog {
+        register_benchmarks(app.clone(), names).await;
+    }
     let router = Router::new()
         .route(
             "/",
@@ -139,6 +148,8 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .route("/model/pin", post(pin_model))
         .route("/model/unload", post(unload_model))
         .route("/model/select", post(select_model))
+        .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
+        .route("/model/description", post(describe_model))
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 
@@ -239,7 +250,19 @@ async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
 }
 
 async fn metrics(State(app): State<Arc<App>>) -> Json<telemetry::Metrics> {
-    Json(app.metrics.lock().await.sample().await)
+    let metrics = app.metrics.lock().await.sample().await;
+    if let Some(names) = metrics.installed_models() {
+        register_benchmarks(app.clone(), names.to_vec()).await;
+    }
+    Json(metrics)
+}
+
+async fn register_benchmarks(app: Arc<App>, names: Vec<String>) {
+    if let Ok(Err(error)) =
+        tokio::task::spawn_blocking(move || app.benchmarks.register(&names)).await
+    {
+        eprintln!("Could not register model benchmarks: {error}");
+    }
 }
 
 async fn ram_usage(State(app): State<Arc<App>>) -> Json<ram::Usage> {
@@ -271,6 +294,78 @@ async fn unload_model(State(app): State<Arc<App>>, headers: HeaderMap) -> Status
 #[derive(serde::Deserialize)]
 struct SelectRequest {
     model: String,
+}
+
+async fn get_benchmark(
+    State(app): State<Arc<App>>,
+    Query(request): Query<SelectRequest>,
+) -> Result<Json<benchmark::Record>, StatusCode> {
+    model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
+    match tokio::task::spawn_blocking(move || app.benchmarks.get(&request.model)).await {
+        Ok(Ok(record)) => Ok(Json(record)),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DescriptionRequest {
+    description: String,
+}
+
+async fn describe_model(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<DescriptionRequest>,
+) -> StatusCode {
+    if request.description.chars().count() > 2_000 {
+        return StatusCode::BAD_REQUEST;
+    }
+    let model = {
+        let snapshot = app.task.borrow();
+        if !matches_selection(&snapshot, &headers) {
+            return StatusCode::CONFLICT;
+        }
+        let Some(model) = snapshot.model() else {
+            return StatusCode::CONFLICT;
+        };
+        model.to_owned()
+    };
+    match tokio::task::spawn_blocking(move || app.benchmarks.describe(model, request.description))
+        .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    if !app.task.send_if_modified(|snapshot| {
+        matches_selection(snapshot, &headers) && snapshot.begin_benchmark()
+    }) {
+        return StatusCode::CONFLICT;
+    }
+    tokio::spawn(async move {
+        let store = app.clone();
+        let model = app
+            .task
+            .borrow()
+            .model()
+            .expect("benchmark has a model")
+            .to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let measurement = benchmark::measure(&model)?;
+            store
+                .benchmarks
+                .save(model, measurement)
+                .map_err(|error| format!("Не удалось сохранить бенчмарк: {error}"))
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        app.metrics.lock().await.invalidate();
+        app.task
+            .send_modify(|snapshot| snapshot.finish_benchmark(result));
+    });
+    StatusCode::ACCEPTED
 }
 
 async fn select_model(

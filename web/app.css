@@ -70,6 +70,13 @@ h2 { font-size: .96rem; font-weight: 650; }
 .model-list button span:last-child { color: var(--muted); font-size: .72rem; font-weight: 500; flex-shrink: 0; }
 .model-list button[aria-pressed="true"] span:first-child { color: var(--accent); }
 #selected-model { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--line); }
+.model-benchmark { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--line); }
+.model-benchmark h3 { margin: 0 0 10px; font-size: .9rem; font-weight: 650; }
+#model-description-form { display: grid; justify-items: start; gap: 6px; margin-bottom: 12px; }
+#model-description-form label { color: var(--muted); font-size: .83rem; }
+#model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
+#benchmark-summary { margin-top: 8px; }
+#benchmark-results dd { text-align: right; }
 .model-status { display: flex; align-items: center; gap: 8px; min-height: 18px; margin-top: 7px; }
 .model-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #708075; }
 .model-dot[data-state="loading"] { background: #e1c580; }

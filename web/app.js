@@ -3,6 +3,9 @@ const runButton = get('run');
 const pinModel = get('pin-model');
 const unloadModel = get('unload-model');
 const modelList = get('model-list');
+const benchmarkRun = get('benchmark-run');
+const description = get('model-description');
+const saveDescription = get('save-description');
 const ramExpand = get('ram-expand');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
@@ -11,6 +14,7 @@ const timeline = get('timeline');
 const oneDecimal = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
 const whole = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const benchmarkDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 let stream;
 let state;
@@ -24,6 +28,9 @@ let modelSubmitting;
 let modelRequestError = '';
 let selectingModel;
 let modelRows = new Map();
+let benchmarkRecord;
+let benchmarkRead = 0;
+let descriptionSaving = false;
 let ramTimer;
 let readingRam = false;
 let detailedRam;
@@ -42,11 +49,15 @@ function connectionState(value, label) {
 
 function updateControls() {
   const blocked = !state || connection.dataset.state !== 'online' || pending || selectingModel != null ||
-    modelSubmitting != null || state.model_action != null || state.status === 'running';
+    modelSubmitting != null || state.model_action != null || state.benchmark_running || state.status === 'running';
   const installed = metrics?.installed_models?.includes(state?.model);
   runButton.disabled = blocked || !installed;
   pinModel.disabled = blocked || !installed || metrics?.models == null;
   unloadModel.disabled = blocked || !installed || !loadedModel(metrics?.models, state?.model);
+  benchmarkRun.disabled = blocked || !installed || metrics?.models == null;
+  description.disabled = !installed || !benchmarkRecord || descriptionSaving;
+  saveDescription.disabled = description.disabled || description.value === benchmarkRecord?.description ||
+    connection.dataset.state !== 'online';
   for (const { button } of modelRows.values()) button.disabled = blocked;
 }
 
@@ -63,6 +74,8 @@ function renderTime() {
 function renderRun(next) {
   const justStarted = state?.status !== 'running' && next.status === 'running';
   const actionFinished = (modelSubmitting != null || state?.model_action != null) && next.model_action == null;
+  const modelChanged = state?.model !== next.model;
+  const benchmarkUpdated = state?.benchmark_revision !== next.benchmark_revision;
   state = next;
   if (selectingModel === next.model) selectingModel = undefined;
   pending = false;
@@ -92,7 +105,8 @@ function renderRun(next) {
   }
   renderTime();
   renderModel(metrics?.models);
-  if (justStarted || actionFinished) scheduleMetrics(0);
+  if (modelChanged || benchmarkUpdated) readBenchmark(next.model, modelChanged);
+  if (justStarted || actionFinished || benchmarkUpdated) scheduleMetrics(0);
 }
 
 function connect() {
@@ -122,6 +136,77 @@ pinModel.addEventListener('change', () => {
 });
 
 unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
+benchmarkRun.addEventListener('click', () => changeModel('benchmark', '/model/benchmark'));
+description.addEventListener('input', updateControls);
+get('model-description-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (saveDescription.disabled || !state?.model || !benchmarkRecord) return;
+  const model = state.model;
+  const text = description.value;
+  descriptionSaving = true;
+  modelRequestError = '';
+  renderModel(metrics?.models);
+  try {
+    const response = await postModel('/model/description', model, { description: text });
+    if (!response.ok) throw new Error(modelResponseError(response));
+    if (state?.model === model && benchmarkRecord) benchmarkRecord.description = text;
+  } catch (error) {
+    if (state?.model === model) modelRequestError = `Описание не сохранено. ${error.message}`;
+  } finally {
+    descriptionSaving = false;
+    renderModel(metrics?.models);
+  }
+});
+
+async function readBenchmark(model, modelChanged) {
+  const request = ++benchmarkRead;
+  if (modelChanged) {
+    benchmarkRecord = undefined;
+    description.value = '';
+    renderBenchmark('Загружаем результаты…');
+  }
+  if (!model) return;
+  try {
+    const response = await fetch(`/model/benchmark?model=${encodeURIComponent(model)}`);
+    if (!response.ok) throw new Error();
+    const record = await response.json();
+    if (request !== benchmarkRead) return;
+    if (description.value === (benchmarkRecord?.description ?? '')) description.value = record.description;
+    benchmarkRecord = record;
+    renderBenchmark();
+  } catch {
+    if (request === benchmarkRead) renderBenchmark('Не удалось прочитать результаты.');
+  }
+}
+
+function renderBenchmark(message) {
+  const result = benchmarkRecord?.latest;
+  const cold = benchmarkRecord?.last_cold_load;
+  const formattedDate = result && Date.parse(result.measured_at);
+  get('benchmark-summary').textContent = message ?? (result ?
+    `${result.was_loaded ? 'Модель уже была в памяти' : 'Модель загружалась'}${Number.isFinite(formattedDate) ? ` · ${benchmarkDate.format(formattedDate)}` : ''}` :
+    'Замеров пока нет.');
+  const facts = get('benchmark-results');
+  facts.hidden = !result;
+  if (result) {
+    const elapsed = (ms) => ms < 1000 ? `${oneDecimal.format(ms)} мс` : `${oneDecimal.format(ms / 1000)} с`;
+    const rate = (tokens) => tokens == null ? '—' : `${oneDecimal.format(tokens)} ток/с`;
+    const rows = [
+      ['Загрузка в этом прогоне', elapsed(result.load_ms)],
+      ['Последняя холодная загрузка', cold ? elapsed(cold.load_ms) : '—'],
+      ['Скорость генерации', rate(result.generated_tokens_per_second)],
+      ['Скорость обработки промпта', rate(result.prompt_tokens_per_second)],
+      ['Токены · вход / выход', `${result.prompt_tokens} / ${result.generated_tokens}`],
+      ['Общее время', elapsed(result.total_ms)],
+    ];
+    facts.replaceChildren(...rows.map(([label, value]) => {
+      const row = document.createElement('div');
+      row.append(element('dt', label), element('dd', value));
+      return row;
+    }));
+  }
+  updateControls();
+}
 
 function postModel(path, selected, payload) {
   const options = { method: 'POST', headers: { 'X-Lyra-Model': selected ?? '' } };
@@ -229,6 +314,8 @@ function renderModel(models) {
   get('selected-model').hidden = !names?.includes(state?.model);
   const loaded = loadedModel(models, state?.model);
   const action = modelSubmitting ?? state?.model_action;
+  const benchmarking = action === 'benchmark' || state?.benchmark_running;
+  benchmarkRun.textContent = benchmarking ? 'Бенчмарк выполняется…' : 'Запустить бенчмарк';
   const expiry = Date.parse(loaded?.expires_at);
   const remaining = expiry - Date.now();
   // Ollama represents indefinite retention with a deadline centuries ahead.
@@ -237,7 +324,10 @@ function renderModel(models) {
   const status = get('model-state');
   let mode = 'idle';
   let label = 'Модель выгружена';
-  if (state?.model_working) {
+  if (benchmarking) {
+    mode = 'running';
+    label = 'Выполняется бенчмарк';
+  } else if (state?.model_working) {
     mode = 'running';
     label = 'Работает';
   } else if (models === null) {

@@ -36,16 +36,22 @@ struct Gpu {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-struct Model {
-    name: String,
+pub(crate) struct Model {
+    pub(crate) name: String,
     size_vram: Option<u64>,
     context_length: Option<u64>,
-    expires_at: Option<String>,
+    pub(crate) expires_at: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct OllamaPs {
     models: Vec<Model>,
+}
+
+impl Metrics {
+    pub fn installed_models(&self) -> Option<&[String]> {
+        self.installed_models.as_deref()
+    }
 }
 
 #[derive(Default)]
@@ -93,7 +99,7 @@ impl Cache {
     }
 }
 
-fn ollama_agent(timeout: Duration) -> ureq::Agent {
+pub(crate) fn ollama_agent(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
         .redirects(0)
@@ -101,7 +107,7 @@ fn ollama_agent(timeout: Duration) -> ureq::Agent {
         .build()
 }
 
-fn ollama() -> Option<Vec<Model>> {
+pub(crate) fn ollama() -> Option<Vec<Model>> {
     Some(
         ollama_agent(Duration::from_millis(800))
             .get("http://127.0.0.1:11434/api/ps")
@@ -111,6 +117,12 @@ fn ollama() -> Option<Vec<Model>> {
             .ok()?
             .models,
     )
+}
+
+pub(crate) fn same_model(left: &str, right: &str) -> bool {
+    left == right
+        || left.strip_suffix(":latest") == Some(right)
+        || right.strip_suffix(":latest") == Some(left)
 }
 
 pub fn installed_models() -> Option<Vec<String>> {
@@ -161,11 +173,7 @@ pub fn change_model(model: &str, action: ModelAction) -> Result<(), String> {
 
     if matches!(action, ModelAction::Unpin) {
         let loaded = ollama().ok_or("Ollama недоступна")?;
-        let latest = format!("{model}:latest");
-        if !loaded
-            .iter()
-            .any(|entry| entry.name == model || entry.name == latest)
-        {
+        if !loaded.iter().any(|entry| same_model(&entry.name, model)) {
             return Ok(());
         }
     }

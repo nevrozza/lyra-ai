@@ -58,6 +58,17 @@
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>
               </div>
+              <section class="model-benchmark" aria-labelledby="benchmark-title">
+                <h3 id="benchmark-title">Бенчмарк</h3>
+                <form id="model-description-form">
+                  <label for="model-description">Описание модели</label>
+                  <textarea id="model-description" rows="2" maxlength="2000" disabled></textarea>
+                  <button id="save-description" class="unload" type="submit" disabled>Сохранить описание</button>
+                </form>
+                <button id="benchmark-run" class="unload" type="button" disabled>Запустить бенчмарк</button>
+                <p id="benchmark-summary" class="secondary"></p>
+                <dl id="benchmark-results" class="facts" hidden></dl>
+              </section>
             </div>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
           </div>
