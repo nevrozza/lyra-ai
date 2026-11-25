@@ -108,6 +108,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 #benchmark-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #model-description-form { display: grid; justify-items: start; gap: 6px; margin-top: 8px; }
 #model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
+.models-panel[data-mode="orchestrator"] #model-description { resize: none; }
 #benchmark-summary { margin-top: 8px; }
 #benchmark-results > div { align-items: baseline; gap: 8px; }
 #benchmark-results dd { overflow-wrap: anywhere; text-align: right; }
@@ -118,6 +119,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .model-dot[data-state="unknown"] { background: #778077; }
 .model-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; margin-top: 15px; }
 .pin { display: flex; align-items: center; gap: 8px; font-size: .82rem; cursor: pointer; }
+.pin:has(input:disabled) { cursor: default; }
 .pin input { accent-color: var(--accent); margin: 0; }
 .pin input:disabled { opacity: .65; }
 .unload { background: transparent; border: 1px solid #536453; color: #d7e9cf; padding: 6px 10px; font-size: .78rem; }

@@ -40,6 +40,8 @@ export function createContextSettings(session, {
       if (displayedModel() === model) {
         const record = getRecord();
         if (record) record.context_tokens = tokens;
+        contextSize.value = String(contextPresets.indexOf(tokens));
+        renderContextChoice();
         feedback.textContent = 'Сохранено';
       }
     } catch (error) {
@@ -119,8 +121,8 @@ export function createContextSettings(session, {
       contextSize.disabled = blocked || !installed || !record;
       saveContext.disabled = contextSize.disabled || contextPresets[contextSize.value] === record?.context_tokens;
     },
-    reset() {
-      contextSize.value = '0';
+    reset(tokens = null) {
+      contextSize.value = String(Math.max(0, contextPresets.indexOf(tokens)));
       get('context-feedback').textContent = '';
       renderContextChoice();
     },

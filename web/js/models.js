@@ -38,22 +38,30 @@ export function createModels(session, { refreshControls, requestMetrics }) {
 
   function renderControls() {
     const blocked = isBlocked();
+    const readOnly = orchestratorMode.checked;
+    const actionsBlocked = blocked || readOnly;
     const installed = session.metrics?.installed_models?.includes(observedModel);
-    pinModel.disabled = blocked || !installed || session.metrics?.models == null;
-    unloadModel.disabled = blocked || !installed || !loadedModel(session.metrics?.models, observedModel);
-    benchmarkRun.disabled = blocked || !installed || session.metrics?.models == null;
-    description.readOnly = session.closed;
+    pinModel.disabled = actionsBlocked || !installed || session.metrics?.models == null;
+    unloadModel.disabled = actionsBlocked || !installed || !loadedModel(session.metrics?.models, observedModel);
+    benchmarkRun.disabled = actionsBlocked || !installed || session.metrics?.models == null;
+    description.readOnly = session.closed || readOnly;
     description.disabled = !installed || !benchmarkRecord || descriptionSaving;
     const descriptionChanged = benchmarkRecord && description.value !== benchmarkRecord.description;
-    saveDescription.hidden = !descriptionChanged;
-    saveDescription.disabled = session.closed || description.disabled || !descriptionChanged ||
+    saveDescription.hidden = readOnly || !descriptionChanged;
+    saveDescription.disabled = description.readOnly || description.disabled || !descriptionChanged ||
       !session.online;
-    settings.updateControls(blocked, installed);
-    list.setDisabled(session.closed || (!orchestratorMode.checked && blocked));
+    settings.updateControls(actionsBlocked, installed);
+    list.setDisabled(session.closed || (!readOnly && blocked));
     get('model-mode').disabled = session.closed;
   }
 
-  get('model-mode').addEventListener('change', () => renderModel(session.metrics?.models));
+  get('model-mode').addEventListener('change', () => {
+    if (orchestratorMode.checked) {
+      description.value = benchmarkRecord?.description ?? '';
+      settings.reset(benchmarkRecord?.context_tokens);
+    }
+    renderModel(session.metrics?.models);
+  });
 
   function displayedModel() {
     if (!orchestratorMode.checked) return session.run?.model;
@@ -82,7 +90,10 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     try {
       const response = await postModel('/model/description', session.run?.model, { description: text }, model);
       if (!response.ok) throw new Error(modelResponseError(response));
-      if (displayedModel() === model && benchmarkRecord) benchmarkRecord.description = text;
+      if (displayedModel() === model && benchmarkRecord) {
+        benchmarkRecord.description = text;
+        if (orchestratorMode.checked) description.value = text;
+      }
     } catch (error) {
       if (displayedModel() === model) modelRequestError = `Описание не сохранено. ${error.message}`;
     } finally {
@@ -143,6 +154,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   }
 
   async function changeModel(action, path, payload) {
+    if (orchestratorMode.checked) return;
     const model = displayedModel();
     if (!model) return;
     modelSubmitting = { model, action };
