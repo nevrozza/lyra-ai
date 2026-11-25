@@ -16,6 +16,7 @@ const models = createModels(session, {
   requestMetrics: () => telemetry.scheduleMetrics(0),
 });
 const activity = createActivity(session, {
+  selectedModel: models.displayedModel,
   onPendingChange() {
     models.renderContext();
     updateControls();
@@ -47,13 +48,13 @@ function connectionState(value, label) {
   updateControls();
 }
 
-function receiveRun(next, restarted) {
+function receiveRun(next) {
   const wasChanging = models.isMemoryChanging();
   const justStarted = session.run?.status !== 'running' && next.status === 'running';
   const benchmarkUpdated = session.run?.benchmark_revision !== next.benchmark_revision;
   const metricsUpdated = session.run?.metrics_revision !== next.metrics_revision;
   const delegationChanged = session.run?.delegated_model !== next.delegated_model;
-  models.acceptRun(next, restarted);
+  models.acceptRun();
   session.run = next;
   session.pending = false;
   if (metricsUpdated || (wasChanging && !models.isMemoryChanging())) {
@@ -97,7 +98,7 @@ function connect() {
     const restarted = session.closed;
     session.closed = false;
     if (restarted) connectionState('online', 'Подключено');
-    receiveRun(next, restarted);
+    receiveRun(next);
     if (restarted) telemetry.resume();
   };
 }

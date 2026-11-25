@@ -16,7 +16,7 @@ use crate::{ram, run, telemetry};
 
 use super::{
     App, assets,
-    models::{matches_selection, model_context},
+    models::{control_model, matches_selection, model_context},
 };
 
 pub(super) fn routes() -> Router<Arc<App>> {
@@ -25,14 +25,8 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/startup-log/text", get(startup_log))
         .route("/metrics", get(metrics))
         .route("/ram", get(ram_usage))
-        .route("/mode", post(set_mode))
         .route("/run", post(start))
         .route("/shutdown", post(notify_shutdown))
-}
-
-async fn set_mode(State(app): State<Arc<App>>, Json(mode): Json<run::Mode>) -> StatusCode {
-    app.task.send_if_modified(|snapshot| snapshot.set_mode(mode));
-    StatusCode::NO_CONTENT
 }
 
 async fn notify_shutdown(State(app): State<Arc<App>>) -> StatusCode {
@@ -41,9 +35,13 @@ async fn notify_shutdown(State(app): State<Arc<App>>) -> StatusCode {
 }
 
 async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    let model = match control_model(&app, &headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
+    };
     if !app
         .task
-        .send_if_modified(|snapshot| matches_selection(snapshot, &headers) && snapshot.start())
+        .send_if_modified(|snapshot| matches_selection(snapshot, &headers) && snapshot.start(model))
     {
         return StatusCode::CONFLICT;
     }

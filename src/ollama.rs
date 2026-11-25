@@ -250,7 +250,7 @@ pub fn change_model(
     model: &str,
     action: ModelAction,
     context_tokens: Option<u32>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if action.uses_context() {
         let running = running_models();
         if matches!(action, ModelAction::Load) && running.is_none() {
@@ -269,21 +269,28 @@ pub fn change_model(
             } else {
                 json!(SESSION_KEEP_ALIVE)
             };
-        return set_keep_alive(&backend, keep_alive, Duration::from_secs(180));
+        return set_keep_alive(&backend, keep_alive, Duration::from_secs(180)).map(|()| true);
     }
     let alias = context::alias(model);
     let matches_model = |entry: &Model| same_model(&entry.name, model) || entry.name == alias;
     let loaded = running_models().ok_or("Ollama недоступна")?;
+    let mut targets = loaded
+        .iter()
+        .filter(|entry| matches_model(entry))
+        .peekable();
+    if targets.peek().is_none() {
+        return Ok(false);
+    }
     let unload = matches!(action, ModelAction::Unload);
     let keep_alive = if unload {
         json!(0)
     } else {
         json!(SESSION_KEEP_ALIVE)
     };
-    for entry in loaded.iter().filter(|entry| matches_model(entry)) {
+    for entry in targets {
         set_keep_alive(&entry.name, keep_alive.clone(), Duration::from_secs(180))?;
     }
-    if unload && loaded.iter().any(matches_model) {
+    if unload {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let remaining = running_models().ok_or("Не удалось подтвердить выгрузку модели.")?;
@@ -296,7 +303,7 @@ pub fn change_model(
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn unload_profile(model: &str) -> Result<(), String> {

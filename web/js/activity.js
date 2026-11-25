@@ -1,7 +1,7 @@
 import { modelResponseError, postModel } from './model-api.js';
 import { duration, element, get } from './ui.js';
 
-export function createActivity(session, { onPendingChange, onRunFailed }) {
+export function createActivity(session, { selectedModel, onPendingChange, onRunFailed }) {
   const runButton = get('run');
   const timeline = get('timeline');
   let lastTimeline;
@@ -37,10 +37,11 @@ export function createActivity(session, { onPendingChange, onRunFailed }) {
   }
 
   runButton.addEventListener('click', async () => {
+    const model = selectedModel();
     session.pending = true;
     onPendingChange();
     try {
-      const response = await postModel('/run', session.run.model);
+      const response = await postModel('/run', session.run.model, undefined, model);
       if (!response.ok) throw new Error(modelResponseError(response));
     } catch (error) {
       session.pending = false;

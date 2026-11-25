@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -21,21 +21,22 @@ const EXPECTED: &str = "Pi работает";
 const TRACE_LIMIT: usize = 6_000;
 const EVENT_LIMIT: usize = 32;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode {
-    #[default]
-    Manual,
-    Orchestrator,
+pub enum AiAction {
+    Request,
+    Description,
+    #[serde(untagged)]
+    Model(ModelAction),
 }
 
 #[derive(Serialize)]
 pub struct Snapshot {
     model: Option<String>,
-    mode: Mode,
     closed: bool,
     model_working: bool,
     delegated_model: Option<String>,
+    ai_model_actions: BTreeMap<String, AiAction>,
     pinned: Option<bool>,
     model_action: Option<ModelAction>,
     operation_model: Option<String>,
@@ -65,10 +66,10 @@ impl Snapshot {
     pub fn new(model: Option<String>) -> Self {
         Self {
             model,
-            mode: Mode::default(),
             closed: false,
             model_working: false,
             delegated_model: None,
+            ai_model_actions: BTreeMap::new(),
             pinned: None,
             model_action: None,
             operation_model: None,
@@ -88,16 +89,16 @@ impl Snapshot {
         }
     }
 
-    pub fn start(&mut self) -> bool {
-        if self.mode != Mode::Manual || self.model.is_none() || self.busy() {
+    pub fn start(&mut self, model: String) -> bool {
+        if self.busy() {
             return false;
         }
         *self = Self {
-            mode: self.mode,
-            pinned: self.pinned,
+            pinned: self.pinned.filter(|_| self.model.as_deref() == Some(model.as_str())),
             benchmark_revision: self.benchmark_revision,
             metrics_revision: self.metrics_revision,
-            ..Self::new(self.model.clone())
+            ai_model_actions: std::mem::take(&mut self.ai_model_actions),
+            ..Self::new(Some(model))
         };
         self.status = "running";
         self.phase = "Запускаем Pi".into();
@@ -113,18 +114,6 @@ impl Snapshot {
 
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
-    }
-
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
-    pub fn set_mode(&mut self, mode: Mode) -> bool {
-        if self.closed || self.mode == mode {
-            return false;
-        }
-        self.mode = mode;
-        true
     }
 
     pub fn closed(&self) -> bool {
@@ -144,7 +133,7 @@ impl Snapshot {
     }
 
     pub fn select_model(&mut self, model: String) -> bool {
-        if self.mode != Mode::Manual || self.busy() {
+        if self.busy() {
             return false;
         }
         self.model = Some(model);
@@ -161,8 +150,10 @@ impl Snapshot {
         true
     }
 
-    pub fn finish_delegation(&mut self) {
-        self.delegated_model = None;
+    pub fn finish_delegation(&mut self, succeeded: bool) {
+        if let Some(model) = self.delegated_model.take().filter(|_| succeeded) {
+            self.record_model_action(model, Some(AiAction::Request));
+        }
         self.metrics_revision += 1;
     }
 
@@ -176,22 +167,30 @@ impl Snapshot {
         true
     }
 
-    pub fn finish_model_action(&mut self, action: ModelAction, result: Result<(), String>) {
+    pub fn finish_model_action(
+        &mut self,
+        action: ModelAction,
+        result: &Result<bool, String>,
+        ai_action: Option<AiAction>,
+    ) {
         self.model_action = None;
         self.metrics_revision += 1;
         match result {
-            Ok(())
-                if self.operation_model == self.model && !matches!(action, ModelAction::Load) =>
-            {
-                self.pinned = Some(matches!(action, ModelAction::Pin))
+            Ok(true) => {
+                if self.operation_model == self.model && !matches!(action, ModelAction::Load) {
+                    self.pinned = Some(matches!(action, ModelAction::Pin));
+                }
+                if let Some(model) = self.operation_model.clone() {
+                    self.record_model_action(model, ai_action);
+                }
             }
-            Ok(()) => {}
-            Err(error) => self.model_error = Some(error),
+            Ok(false) => {}
+            Err(error) => self.model_error = Some(error.clone()),
         }
     }
 
     pub fn begin_benchmark(&mut self, model: String) -> bool {
-        if self.mode != Mode::Manual || self.busy() {
+        if self.busy() {
             return false;
         }
         self.benchmark_running = true;
@@ -210,13 +209,26 @@ impl Snapshot {
         self.benchmark_stage = None;
         self.metrics_revision += 1;
         match result {
-            Ok(()) => self.model_record_changed(),
+            Ok(()) => {
+                if let Some(model) = self.operation_model.clone() {
+                    self.record_model_action(model, None);
+                }
+                self.model_record_changed();
+            }
             Err(error) => self.model_error = Some(error),
         }
     }
 
     pub fn model_record_changed(&mut self) {
         self.benchmark_revision += 1;
+    }
+
+    pub fn record_model_action(&mut self, model: String, ai_action: Option<AiAction>) {
+        if let Some(action) = ai_action {
+            self.ai_model_actions.insert(model, action);
+        } else {
+            self.ai_model_actions.remove(&model);
+        }
     }
 
     fn log(&mut self, at_ms: u128, kind: &'static str, mut text: String) {
@@ -251,11 +263,14 @@ pub async fn execute(
         state.elapsed_ms = Some(elapsed_ms);
         state.model_working = false;
         let (status, phase, mut message) = match result {
-            Ok(()) => (
-                "success",
-                "Проверка пройдена",
-                "Pi записал и прочитал smoke.txt. Содержимое файла проверено.".into(),
-            ),
+            Ok(()) => {
+                state.record_model_action(model, None);
+                (
+                    "success",
+                    "Проверка пройдена",
+                    "Pi записал и прочитал smoke.txt. Содержимое файла проверено.".into(),
+                )
+            }
             Err(error) => ("error", "Проверка не пройдена", error),
         };
         state.status = status;

@@ -73,20 +73,11 @@ h2 { font-size: .96rem; font-weight: 650; }
 .thinking summary span { margin-left: 5px; color: var(--muted); font-size: .75rem; }
 .thinking pre { max-height: 230px; overflow: auto; margin-bottom: 0; font: .75rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .model-name { display: block; font: 600 .96rem/1.4 var(--mono); color: var(--accent); overflow-wrap: anywhere; }
-.model-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; min-inline-size: 0; margin: 0 0 10px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; }
-.model-mode label { cursor: pointer; }
-.model-mode span { display: block; padding: 6px 7px; border-radius: 5px; color: var(--muted); text-align: center; font-size: .82rem; }
-.model-mode label:hover span, .model-mode input:checked + span { background: #27372a; color: var(--accent); }
-.model-mode input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
-.orchestrator-placeholder { margin-bottom: 10px; line-height: 1.5; }
-.models-panel[data-mode="orchestrator"] { background: #242625; --line: #414542; }
-.models-panel[data-mode="orchestrator"] .model-mode input:checked + span,
-.models-panel[data-mode="orchestrator"] .model-mode label:hover span,
-.models-panel[data-mode="orchestrator"] .model-list button:hover:not(:disabled),
-.models-panel[data-mode="orchestrator"] .model-list button[aria-pressed="true"] { background: #363a37; border-color: #606762; color: #edf0ea; }
 .model-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
 .model-list button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 9px; color: inherit; background: transparent; border: 1px solid var(--line); text-align: left; white-space: normal; }
 .model-list button:hover:not(:disabled), .model-list button[aria-pressed="true"] { background: #27372a; border-color: #536453; }
+.list-model-identity { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.list-model-ai { width: 15px; height: 15px; flex: 0 0 15px; color: var(--accent); }
 .list-model-name { min-width: 0; font: .8rem/1.4 var(--mono); overflow-wrap: anywhere; }
 .list-model-status { display: grid; gap: 2px; min-width: 0; color: var(--muted); font-size: .73rem; font-weight: 500; text-align: right; }
 .list-model-state { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
@@ -108,7 +99,6 @@ h2 { font-size: .96rem; font-weight: 650; }
 #benchmark-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #model-description-form { display: grid; justify-items: start; gap: 6px; margin-top: 8px; }
 #model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
-.models-panel[data-mode="orchestrator"] #model-description { resize: none; }
 #benchmark-summary { margin-top: 8px; }
 #benchmark-results > div { align-items: baseline; gap: 8px; }
 #benchmark-results dd { overflow-wrap: anywhere; text-align: right; }
@@ -239,7 +229,6 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
   .benchmark-heading { padding: 13px 0 10px; border-top: 1px solid var(--line); }
   .benchmark-heading h2 { font-size: .9rem; }
   #benchmark-model { display: none; }
-  .models-panel[data-mode="orchestrator"] + .model-benchmark { background: #242625; --line: #414542; }
 }
 
 @media (max-width: 720px) {

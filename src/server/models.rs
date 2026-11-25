@@ -74,17 +74,28 @@ async fn describe_model(
         Ok(model) => model,
         Err(status) => return status,
     };
-    save_description(app, model, request.description).await
+    save_description(app, model, request.description, None).await
 }
 
-pub(super) async fn save_description(app: Arc<App>, model: String, description: String) -> StatusCode {
+pub(super) async fn save_description(
+    app: Arc<App>,
+    model: String,
+    description: String,
+    ai_action: Option<run::AiAction>,
+) -> StatusCode {
     if description.chars().count() > 2_000 {
         return StatusCode::BAD_REQUEST;
     }
     let store = app.clone();
-    match tokio::task::spawn_blocking(move || store.benchmarks.describe(model, description)).await {
+    let saved_model = model.clone();
+    match tokio::task::spawn_blocking(move || store.benchmarks.describe(saved_model, description))
+        .await
+    {
         Ok(Ok(())) => {
-            app.task.send_modify(run::Snapshot::model_record_changed);
+            app.task.send_modify(|snapshot| {
+                snapshot.record_model_action(model, ai_action);
+                snapshot.model_record_changed();
+            });
             StatusCode::NO_CONTENT
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -126,13 +137,17 @@ async fn set_model_context(
         return StatusCode::CONFLICT;
     }
     let store = app.clone();
+    let saved_model = model.clone();
     match tokio::task::spawn_blocking(move || {
-        store.benchmarks.set_context(model, request.context_tokens)
+        store.benchmarks.set_context(saved_model, request.context_tokens)
     })
     .await
     {
         Ok(Ok(())) => {
-            app.task.send_modify(run::Snapshot::model_record_changed);
+            app.task.send_modify(|snapshot| {
+                snapshot.record_model_action(model, None);
+                snapshot.model_record_changed();
+            });
             StatusCode::NO_CONTENT
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -211,7 +226,7 @@ pub(super) fn matches_selection(snapshot: &run::Snapshot, headers: &HeaderMap) -
     })
 }
 
-async fn control_model(app: &App, headers: &HeaderMap) -> Result<String, StatusCode> {
+pub(super) async fn control_model(app: &App, headers: &HeaderMap) -> Result<String, StatusCode> {
     let explicit = if let Some(value) = headers.get("x-lyra-target-model") {
         let model = model_name(value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -228,7 +243,7 @@ async fn control_model(app: &App, headers: &HeaderMap) -> Result<String, StatusC
         None
     };
     let snapshot = app.task.borrow();
-    if !matches_selection(&snapshot, headers) || snapshot.closed() || snapshot.mode() != run::Mode::Manual {
+    if !matches_selection(&snapshot, headers) || snapshot.closed() {
         return Err(StatusCode::CONFLICT);
     }
     explicit
@@ -246,14 +261,12 @@ async fn change_model(
         Err(status) => return status,
     };
     if !app.task.send_if_modified(|snapshot| {
-        snapshot.mode() == run::Mode::Manual
-            && matches_selection(snapshot, headers)
-            && snapshot.begin_model_action(model.clone(), action)
+        matches_selection(snapshot, headers) && snapshot.begin_model_action(model.clone(), action)
     }) {
         return StatusCode::CONFLICT;
     }
 
-    execute_model_action(app, model, action);
+    execute_model_action(app, model, action, None);
     StatusCode::ACCEPTED
 }
 
@@ -261,7 +274,8 @@ pub(super) fn execute_model_action(
     app: Arc<App>,
     model: String,
     action: ollama::ModelAction,
-) -> tokio::task::JoinHandle<Result<(), String>> {
+    ai_action: Option<run::AiAction>,
+) -> tokio::task::JoinHandle<Result<bool, String>> {
     tokio::spawn(async move {
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -276,7 +290,7 @@ pub(super) fn execute_model_action(
         .unwrap_or_else(|error| Err(error.to_string()));
         app.metrics.lock().await.invalidate();
         app.task.send_modify(|snapshot| {
-            snapshot.finish_model_action(action, result.clone());
+            snapshot.finish_model_action(action, &result, ai_action);
         });
         result
     })

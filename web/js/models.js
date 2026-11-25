@@ -12,16 +12,13 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   const benchmarkRun = get('benchmark-run');
   const description = get('model-description');
   const saveDescription = get('save-description');
-  const orchestratorMode = get('mode-orchestrator');
   let modelSubmitting;
   let modelRequestError = '';
-  let selectingModel;
   let inspectedModel;
   let observedModel;
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
-  let modeSaving = false;
 
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
@@ -34,62 +31,28 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   }
 
   function isBlocked() {
-    return session.closed || !session.run || !session.online || session.pending || selectingModel != null ||
+    return session.closed || !session.run || !session.online || session.pending ||
       modelSubmitting != null || session.run.model_action != null || session.run.benchmark_running ||
       session.run.delegated_model != null || settings.saving || session.run.status === 'running';
   }
 
   function renderControls() {
     const blocked = isBlocked();
-    const readOnly = orchestratorMode.checked;
-    const actionsBlocked = blocked || readOnly;
     const installed = session.metrics?.installed_models?.includes(observedModel);
-    pinModel.disabled = actionsBlocked || !installed || session.metrics?.models == null;
-    unloadModel.disabled = actionsBlocked || !installed || !loadedModel(session.metrics?.models, observedModel);
-    benchmarkRun.disabled = actionsBlocked || !installed || session.metrics?.models == null;
-    description.readOnly = session.closed || readOnly;
+    pinModel.disabled = blocked || !installed || session.metrics?.models == null;
+    unloadModel.disabled = blocked || !installed || !loadedModel(session.metrics?.models, observedModel);
+    benchmarkRun.disabled = blocked || !installed || session.metrics?.models == null;
+    description.readOnly = session.closed;
     description.disabled = !installed || !benchmarkRecord || descriptionSaving;
     const descriptionChanged = benchmarkRecord && description.value !== benchmarkRecord.description;
-    saveDescription.hidden = readOnly || !descriptionChanged;
+    saveDescription.hidden = !descriptionChanged;
     saveDescription.disabled = description.readOnly || description.disabled || !descriptionChanged ||
       !session.online;
-    settings.updateControls(actionsBlocked, installed);
-    list.setDisabled(session.closed || (!readOnly && blocked));
-    get('model-mode').disabled = session.closed || !session.online || !session.run || modeSaving;
+    settings.updateControls(blocked, installed);
+    list.setDisabled(session.closed);
   }
-
-  function syncMode() {
-    if (!session.run) return;
-    const readOnly = session.run.mode === 'orchestrator';
-    if (readOnly && get('models-panel').dataset.mode !== 'orchestrator') {
-      description.value = benchmarkRecord?.description ?? '';
-      settings.reset(benchmarkRecord?.context_tokens);
-    }
-    get(readOnly ? 'mode-orchestrator' : 'mode-manual').checked = true;
-  }
-
-  get('model-mode').addEventListener('change', async () => {
-    const mode = orchestratorMode.checked ? 'orchestrator' : 'manual';
-    syncMode();
-    modeSaving = true;
-    refreshControls();
-    try {
-      const response = await fetch('/mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mode),
-      });
-      if (!response.ok) throw new Error(modelResponseError(response));
-    } catch (error) {
-      modelRequestError = `Не удалось сменить режим. ${error.message}`;
-    } finally {
-      modeSaving = false;
-      renderModel(session.metrics?.models);
-    }
-  });
 
   function displayedModel() {
-    if (!orchestratorMode.checked) return session.run?.model;
     const installed = session.metrics?.installed_models;
     if (installed?.includes(inspectedModel)) return inspectedModel;
     return installed?.includes(session.run?.model) ? session.run.model : installed?.[0];
@@ -115,10 +78,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     try {
       const response = await postModel('/model/description', session.run?.model, { description: text }, model);
       if (!response.ok) throw new Error(modelResponseError(response));
-      if (displayedModel() === model && benchmarkRecord) {
-        benchmarkRecord.description = text;
-        if (orchestratorMode.checked) description.value = text;
-      }
+      if (displayedModel() === model && benchmarkRecord) benchmarkRecord.description = text;
     } catch (error) {
       if (displayedModel() === model) modelRequestError = `Описание не сохранено. ${error.message}`;
     } finally {
@@ -156,30 +116,13 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     }
   }
 
-  async function selectModel(model) {
-    if (orchestratorMode.checked) {
-      inspectedModel = model;
-      modelRequestError = '';
-      renderModel(session.metrics?.models);
-      return;
-    }
-    if (model === session.run?.model) return;
-    selectingModel = model;
+  function selectModel(model) {
+    inspectedModel = model;
     modelRequestError = '';
     renderModel(session.metrics?.models);
-    try {
-      const response = await postModel('/model/select', session.run?.model, { model });
-      if (!response.ok) throw new Error(modelResponseError(response));
-    } catch (error) {
-      selectingModel = undefined;
-      modelRequestError = error.message;
-      renderModel(session.metrics?.models);
-      requestMetrics();
-    }
   }
 
   async function changeModel(action, path, payload) {
-    if (orchestratorMode.checked) return;
     const model = displayedModel();
     if (!model) return;
     modelSubmitting = { model, action };
@@ -209,6 +152,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const action = modelSubmitting?.model === name ? modelSubmitting.action :
       isOperationModel ? session.run?.model_action : undefined;
     const benchmarking = action === 'benchmark' || (isOperationModel && session.run?.benchmark_running);
+    const delegated = name != null && name === session.run?.delegated_model;
+    const aiAction = delegated && !session.closed ? 'request' : session.run?.ai_model_actions?.[name];
     const expiry = Date.parse(loaded?.expires_at);
     const remaining = expiry - Date.now();
     // Ollama represents indefinite retention with a deadline centuries ahead.
@@ -220,7 +165,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     } else if (benchmarking) {
       mode = 'running';
       label = 'Бенчмарк';
-    } else if (name != null && name === session.run?.delegated_model) {
+    } else if (delegated) {
       mode = 'running';
       label = 'Запрос Codex';
     } else if (isTaskModel && session.run?.model_working) {
@@ -245,11 +190,10 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     } else if (mode === 'resident' && !pinned && remaining > 0) {
       detail = `до выгрузки ≈ ${duration(remaining)}`;
     }
-    return { loaded, mode, label, detail, pinned, benchmarking, action };
+    return { loaded, mode, label, detail, pinned, benchmarking, action, aiAction };
   }
 
   function renderModel(models, benchmarkUpdated = false) {
-    syncMode();
     const names = session.metrics?.installed_models;
     const model = displayedModel();
     const modelChanged = model !== observedModel;
@@ -257,8 +201,6 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     if (modelChanged || benchmarkUpdated) readBenchmark(model, modelChanged);
     if (modelChanged) settings.readEstimate(model);
     list.render(names, models, observedModel);
-    get('models-panel').dataset.mode = orchestratorMode.checked ? 'orchestrator' : 'manual';
-    get('orchestrator-placeholder').hidden = !orchestratorMode.checked;
     const hasModel = Boolean(names?.includes(model));
     get('selected-model').hidden = !hasModel;
     get('benchmark-panel').hidden = !hasModel;
@@ -284,13 +226,11 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     render: renderModel,
     updateControls: renderControls,
     isMemoryChanging,
+    displayedModel,
     canRun() {
-      return !isBlocked() && !orchestratorMode.checked && session.metrics?.installed_models?.includes(session.run?.model);
+      return !isBlocked() && session.metrics?.installed_models?.includes(displayedModel());
     },
-    acceptRun(next, restarted) {
-      if (restarted || selectingModel === next.model) selectingModel = undefined;
-      modelSubmitting = undefined;
-    },
+    acceptRun() { modelSubmitting = undefined; },
     showClosed() {
       get('context-memory-warning').hidden = true;
       list.render(session.metrics?.installed_models, session.metrics?.models, observedModel);

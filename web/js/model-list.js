@@ -1,5 +1,14 @@
 import { element, get } from './ui.js';
 
+const aiActionLabels = {
+  load: 'ИИ загрузил модель',
+  pin: 'ИИ закрепил модель в памяти',
+  unpin: 'ИИ снял закрепление',
+  unload: 'ИИ выгрузил модель',
+  request: 'ИИ отправил запрос модели',
+  description: 'ИИ изменил описание модели',
+};
+
 export function createModelList({ selectModel, statusFor }) {
   const modelList = get('model-list');
   let modelRows = new Map();
@@ -12,6 +21,10 @@ export function createModelList({ selectModel, statusFor }) {
         const button = element('button', '');
         const modelName = element('span', name);
         modelName.className = 'list-model-name';
+        const identity = element('span', '');
+        identity.className = 'list-model-identity';
+        const robot = get('model-ai-icon').content.firstElementChild.cloneNode(true);
+        const robotTitle = robot.querySelector('title');
         const badge = element('span', '');
         badge.className = 'list-model-status';
         const statusLine = element('span', '');
@@ -26,20 +39,27 @@ export function createModelList({ selectModel, statusFor }) {
         button.type = 'button';
         statusLine.append(dot, status, pin);
         badge.append(statusLine, detail);
-        button.append(modelName, badge);
+        identity.append(modelName, robot);
+        button.append(identity, badge);
         button.addEventListener('click', () => selectModel(name));
         row.append(button);
-        return [name, { row, button, dot, status, pin, detail }];
+        return [name, { row, button, dot, status, pin, detail, robot, robotTitle }];
       }));
       modelList.replaceChildren(...Array.from(modelRows.values(), ({ row }) => row));
     }
-    for (const [name, { button, dot, status, pin, detail }] of modelRows) {
+    for (const [name, { button, dot, status, pin, detail, robot, robotTitle }] of modelRows) {
       const selected = name === selectedModel;
       const view = statusFor(name, loaded);
       button.setAttribute('aria-pressed', String(selected));
       dot.dataset.state = view.mode;
       if (status.textContent !== view.label) status.textContent = view.label;
       pin.toggleAttribute('hidden', view.mode !== 'resident' || !view.pinned);
+      const aiLabel = Object.hasOwn(aiActionLabels, view.aiAction) ? aiActionLabels[view.aiAction] : '';
+      robot.toggleAttribute('hidden', !aiLabel);
+      if (robotTitle.textContent !== aiLabel) {
+        robotTitle.textContent = aiLabel;
+        robot.setAttribute('aria-label', aiLabel);
+      }
       detail.hidden = !view.detail;
       if (detail.textContent !== view.detail) detail.textContent = view.detail;
     }
