@@ -177,7 +177,7 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
     --column-min: 270px;
     --neighbor-min: 300px;
     --default-column-width: max(270px, calc((100% - 16px) / 2.75));
-    grid-template-columns: minmax(0, 1fr) clamp(var(--column-min), var(--workspace-width, var(--default-column-width)), calc(100% - var(--neighbor-min) - 16px));
+    grid-template-columns: minmax(0, 1fr) clamp(var(--workspace-min, var(--column-min)), var(--workspace-width, var(--default-column-width)), calc(100% - var(--neighbor-min) - 16px));
   }
   .model-workspace { position: relative; }
   #workspace-resizer { display: block; }
@@ -198,22 +198,29 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
     width: 2px;
     height: 25px;
     border-radius: 2px;
-    background: #536453;
+    background: var(--accent);
+    opacity: 0;
   }
-  .column-resizer:is(:hover, :focus-visible, :active)::before { background: var(--accent); }
+  .column-resizer:is(:hover, :focus-visible, :active)::before { opacity: 1; }
   .column-resizer:focus-visible { outline: 1px solid var(--accent); outline-offset: -3px; }
 }
 
 @media (min-width: 1180px) {
   .shell { max-width: 1440px; }
+  .shell:has(> .layout) { container-type: inline-size; }
   .layout { --neighbor-min: 350px; --default-column-width: max(620px, 47%); }
-  .layout:has(.model-benchmark:not([hidden])) { --column-min: 516px; }
+  .layout:has(.model-benchmark:not([hidden])) {
+    --models-min: 250px;
+    --column-min: var(--models-min);
+    --benchmark-min: 250px;
+    --benchmark-size: clamp(var(--benchmark-min), var(--benchmark-width, max(290px, 22cqw)), calc(100cqw - var(--neighbor-min) - var(--column-min) - 32px));
+    --workspace-min: calc(var(--column-min) + 16px + var(--benchmark-size));
+  }
   .model-workspace:has(.model-benchmark:not([hidden])) {
-    --column-min: 250px;
-    --neighbor-min: 250px;
-    --default-column-width: max(290px, 47%);
+    --neighbor-min: var(--models-min);
+    --column-min: var(--benchmark-min);
     display: grid;
-    grid-template-columns: minmax(0, 1fr) clamp(var(--column-min), var(--benchmark-width, var(--default-column-width)), calc(100% - var(--neighbor-min) - 16px));
+    grid-template-columns: minmax(0, 1fr) var(--benchmark-size);
     gap: 16px;
     align-items: start;
   }

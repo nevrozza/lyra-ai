@@ -806,32 +806,42 @@ setInterval(() => {
   }
 }, 1_000);
 
-function enableColumnResize(handle, grid, pane, property) {
-  const storageKey = `lyra.layout.${pane.id}.width`;
+function enableColumnResize(handle, grid, pane, property, unit) {
+  const styleOverrides = dashboardLayout.style;
+  const previousKey = `lyra.layout.${pane.id}.width`;
+  const storageKey = unit === 'cqw' ? `lyra.layout.${pane.id}.dashboard-width` : previousKey;
+  let previousPercent;
   let drag;
   try {
     const savedWidth = Number(localStorage.getItem(storageKey));
-    if (savedWidth > 0 && savedWidth <= 100) grid.style.setProperty(property, `${savedWidth}%`);
+    if (savedWidth > 0 && savedWidth <= 100) {
+      styleOverrides.setProperty(property, `${savedWidth}${unit}`);
+    } else if (storageKey !== previousKey) {
+      previousPercent = Number(localStorage.getItem(previousKey));
+    }
   } catch {
     // The layout is still adjustable when browser storage is disabled.
   }
 
   function limits() {
     const style = getComputedStyle(grid);
-    const width = grid.clientWidth;
-    const min = parseFloat(style.getPropertyValue('--column-min'));
-    const max = width - parseFloat(style.getPropertyValue('--neighbor-min')) - parseFloat(style.columnGap);
-    return { width, min, max };
+    const gap = parseFloat(style.columnGap);
+    const separateBenchmark = grid === dashboardLayout && benchmarkResizer.offsetWidth;
+    const benchmarkSpace = separateBenchmark ? benchmarkPanel.getBoundingClientRect().width + gap : 0;
+    const min = parseFloat(style.getPropertyValue('--column-min')) + benchmarkSpace;
+    const max = grid.getBoundingClientRect().width - parseFloat(style.getPropertyValue('--neighbor-min')) - gap;
+    return { min, max, referenceWidth: dashboardLayout.getBoundingClientRect().width };
   }
 
-  function resize(size, { width, min, max }) {
-    const percent = 100 * Math.max(min, Math.min(size, max)) / width;
-    grid.style.setProperty(property, `${percent}%`);
+  function resize(size, { min, max, referenceWidth }) {
+    // Both separators use the same reference width, even though the benchmark is nested.
+    const percent = 100 * Math.max(min, Math.min(size, max)) / referenceWidth;
+    styleOverrides.setProperty(property, `${percent}${unit}`);
   }
 
   function save() {
     try {
-      localStorage.setItem(storageKey, parseFloat(grid.style.getPropertyValue(property)));
+      localStorage.setItem(storageKey, parseFloat(styleOverrides.getPropertyValue(property)));
     } catch {
       // Keep the current width for this session.
     }
@@ -842,7 +852,7 @@ function enableColumnResize(handle, grid, pane, property) {
     handle.focus({ preventScroll: true });
     handle.setPointerCapture(event.pointerId);
     drag = { id: event.pointerId, start: event.clientX, size: pane.getBoundingClientRect().width,
-      range: limits(), previous: grid.style.getPropertyValue(property) };
+      range: limits(), previous: styleOverrides.getPropertyValue(property) };
     event.preventDefault();
   });
   handle.addEventListener('pointermove', (event) => {
@@ -850,7 +860,7 @@ function enableColumnResize(handle, grid, pane, property) {
   });
   handle.addEventListener('pointerup', (event) => {
     if (drag?.id !== event.pointerId) return;
-    if (event.clientX !== drag.start || grid.style.getPropertyValue(property) !== drag.previous) {
+    if (event.clientX !== drag.start || styleOverrides.getPropertyValue(property) !== drag.previous) {
       resize(drag.size + drag.start - event.clientX, drag.range);
       save();
     }
@@ -858,7 +868,7 @@ function enableColumnResize(handle, grid, pane, property) {
   });
   handle.addEventListener('lostpointercapture', (event) => {
     if (drag?.id !== event.pointerId) return;
-    grid.style.setProperty(property, drag.previous);
+    styleOverrides.setProperty(property, drag.previous);
     drag = undefined;
   });
   handle.addEventListener('keydown', (event) => {
@@ -878,19 +888,29 @@ function enableColumnResize(handle, grid, pane, property) {
 
   const observer = new ResizeObserver(() => {
     if (!handle.offsetWidth) return;
-    const { min, max } = limits();
+    const range = limits();
+    if (previousPercent > 0 && previousPercent <= 100) {
+      // Older clients saved the benchmark as a share of the model workspace.
+      resize(grid.getBoundingClientRect().width * previousPercent / 100, range);
+      previousPercent = undefined;
+      save();
+    }
     const width = Math.round(pane.getBoundingClientRect().width);
-    handle.setAttribute('aria-valuemin', min);
-    handle.setAttribute('aria-valuemax', max);
+    handle.setAttribute('aria-valuemin', Math.round(range.min));
+    handle.setAttribute('aria-valuemax', Math.round(range.max));
     handle.setAttribute('aria-valuenow', width);
   });
   observer.observe(grid);
   observer.observe(pane);
+  if (grid === dashboardLayout) observer.observe(benchmarkPanel);
 }
 
+const dashboardLayout = get('dashboard-layout');
 const modelWorkspace = get('model-workspace');
-enableColumnResize(get('workspace-resizer'), get('dashboard-layout'), modelWorkspace, '--workspace-width');
-enableColumnResize(get('benchmark-resizer'), modelWorkspace, get('benchmark-panel'), '--benchmark-width');
+const benchmarkPanel = get('benchmark-panel');
+const benchmarkResizer = get('benchmark-resizer');
+enableColumnResize(get('workspace-resizer'), dashboardLayout, modelWorkspace, '--workspace-width', '%');
+enableColumnResize(benchmarkResizer, modelWorkspace, benchmarkPanel, '--benchmark-width', 'cqw');
 
 connect();
 scheduleMetrics(0);
