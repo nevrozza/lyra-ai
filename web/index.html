@@ -24,20 +24,51 @@
     </section>
 
     <div class="layout">
-      <section class="panel activity" aria-labelledby="activity-title">
-        <header class="panel-header"><h2 id="activity-title">Ход выполнения</h2><time id="elapsed">—</time></header>
-        <div id="phase" class="phase" data-status="idle" role="status">Готов к запуску</div>
-        <ol id="timeline" aria-label="События Pi"></ol>
-        <p id="empty" class="empty">События появятся после запуска.</p>
-        <p id="result" class="result" hidden></p>
-        <div id="workspace-row" class="workspace" hidden><span>Тестовая папка</span><code id="workspace"></code></div>
-        <details id="thinking" class="thinking" hidden>
-          <summary>Вывод thinking <span>последний фрагмент</span></summary>
-          <pre id="trace"></pre>
-        </details>
-      </section>
+      <div class="monitor-column">
+        <section class="panel system-panel" aria-labelledby="system-title">
+          <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
+          <div class="panel-body system">
+            <div class="system-host">
+              <div class="metric"><label for="cpu">CPU</label><output id="cpu-value" for="cpu">—</output><meter id="cpu" max="100" hidden></meter></div>
+              <details id="ram-expand" class="ram-expand">
+                <summary class="metric"><span>RAM</span><span class="ram-total"><output id="ram-value" for="ram">—</output><span class="chevron" aria-hidden="true"></span></span><meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter></summary>
+                <div class="ram-breakdown">
+                  <div id="ram-windows" class="ram-windows" hidden>
+                    <span>Windows · ядро и драйверы</span><output id="ram-windows-value"></output>
+                  </div>
+                  <p id="ram-message" class="secondary">Считаем память приложений…</p>
+                  <ul id="ram-list" aria-label="Приложения по использованию RAM"></ul>
+                  <dl class="ram-remainder">
+                    <div id="ram-other" hidden>
+                      <dt title="Собственная физическая память измеренных процессов ниже порога или за пределами топ-7">Другие процессы</dt><dd id="ram-other-value"></dd>
+                    </div>
+                    <div id="ram-unattributed" hidden>
+                      <dt title="Разница между общей занятой RAM и измеренными строками. Сюда может входить общая память, сжатая память и системные выделения.">Прочая память</dt><dd id="ram-unattributed-value"></dd>
+                    </div>
+                  </dl>
+                </div>
+              </details>
+            </div>
+            <div id="gpus" class="gpus"></div>
+            <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
+          </div>
+        </section>
 
-      <aside class="sidebar" aria-label="Телеметрия">
+        <section class="panel activity" aria-labelledby="activity-title">
+          <header class="panel-header"><h2 id="activity-title">Ход выполнения</h2><time id="elapsed">—</time></header>
+          <div id="phase" class="phase" data-status="idle" role="status">Готов к запуску</div>
+          <ol id="timeline" aria-label="События Pi"></ol>
+          <p id="empty" class="empty">События появятся после запуска.</p>
+          <p id="result" class="result" hidden></p>
+          <div id="workspace-row" class="workspace" hidden><span>Тестовая папка</span><code id="workspace"></code></div>
+          <details id="thinking" class="thinking" hidden>
+            <summary>Вывод thinking <span>последний фрагмент</span></summary>
+            <pre id="trace"></pre>
+          </details>
+        </section>
+      </div>
+
+      <aside aria-label="Управление моделями">
         <section id="models-panel" class="panel models-panel" aria-labelledby="model-title">
           <header class="panel-header"><h2 id="model-title">Модели</h2><span id="ollama" class="service">Ollama</span></header>
           <div class="panel-body">
@@ -53,6 +84,10 @@
             <p id="model-list-message" class="secondary">Получаем список моделей…</p>
             <div id="selected-model" hidden>
               <strong id="model-name" class="model-name">—</strong>
+              <form id="model-description-form">
+                <textarea id="model-description" rows="2" maxlength="2000" aria-label="Описание модели" placeholder="Добавить описание…" disabled></textarea>
+                <button id="save-description" class="unload" type="submit" disabled hidden>Сохранить описание</button>
+              </form>
               <dl id="model-details" class="facts" hidden>
                 <div><dt>Контекст</dt><dd id="context">—</dd></div>
                 <div><dt>VRAM модели</dt><dd id="model-vram">—</dd></div>
@@ -72,44 +107,12 @@
               </div>
               <section class="model-benchmark" aria-labelledby="benchmark-title">
                 <h3 id="benchmark-title">Бенчмарк</h3>
-                <form id="model-description-form">
-                  <label for="model-description">Описание модели</label>
-                  <textarea id="model-description" rows="2" maxlength="2000" disabled></textarea>
-                  <button id="save-description" class="unload" type="submit" disabled>Сохранить описание</button>
-                </form>
                 <button id="benchmark-run" class="unload" type="button" disabled>Запустить бенчмарк</button>
                 <p id="benchmark-summary" class="secondary"></p>
                 <dl id="benchmark-results" class="facts" hidden></dl>
               </section>
             </div>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
-          </div>
-        </section>
-
-        <section class="panel" aria-labelledby="system-title">
-          <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
-          <div class="panel-body system">
-            <div class="metric"><label for="cpu">CPU</label><output id="cpu-value" for="cpu">—</output><meter id="cpu" max="100" hidden></meter></div>
-            <details id="ram-expand" class="ram-expand">
-              <summary class="metric"><span>RAM</span><span class="ram-total"><output id="ram-value" for="ram">—</output><span class="chevron" aria-hidden="true"></span></span><meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter></summary>
-              <div class="ram-breakdown">
-                <div id="ram-windows" class="ram-windows" hidden>
-                  <span>Windows · ядро и драйверы</span><output id="ram-windows-value"></output>
-                </div>
-                <p id="ram-message" class="secondary">Считаем память приложений…</p>
-                <ul id="ram-list" aria-label="Приложения по использованию RAM"></ul>
-                <dl class="ram-remainder">
-                  <div id="ram-other" hidden>
-                    <dt title="Собственная физическая память измеренных процессов ниже порога или за пределами топ-7">Другие процессы</dt><dd id="ram-other-value"></dd>
-                  </div>
-                  <div id="ram-unattributed" hidden>
-                    <dt title="Разница между общей занятой RAM и измеренными строками. Сюда может входить общая память, сжатая память и системные выделения.">Прочая память</dt><dd id="ram-unattributed-value"></dd>
-                  </div>
-                </dl>
-              </div>
-            </details>
-            <div id="gpus" class="gpus"></div>
-            <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
           </div>
         </section>
       </aside>

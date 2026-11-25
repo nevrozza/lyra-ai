@@ -67,7 +67,9 @@ function updateControls() {
   benchmarkRun.disabled = blocked || !installed || metrics?.models == null;
   description.readOnly = applicationClosed;
   description.disabled = !installed || !benchmarkRecord || descriptionSaving;
-  saveDescription.disabled = applicationClosed || description.disabled || description.value === benchmarkRecord?.description ||
+  const descriptionChanged = benchmarkRecord && description.value !== benchmarkRecord.description;
+  saveDescription.hidden = !descriptionChanged;
+  saveDescription.disabled = applicationClosed || description.disabled || !descriptionChanged ||
     connection.dataset.state !== 'online';
   contextSize.disabled = blocked || !installed || !benchmarkRecord;
   saveContext.disabled = contextSize.disabled || contextPresets[contextSize.value] === benchmarkRecord?.context_tokens;
@@ -361,7 +363,7 @@ function renderBenchmark(message) {
   const summary = get('benchmark-summary');
   const measuredAt = result && Date.parse(result.measured_at);
   summary.textContent = message ?? (result ?
-    `${result.was_loaded ? 'Модель уже была в памяти' : 'Модель загружалась'}${Number.isFinite(measuredAt) ? ` · ${benchmarkDate.format(measuredAt)}` : ''}` :
+    (Number.isFinite(measuredAt) ? `Результаты от ${benchmarkDate.format(measuredAt)}` : 'Результаты бенчмарка') :
     'Замеров пока нет.');
   const facts = get('benchmark-results');
   facts.hidden = !result;
@@ -373,7 +375,6 @@ function renderBenchmark(message) {
       ['Контекст прогона', contextLabel(result.context_tokens)],
       ['Среднее время запуска', launch == null ? '—' : elapsed(launch), 'Среднее время загрузки модели в память по холодным запускам'],
       ['Скорость • вход / выход', `${rate(result.prompt_tokens_per_second)} / ${rate(result.generated_tokens_per_second)} ток/с`],
-      ['Токены · вход / выход', `${result.prompt_tokens} / ${result.generated_tokens}`],
     ];
     facts.replaceChildren(...rows.map(([label, value, hint]) => {
       const row = document.createElement('div');
