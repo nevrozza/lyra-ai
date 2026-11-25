@@ -19,6 +19,7 @@ namespace LyraTray
     {
         private const string OllamaUrl = "http://127.0.0.1:11434";
         private const int OllamaPort = 11434;
+        private const string AgentBinary = "lyra-agent";
         private static readonly Regex ValidModel = new Regex(@"\A[A-Za-z0-9][A-Za-z0-9._:/-]*\z");
 
         private readonly string root, ollamaExecutable, requestedModel, logs, piDirectory, dashboard;
@@ -94,7 +95,8 @@ namespace LyraTray
             try
             {
                 Console.WriteLine("Building Lyra in release mode...");
-                build = job.Start(cargo, "build --release --locked --bin local-agent --target-dir \"" + target + "\"", root, Log("build"));
+                build = job.Start(cargo, "build --release --locked --bin " + AgentBinary +
+                    " --target-dir \"" + target + "\"", root, Log("build"));
                 FollowLog("build");
                 timer.Start();
             }
@@ -162,7 +164,7 @@ namespace LyraTray
                     if (ReadWhenReady(OllamaUrl + "/api/tags") == null) return;
                     string model = PreferredModel();
                     Console.WriteLine("Ollama is ready. Starting Lyra...");
-                    string executable = Path.Combine(target, "release", "local-agent.exe");
+                    string executable = Path.Combine(target, "release", AgentBinary + ".exe");
                     string modelArgument = string.IsNullOrEmpty(model) ? "" : " --model \"" + model + "\"";
                     lyra = job.Start(executable, "--port " + port + modelArgument +
                         " --pi-agent-dir \"" + piDirectory + "\"" +

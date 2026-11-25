@@ -9,15 +9,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Update-LyraShortcut {
+function Update-LyraShortcut($Directory) {
     $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut((Join-Path $PSScriptRoot 'Lyra AI.lnk'))
-    $shortcut.TargetPath = Join-Path $PSHOME 'powershell.exe'
-    $startupScript = Join-Path $PSScriptRoot 'Start-Lyra.ps1'
-    $shortcut.Arguments = '-NoProfile -STA -ExecutionPolicy Bypass -File "' +
-        $startupScript + '" -CloseStartupConsole'
-    $shortcut.WorkingDirectory = $PSScriptRoot
-    $shortcut.IconLocation = (Join-Path $PSScriptRoot 'assets\lyra.ico') + ',0'
+    $shortcut = $shell.CreateShortcut((Join-Path $Directory 'Lyra AI.lnk'))
+    $shortcut.TargetPath = Join-Path $Directory 'Start-Lyra.cmd'
+    $shortcut.Arguments = ''
+    $shortcut.WorkingDirectory = $Directory
+    $shortcut.IconLocation = (Join-Path $Directory 'assets\lyra.ico') + ',0'
     $shortcut.Description = 'Start Lyra AI'
     $shortcut.Save()
 }
@@ -79,8 +77,6 @@ try {
                 $tray.Dispose()
                 throw 'Lyra is already running. Use its tray icon.'
             }
-            try { Update-LyraShortcut }
-            catch { Write-Warning "Could not update the Lyra AI shortcut: $($_.Exception.Message)" }
             $sessions = Join-Path $env:LOCALAPPDATA 'LyraAI\startup'
             Get-ChildItem -LiteralPath $sessions -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -cmatch '^[0-9a-f]{32}$' -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
@@ -107,6 +103,9 @@ try {
     $logWriter = [IO.StreamWriter]::new($logStream, [Text.Encoding]::UTF8)
     $logWriter.AutoFlush = $true
     [Console]::SetOut($logWriter)
+    # The worker can run from an update archive. The build directory belongs to the installation.
+    try { Update-LyraShortcut ([IO.Path]::GetDirectoryName($BuildDirectory)) }
+    catch { [Console]::WriteLine("Could not update the Lyra AI shortcut: $($_.Exception.Message)") }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Console]::WriteLine('Checking Cargo, Ollama and Pi...')
