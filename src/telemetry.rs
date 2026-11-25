@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     process::Stdio,
     time::{Duration, Instant},
 };
@@ -21,6 +22,7 @@ pub struct Metrics {
     gpus: Vec<Gpu>,
     models: Option<Vec<Model>>,
     installed_models: Option<Vec<String>>,
+    model_sizes: Option<BTreeMap<String, u64>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -40,6 +42,7 @@ struct Gpu {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Model {
     pub(crate) name: String,
+    size: Option<u64>,
     size_vram: Option<u64>,
     pub(crate) context_length: Option<u64>,
     pub(crate) expires_at: Option<String>,
@@ -84,12 +87,21 @@ impl Cache {
         );
         self.previous_cpu = local.cpu;
 
-        let (models, installed_models, gpus) = tokio::join!(
+        let (models, catalog, gpus) = tokio::join!(
             tokio::task::spawn_blocking(ollama),
-            tokio::task::spawn_blocking(installed_models),
+            tokio::task::spawn_blocking(model_catalog),
             nvidia(),
         );
-        let installed_models = installed_models.ok().flatten();
+        let catalog = catalog.ok().flatten();
+        let installed_models: Option<Vec<_>> = catalog
+            .as_ref()
+            .map(|models| models.keys().cloned().collect());
+        let model_sizes = catalog.map(|models| {
+            models
+                .into_iter()
+                .filter_map(|(name, size)| size.map(|bytes| (name, bytes)))
+                .collect()
+        });
         let mut models = models.ok().flatten();
         if let (Some(loaded), Some(installed)) = (&mut models, &installed_models) {
             let aliases: std::collections::HashMap<_, _> = installed
@@ -111,6 +123,7 @@ impl Cache {
             gpus,
             models,
             installed_models,
+            model_sizes,
         };
         self.snapshot = Some((Instant::now(), metrics.clone()));
         metrics
@@ -144,6 +157,10 @@ pub(crate) fn same_model(left: &str, right: &str) -> bool {
 }
 
 pub fn installed_models() -> Option<Vec<String>> {
+    Some(model_catalog()?.into_keys().collect())
+}
+
+fn model_catalog() -> Option<BTreeMap<String, Option<u64>>> {
     #[derive(Deserialize)]
     struct Catalog {
         models: Vec<Entry>,
@@ -153,6 +170,7 @@ pub fn installed_models() -> Option<Vec<String>> {
         name: Option<String>,
         model: Option<String>,
         remote_host: Option<String>,
+        size: Option<u64>,
     }
 
     let catalog = ollama_agent(Duration::from_millis(800))
@@ -161,20 +179,23 @@ pub fn installed_models() -> Option<Vec<String>> {
         .ok()?
         .into_json::<Catalog>()
         .ok()?;
-    let mut names: Vec<_> = catalog
+    let models = catalog
         .models
         .into_iter()
         .filter(|entry| entry.remote_host.as_deref().unwrap_or_default().is_empty())
-        .filter_map(|entry| entry.name.or(entry.model))
-        .filter(|name| {
+        .filter_map(|entry| {
+            Some((
+                entry.name.or(entry.model)?,
+                entry.size.filter(|&size| size > 0),
+            ))
+        })
+        .filter(|(name, _)| {
             !context::is_alias(name)
                 && !name.to_ascii_lowercase().ends_with(":cloud")
                 && crate::model_name(name).is_ok()
         })
         .collect();
-    names.sort_unstable();
-    names.dedup();
-    Some(names)
+    Some(models)
 }
 
 #[derive(Clone, Copy, Serialize)]
