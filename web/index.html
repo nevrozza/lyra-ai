@@ -4,15 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Lyra AI</title>
+  <meta name="lyra-ui-revision" content="__LYRA_UI_REVISION__">
+  <title>Lyra</title>
+  <link rel="icon" href="/lyra.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
-      <div class="identity"><span class="mark" aria-hidden="true">›_</span> Локальный агент</div>
-      <div id="connection" class="connection" data-state="waiting"><span></span>Подключение</div>
+      <div class="identity"><img src="/lyra.svg" width="32" height="32" alt="">Lyra</div>
+      <div class="topbar-status">
+        <div id="connection" class="connection" data-state="waiting"><span></span>Подключение</div>
+        <a class="startup-link" href="/startup-log">Журнал запуска</a>
+      </div>
     </header>
 
     <section class="hero" aria-labelledby="title">
@@ -117,7 +122,6 @@
         </section>
       </aside>
     </div>
-    <footer class="dashboard-footer"><a href="/startup-log">Журнал запуска</a></footer>
   </main>
 </body>
 </html>

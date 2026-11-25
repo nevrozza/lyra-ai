@@ -41,6 +41,7 @@ namespace LyraTray
         private bool stopped;
         private bool quitting;
         private bool openingDashboard;
+        private bool dashboardOpened;
         private long lastDashboardLaunch;
         private string waitingFor;
 
@@ -295,9 +296,15 @@ namespace LyraTray
                 if (window != IntPtr.Zero)
                 {
                     BrowserTab.Activate(window);
+                    if (!dashboardOpened)
+                    {
+                        await Task.Delay(120);
+                        if (!stopped && !quitting) dashboardOpened = BrowserTab.RefreshOnFirstOpen(window);
+                    }
                     return;
                 }
                 using (Process.Start(new ProcessStartInfo(dashboard) { UseShellExecute = true })) { }
+                dashboardOpened = true;
                 lastDashboardLaunch = Stopwatch.GetTimestamp();
             }
             catch (Exception error)

@@ -5,8 +5,14 @@ mod run;
 mod telemetry;
 
 use std::{
-    collections::BTreeSet, convert::Infallible, io::SeekFrom, net::Ipv4Addr, path::PathBuf,
-    sync::Arc, time::Duration,
+    collections::BTreeSet,
+    convert::Infallible,
+    hash::{DefaultHasher, Hash, Hasher},
+    io::SeekFrom,
+    net::Ipv4Addr,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+    time::Duration,
 };
 
 use axum::{
@@ -26,6 +32,24 @@ use tokio::{
     net::TcpListener,
     sync::{Mutex, watch},
 };
+
+const DASHBOARD_TEMPLATE: &str = include_str!("../web/index.html");
+const DASHBOARD_SCRIPT: &str = include_str!("../web/app.js");
+const DASHBOARD_STYLE: &str = include_str!("../web/app.css");
+const LYRA_ICON: &str = include_str!("../assets/lyra.svg");
+static UI_REVISION: LazyLock<String> = LazyLock::new(|| {
+    let mut hasher = DefaultHasher::new();
+    (
+        DASHBOARD_TEMPLATE,
+        DASHBOARD_SCRIPT,
+        DASHBOARD_STYLE,
+        LYRA_ICON,
+    )
+        .hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+});
+static DASHBOARD_HTML: LazyLock<String> =
+    LazyLock::new(|| DASHBOARD_TEMPLATE.replace("__LYRA_UI_REVISION__", &UI_REVISION));
 
 #[derive(Parser)]
 #[command(about = "Local dashboard for a Pi agent running on Ollama")]
@@ -116,16 +140,13 @@ async fn serve(options: Options) -> std::io::Result<()> {
         register_benchmarks(app.clone(), names).await;
     }
     let router = Router::new()
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
+        .route("/", get(|| async { Html(DASHBOARD_HTML.as_str()) }))
         .route(
             "/app.css",
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../web/app.css"),
+                    DASHBOARD_STYLE,
                 )
             }),
         )
@@ -134,9 +155,13 @@ async fn serve(options: Options) -> std::io::Result<()> {
             get(|| async {
                 (
                     [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../web/app.js"),
+                    DASHBOARD_SCRIPT,
                 )
             }),
+        )
+        .route(
+            "/lyra.svg",
+            get(|| async { ([(header::CONTENT_TYPE, "image/svg+xml")], LYRA_ICON) }),
         )
         .route("/events", get(events))
         .route(
@@ -275,6 +300,12 @@ async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
 }
 
 async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct Update<'a> {
+        #[serde(flatten)]
+        snapshot: &'a run::Snapshot,
+        ui_revision: &'a str,
+    }
     // Each connection receives the latest snapshot, including after a reconnect.
     let snapshots = futures_util::stream::unfold(
         (app.task.subscribe(), true),
@@ -285,7 +316,11 @@ async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
                     tokio::time::sleep(Duration::from_millis(180)).await;
                 }
             }
-            let data = serde_json::to_string(&*rx.borrow_and_update()).ok()?;
+            let data = serde_json::to_string(&Update {
+                snapshot: &rx.borrow_and_update(),
+                ui_revision: &UI_REVISION,
+            })
+            .ok()?;
             Some((
                 Ok::<_, Infallible>(Event::default().data(data)),
                 (rx, false),

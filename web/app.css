@@ -15,19 +15,20 @@
 body { margin: 0; }
 button, summary { font: inherit; }
 button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-code, time, output, dd, .service, .mark { font-family: var(--mono); }
+code, time, output, dd, .service { font-family: var(--mono); }
 code { color: #d7e9cf; }
 p, h1, h2 { margin: 0; }
 .shell { max-width: 1120px; padding: 0 32px 52px; margin: 0 auto; }
-.dashboard-footer { margin-top: 22px; font-size: .85rem; }
-.dashboard-footer a, .topbar a { color: var(--accent); }
+.topbar a { color: var(--accent); }
 .startup-log-title { margin: 30px 0 20px; }
 .startup-log-frame { display: block; width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; color-scheme: dark; }
 .topbar, .hero, .panel-header, .facts > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .topbar { min-height: 75px; border-bottom: 1px solid var(--line); }
 .identity, .connection { display: flex; align-items: center; gap: 10px; font-size: .9rem; }
-.identity { font-weight: 650; }
-.mark { display: grid; place-items: center; width: 30px; height: 28px; border: 1px solid #4e6451; border-radius: 6px; color: var(--accent); }
+.identity { gap: 8px; font-size: 1.28rem; letter-spacing: -.035em; font-weight: 700; }
+.topbar-status { display: grid; justify-items: end; gap: 3px; }
+.topbar .startup-link { color: var(--muted); font-size: .75rem; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.topbar .startup-link:hover { color: #edf0ea; }
 .connection { color: var(--muted); }
 .connection span, .phase::before { width: 7px; height: 7px; border-radius: 50%; background: #7c887e; flex: 0 0 auto; }
 .connection[data-state="online"] span { background: var(--accent); }
@@ -143,7 +144,9 @@ meter::-webkit-meter-optimum-value { background: #b6d99a; border-radius: 7px; }
 meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 .gpu { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
 .gpu + .gpu { border-top: 1px solid var(--line); padding-top: 12px; }
-.gpu strong { grid-column: 1 / -1; font-size: .85rem; font-weight: 600; }
+.gpu-heading { display: flex; grid-column: 1 / -1; align-items: baseline; justify-content: space-between; gap: 10px; }
+.gpu-heading strong { font-size: .85rem; font-weight: 600; overflow-wrap: anywhere; }
+.gpu-heading output { color: var(--muted); font-size: .78rem; white-space: nowrap; }
 .gpu-empty { line-height: 1.45; }
 
 @media (max-width: 720px) {

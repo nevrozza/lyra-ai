@@ -1,4 +1,5 @@
 const get = (id) => document.getElementById(id);
+const uiRevision = document.querySelector('meta[name="lyra-ui-revision"]').content;
 const runButton = get('run');
 const pinModel = get('pin-model');
 const unloadModel = get('unload-model');
@@ -145,6 +146,11 @@ function connect() {
       showClosed();
       return;
     }
+    if (next.ui_revision && next.ui_revision !== uiRevision) {
+      disconnect();
+      window.location.reload();
+      return;
+    }
     const restarted = applicationClosed;
     applicationClosed = false;
     if (restarted) {
@@ -254,8 +260,8 @@ function contextMemoryWarning(snapshot, model, resident, contextBytes) {
   const weights = snapshot?.model_sizes?.[model];
   if (!Number.isFinite(weights) || weights <= 0 || snapshot.models == null) return '';
   const estimate = weights + (contextBytes ?? 0);
-  const compute = Math.max(512 * 2 ** 20, Math.ceil(estimate * 0.1));
-  const systemReserve = 2 ** 30;
+  const compute = Math.max(512e6, Math.ceil(estimate * 0.1));
+  const systemReserve = 1e9;
   const needs = estimate + compute;
   const scope = contextBytes == null ? ' · без оценки контекста' : '';
   const gpus = snapshot.gpus.filter((gpu) => gpu.vram?.total > 0);
@@ -281,7 +287,7 @@ function contextMemoryWarning(snapshot, model, resident, contextBytes) {
       ' Ollama может перенести часть нагрузки в RAM.';
     return `${gpuLabel} может не хватить ≈ ${memoryAmount(shortfall)}${scope}. Учтён запас ≈ ${memoryAmount(compute)} на вычисления.${fallback}`;
   }
-  return ramShortfall > 0 ? 'Мало свободной RAM. Под фоновые процессы и систему заложен запас 1 ГиБ.' : '';
+  return ramShortfall > 0 ? 'Мало свободной RAM. Под фоновые процессы и систему заложен запас 1 ГБ.' : '';
 }
 
 function renderContextMemoryWarning(contextBytes) {
@@ -442,16 +448,16 @@ async function changeModel(action, path, payload) {
   }
 }
 
-function gib(value) {
-  return `${oneDecimal.format(value / 2 ** 30)} ГиБ`;
-}
-
 function memoryAmount(bytes) {
-  return bytes >= 2 ** 30 ? gib(bytes) : `${whole.format(bytes / 2 ** 20)} МиБ`;
+  return bytes >= 1e9 ? `${oneDecimal.format(bytes / 1e9)} ГБ` : `${whole.format(bytes / 1e6)} МБ`;
 }
 
 function memoryLabel(value) {
-  return value ? `${oneDecimal.format(value.used / 2 ** 30)} / ${gib(value.total)}` : '—';
+  if (!value) return '—';
+  const inGigabytes = value.total >= 1e9;
+  const unit = inGigabytes ? 1e9 : 1e6;
+  const format = inGigabytes ? oneDecimal : whole;
+  return `${format.format(value.used / unit)} / ${format.format(value.total / unit)} ${inGigabytes ? 'ГБ' : 'МБ'}`;
 }
 
 function memoryPercent(value) {
@@ -574,7 +580,7 @@ function renderModel(models, benchmarkUpdated = false) {
   get('model-details').hidden = !loaded;
   if (loaded) {
     get('context').textContent = loaded.context_length != null ? `${whole.format(loaded.context_length)} токенов` : '—';
-    get('model-vram').textContent = loaded.size_vram != null ? gib(loaded.size_vram) : '—';
+    get('model-vram').textContent = loaded.size_vram != null ? memoryAmount(loaded.size_vram) : '—';
   }
   updateControls();
 }
@@ -582,11 +588,15 @@ function renderModel(models, benchmarkUpdated = false) {
 function gpuCard(gpu) {
   const node = element('div', '');
   node.className = 'gpu';
-  node.append(element('strong', gpu.name));
+  const heading = element('div', '');
+  heading.className = 'gpu-heading';
+  const temperature = element('output', gpu.temperature != null ? `${gpu.temperature} °C` : '—');
+  temperature.setAttribute('aria-label', 'Температура GPU');
+  heading.append(element('strong', gpu.name), temperature);
+  node.append(heading);
   const entries = [
     ['GPU', gpu.load != null ? `${gpu.load}%` : '—', gpu.load],
     ['VRAM', memoryLabel(gpu.vram), memoryPercent(gpu.vram)],
-    ['Температура', gpu.temperature != null ? `${gpu.temperature} °C` : '—', null],
   ];
   for (const [name, label, value] of entries) {
     const row = element('div', '');
@@ -676,7 +686,7 @@ async function readRam() {
       return row;
     }));
     message.hidden = Boolean(apps?.length);
-    message.textContent = apps === null ? 'Данные по приложениям недоступны.' : 'Нет приложений от 300 МиБ.';
+    message.textContent = apps === null ? 'Данные по приложениям недоступны.' : 'Нет приложений от 300 МБ.';
   } catch {
     if (applicationClosed) return;
     detailedRam = undefined;

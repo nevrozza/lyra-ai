@@ -1,13 +1,18 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Automation;
+using System.Windows.Forms;
 
 namespace LyraTray
 {
     internal static class BrowserTab
     {
-        private const string DashboardTitle = "Lyra AI";
-        private const string LogTitle = "Lyra AI \u2014 \u0416\u0443\u0440\u043d\u0430\u043b \u0437\u0430\u043f\u0443\u0441\u043a\u0430";
+        private const string DashboardTitle = "Lyra";
+        private const string LegacyDashboardTitle = "Lyra AI";
+        private const string LogSuffix = " \u2014 \u0416\u0443\u0440\u043d\u0430\u043b \u0437\u0430\u043f\u0443\u0441\u043a\u0430";
+        private const string LogTitle = DashboardTitle + LogSuffix;
+        private const string LegacyLogTitle = LegacyDashboardTitle + LogSuffix;
 
         public static IntPtr SelectExisting()
         {
@@ -18,7 +23,9 @@ namespace LyraTray
                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem),
                 new OrCondition(
                     new PropertyCondition(AutomationElement.NameProperty, DashboardTitle),
-                    new PropertyCondition(AutomationElement.NameProperty, LogTitle)));
+                    new PropertyCondition(AutomationElement.NameProperty, LogTitle),
+                    new PropertyCondition(AutomationElement.NameProperty, LegacyDashboardTitle),
+                    new PropertyCondition(AutomationElement.NameProperty, LegacyLogTitle)));
 
             try
             {
@@ -55,9 +62,8 @@ namespace LyraTray
                 }
                 // A browser without an accessible tab strip may still have Lyra selected.
                 string title = browser.Current.Name;
-                if (title == DashboardTitle || title == LogTitle ||
-                    title.StartsWith(DashboardTitle + " - ", StringComparison.Ordinal) ||
-                    title.StartsWith(LogTitle + " - ", StringComparison.Ordinal)) return window;
+                if (HasTitle(title, DashboardTitle) || HasTitle(title, LogTitle) ||
+                    HasTitle(title, LegacyDashboardTitle) || HasTitle(title, LegacyLogTitle)) return window;
             }
             catch (COMException) { }
             catch (ElementNotAvailableException) { }
@@ -70,6 +76,35 @@ namespace LyraTray
             if (IsIconic(window)) ShowWindowAsync(window, 9); // SW_RESTORE
             if (!SetForegroundWindow(window)) FlashWindow(window, true);
         }
+
+        public static bool RefreshOnFirstOpen(IntPtr window)
+        {
+            if (GetForegroundWindow() != window) return false;
+            var windowTitle = new StringBuilder(512);
+            if (GetWindowText(window, windowTitle, windowTitle.Capacity) == 0) return false;
+            string title = windowTitle.ToString();
+            // Current dashboards reload themselves when the server reports new assets.
+            // Older dashboards and the static log page still need a native reload.
+            if (HasTitle(title, LegacyDashboardTitle) || HasTitle(title, LegacyLogTitle) || HasTitle(title, LogTitle))
+            {
+                SendKeys.SendWait("{F5}");
+                return true;
+            }
+            return HasTitle(title, DashboardTitle);
+        }
+
+        private static bool HasTitle(string windowTitle, string tabTitle)
+        {
+            return windowTitle == tabTitle ||
+                windowTitle.StartsWith(tabTitle + " - ", StringComparison.Ordinal) ||
+                windowTitle.StartsWith(tabTitle + " \u2014 ", StringComparison.Ordinal);
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr window, StringBuilder title, int capacity);
 
         [DllImport("user32.dll")]
         private static extern bool IsIconic(IntPtr window);
