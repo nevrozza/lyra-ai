@@ -17,7 +17,6 @@ const timeline = get('timeline');
 const oneDecimal = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
 const whole = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-const benchmarkDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 const contextPresets = [null, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 let stream;
@@ -358,23 +357,17 @@ async function readBenchmark(model, modelChanged) {
 
 function renderBenchmark(message) {
   const result = benchmarkRecord?.latest;
-  const cold = benchmarkRecord?.last_cold_load;
-  const formattedDate = result && Date.parse(result.measured_at);
-  get('benchmark-summary').textContent = message ?? (result ?
-    `${result.was_loaded ? 'Модель уже была в памяти' : 'Модель загружалась'}${Number.isFinite(formattedDate) ? ` · ${benchmarkDate.format(formattedDate)}` : ''}` :
-    'Замеров пока нет.');
+  const summary = get('benchmark-summary');
+  summary.hidden = !message && Boolean(result);
+  summary.textContent = message ?? (result ? '' : 'Замеров пока нет.');
   const facts = get('benchmark-results');
   facts.hidden = !result;
   if (result) {
     const elapsed = (ms) => ms < 1000 ? `${oneDecimal.format(ms)} мс` : `${oneDecimal.format(ms / 1000)} с`;
-    const rate = (tokens) => tokens == null ? '—' : `${oneDecimal.format(tokens)} ток/с`;
+    const rate = (tokens) => tokens == null ? '—' : oneDecimal.format(tokens);
     const rows = [
-      ['Контекст прогона', contextLabel(result.context_tokens)],
       ['Среднее время прогона', elapsed(benchmarkRecord.average_run?.mean_ms ?? result.total_ms)],
-      ['Последняя холодная загрузка', cold ? elapsed(cold.load_ms) : '—'],
-      ['Скорость генерации', rate(result.generated_tokens_per_second)],
-      ['Скорость обработки промпта', rate(result.prompt_tokens_per_second)],
-      ['Токены · вход / выход', `${result.prompt_tokens} / ${result.generated_tokens}`],
+      ['Скорость • вход / выход', `${rate(result.prompt_tokens_per_second)} / ${rate(result.generated_tokens_per_second)} ток/с`],
     ];
     facts.replaceChildren(...rows.map(([label, value]) => {
       const row = document.createElement('div');
