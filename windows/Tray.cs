@@ -183,6 +183,7 @@ namespace LyraTray
                     File.WriteAllText(Path.Combine(startupDirectory, "ready"), "");
                     stage = Stage.Ready;
                     timer.Interval = 2000;
+                    OpenDashboard(installedOnly: true);
                 }
             }
             catch (Exception error)
@@ -284,14 +285,31 @@ namespace LyraTray
             return null;
         }
 
-        private async void OpenDashboard()
+        private async void OpenDashboard(bool installedOnly = false)
         {
             if (openingDashboard || quitting) return;
             if (lastDashboardLaunch != 0 && Stopwatch.GetTimestamp() - lastDashboardLaunch < 2 * Stopwatch.Frequency) return;
             openingDashboard = true;
             try
             {
-                IntPtr window = await Task.Run(() => BrowserTab.SelectExisting());
+                string appName = InstalledDashboard.AppName(dashboard);
+                IntPtr window = await Task.Run(() => InstalledDashboard.FindWindow(appName));
+                if (stopped || quitting) return;
+                bool installedDashboard = window != IntPtr.Zero;
+                if (installedOnly && installedDashboard) return;
+                if (!installedDashboard)
+                {
+                    bool launched = await Task.Run(() => InstalledDashboard.TryLaunch(appName));
+                    if (stopped || quitting) return;
+                    if (launched)
+                    {
+                        dashboardOpened = true;
+                        lastDashboardLaunch = Stopwatch.GetTimestamp();
+                        return;
+                    }
+                    if (installedOnly) return;
+                    window = await Task.Run(() => BrowserTab.SelectExisting());
+                }
                 if (stopped || quitting) return;
                 if (window != IntPtr.Zero)
                 {
@@ -299,7 +317,7 @@ namespace LyraTray
                     if (!dashboardOpened)
                     {
                         await Task.Delay(120);
-                        if (!stopped && !quitting) dashboardOpened = BrowserTab.RefreshOnFirstOpen(window);
+                        if (!stopped && !quitting) dashboardOpened = BrowserTab.RefreshOnFirstOpen(window, installedDashboard);
                     }
                     return;
                 }

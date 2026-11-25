@@ -36,6 +36,7 @@ use tokio::{
 const DASHBOARD_TEMPLATE: &str = include_str!("../web/index.html");
 const DASHBOARD_SCRIPT: &str = include_str!("../web/app.js");
 const DASHBOARD_STYLE: &str = include_str!("../web/app.css");
+const DASHBOARD_MANIFEST: &str = include_str!("../web/lyra.webmanifest");
 const LYRA_ICON: &str = include_str!("../assets/lyra.svg");
 static UI_REVISION: LazyLock<String> = LazyLock::new(|| {
     let mut hasher = DefaultHasher::new();
@@ -43,6 +44,7 @@ static UI_REVISION: LazyLock<String> = LazyLock::new(|| {
         DASHBOARD_TEMPLATE,
         DASHBOARD_SCRIPT,
         DASHBOARD_STYLE,
+        DASHBOARD_MANIFEST,
         LYRA_ICON,
     )
         .hash(&mut hasher);
@@ -162,6 +164,15 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .route(
             "/lyra.svg",
             get(|| async { ([(header::CONTENT_TYPE, "image/svg+xml")], LYRA_ICON) }),
+        )
+        .route(
+            "/lyra.webmanifest",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/manifest+json")],
+                    DASHBOARD_MANIFEST,
+                )
+            }),
         )
         .route("/events", get(events))
         .route(

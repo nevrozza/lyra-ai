@@ -1,0 +1,12 @@
+{
+  "id": "/",
+  "name": "Lyra",
+  "short_name": "Lyra",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "launch_handler": { "client_mode": "navigate-existing" },
+  "icons": [
+    { "src": "/lyra.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

@@ -24,12 +24,12 @@ p, h1, h2 { margin: 0; }
 .startup-log-frame { display: block; width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; color-scheme: dark; }
 .topbar, .hero, .panel-header, .facts > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .topbar { min-height: 75px; border-bottom: 1px solid var(--line); }
-.identity, .connection { display: flex; align-items: center; gap: 10px; font-size: .9rem; }
-.identity { gap: 8px; font-size: 1.28rem; letter-spacing: -.035em; font-weight: 700; }
+.identity { color: var(--accent); font-size: 1.28rem; font-weight: 700; letter-spacing: -.035em; white-space: nowrap; }
+.identity-mark { width: .68em; height: .82em; margin-right: 1px; vertical-align: -.015em; }
 .topbar-status { display: grid; justify-items: end; gap: 3px; }
 .topbar .startup-link { color: var(--muted); font-size: .75rem; text-decoration-color: var(--line); text-underline-offset: 3px; }
 .topbar .startup-link:hover { color: #edf0ea; }
-.connection { color: var(--muted); }
+.connection { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .9rem; }
 .connection span, .phase::before { width: 7px; height: 7px; border-radius: 50%; background: #7c887e; flex: 0 0 auto; }
 .connection[data-state="online"] span { background: var(--accent); }
 .hero { padding: 39px 0 29px; align-items: end; }
@@ -81,6 +81,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .list-model-name { min-width: 0; font: .8rem/1.4 var(--mono); overflow-wrap: anywhere; }
 .list-model-status { display: grid; gap: 2px; min-width: 0; color: var(--muted); font-size: .73rem; font-weight: 500; text-align: right; }
 .list-model-state { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
+.list-model-pin { width: 13px; height: 13px; flex: 0 0 13px; }
 .list-model-detail { font: .66rem/1.3 var(--mono); }
 .model-list button[aria-pressed="true"] .list-model-name { color: var(--accent); }
 #selected-model { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--line); }

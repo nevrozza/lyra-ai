@@ -121,7 +121,7 @@ try {
             [Windows.Automation.AutomationElement].Assembly.Location,
             [Windows.Automation.ControlType].Assembly.Location)
         Add-Type -Path @("$PSScriptRoot\windows\ProcessJob.cs", "$PSScriptRoot\windows\Tray.cs",
-            "$PSScriptRoot\windows\BrowserTab.cs") -ReferencedAssemblies $references
+            "$PSScriptRoot\windows\BrowserTab.cs", "$PSScriptRoot\windows\InstalledDashboard.cs") -ReferencedAssemblies $references
     }
     [LyraTray.Session]::Run($PSScriptRoot, $cargo, $ollama, $Model, $Port, $WorkerDirectory, $BuildDirectory)
 } catch {

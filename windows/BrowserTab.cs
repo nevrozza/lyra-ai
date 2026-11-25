@@ -77,20 +77,22 @@ namespace LyraTray
             if (!SetForegroundWindow(window)) FlashWindow(window, true);
         }
 
-        public static bool RefreshOnFirstOpen(IntPtr window)
+        public static bool RefreshOnFirstOpen(IntPtr window, bool installedDashboard)
         {
             if (GetForegroundWindow() != window) return false;
             var windowTitle = new StringBuilder(512);
-            if (GetWindowText(window, windowTitle, windowTitle.Capacity) == 0) return false;
+            GetWindowText(window, windowTitle, windowTitle.Capacity);
             string title = windowTitle.ToString();
             // Current dashboards reload themselves when the server reports new assets.
-            // Older dashboards and the static log page still need a native reload.
-            if (HasTitle(title, LegacyDashboardTitle) || HasTitle(title, LegacyLogTitle) || HasTitle(title, LogTitle))
+            // Also reload an app window opened before the local server was ready.
+            bool currentDashboard = HasTitle(title, DashboardTitle);
+            if (HasTitle(title, LegacyDashboardTitle) || HasTitle(title, LegacyLogTitle) ||
+                HasTitle(title, LogTitle) || (installedDashboard && !currentDashboard))
             {
                 SendKeys.SendWait("{F5}");
                 return true;
             }
-            return HasTitle(title, DashboardTitle);
+            return currentDashboard;
         }
 
         private static bool HasTitle(string windowTitle, string tabTitle)
