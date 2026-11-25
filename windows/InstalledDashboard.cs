@@ -1,13 +1,18 @@
 using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32;
 
 namespace LyraTray
 {
     internal static class InstalledDashboard
     {
+        private const string AppNamePrefix = "_crx_";
         private const string AppsFolder = "shell:::{4234d49b-0245-4df3-b780-3893943456e1}";
         private static readonly PropertyKey AppUserModelId = new PropertyKey
         {
@@ -22,7 +27,7 @@ namespace LyraTray
             using (var sha = SHA256.Create())
             {
                 byte[] hash = sha.ComputeHash(sha.ComputeHash(Encoding.UTF8.GetBytes(dashboard)));
-                var name = new StringBuilder("_crx_");
+                var name = new StringBuilder(AppNamePrefix);
                 for (int i = 0; i < 16; i++)
                 {
                     name.Append((char)('a' + (hash[i] >> 4)));
@@ -35,7 +40,9 @@ namespace LyraTray
         private static bool Matches(string windowsId, string appName)
         {
             return windowsId != null &&
-                Array.Exists(windowsId.Split('.'), part => string.Equals(part, appName, StringComparison.OrdinalIgnoreCase));
+                Array.Exists(windowsId.Split('.'), part =>
+                    string.Equals(part, appName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(part, appName.Substring(AppNamePrefix.Length), StringComparison.OrdinalIgnoreCase));
         }
 
         public static IntPtr FindWindow(string appName)
@@ -51,6 +58,66 @@ namespace LyraTray
         }
 
         public static bool TryLaunch(string appName)
+        {
+            // A Chromium web app can be installed in a browser profile without
+            // an entry visible in the Windows Apps folder.
+            return TryLaunchFromProfile(appName, @"Microsoft\Edge", "msedge.exe") ||
+                TryLaunchFromProfile(appName, @"Google\Chrome", "chrome.exe") ||
+                TryLaunchFromAppsFolder(appName);
+        }
+
+        private static bool TryLaunchFromProfile(string appName, string browserDirectory, string executableName)
+        {
+            try
+            {
+                string data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    browserDirectory, "User Data");
+                if (!Directory.Exists(data)) return false;
+                string appId = appName.Substring(AppNamePrefix.Length);
+                foreach (string profile in Directory.EnumerateDirectories(data))
+                {
+                    string webApps = Path.Combine(profile, "Web Applications");
+                    if (!Directory.Exists(Path.Combine(webApps, appName)) &&
+                        !Directory.Exists(Path.Combine(webApps, "Manifest Resources", appId))) continue;
+                    string executable = FindBrowserExecutable(browserDirectory, executableName);
+                    if (executable == null) return false;
+
+                    string args = "--profile-directory=\"" + Path.GetFileName(profile) +
+                        "\" --app-id=" + appId;
+                    using (var browser = Process.Start(new ProcessStartInfo(executable, args) { UseShellExecute = false }))
+                    {
+                        if (browser == null) continue;
+                        Console.WriteLine("Opening installed Lyra in " + executableName + ".");
+                        return true;
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (Win32Exception) { }
+            return false;
+        }
+
+        private static string FindBrowserExecutable(string browserDirectory, string executableName)
+        {
+            string key = @"Software\Microsoft\Windows\CurrentVersion\App Paths\" + executableName;
+            foreach (string hive in new[] { "HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE" })
+            {
+                var path = Registry.GetValue(hive + "\\" + key, "", null) as string;
+                if (File.Exists(path)) return path;
+            }
+            foreach (var folder in new[] { Environment.SpecialFolder.ProgramFilesX86,
+                Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.LocalApplicationData })
+            {
+                string root = Environment.GetFolderPath(folder);
+                if (string.IsNullOrEmpty(root)) continue;
+                string path = Path.Combine(root, browserDirectory, "Application", executableName);
+                if (File.Exists(path)) return path;
+            }
+            return null;
+        }
+
+        private static bool TryLaunchFromAppsFolder(string appName)
         {
             try
             {

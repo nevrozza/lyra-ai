@@ -14,53 +14,30 @@
 <body>
   <main class="shell">
     <header class="topbar">
-      <div class="identity" role="img" aria-label="Lyra"><svg class="identity-mark" viewBox="16 13 30 36" aria-hidden="true"><path d="M20.5 17.5V45H41" fill="none" stroke="currentColor" stroke-width="7.4" stroke-linecap="round" stroke-linejoin="round"/></svg>yra</div>
+      <h1 class="identity">Lyra<svg class="identity-star" viewBox="32 11 23 23" aria-hidden="true"><path d="M43.5 11C44.8 18.9 47 21.2 54.4 22.5C47 23.8 44.8 26.1 43.5 34C42.2 26.1 40 23.8 32.6 22.5C40 21.2 42.2 18.9 43.5 11Z" fill="currentColor"/></svg></h1>
       <div class="topbar-status">
         <div id="connection" class="connection" data-state="waiting"><span></span>Подключение</div>
         <a class="startup-link" href="/startup-log">Журнал запуска</a>
       </div>
     </header>
 
-    <section class="hero" aria-labelledby="title">
-      <div>
-        <h1 id="title">Монитор Pi</h1>
-        <p>Встроенная задача создаёт и читает <code>smoke.txt</code>.</p>
-      </div>
-      <button id="run" type="button" disabled>Запустить проверку</button>
-    </section>
-
     <div class="layout">
-      <div class="monitor-column">
-        <section class="panel system-panel" aria-labelledby="system-title">
-          <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
-          <div class="panel-body system">
-            <div class="system-host">
-              <div class="metric"><span>CPU</span><output id="cpu-value">—</output></div>
-              <button id="ram-expand" class="metric ram-trigger" type="button" aria-haspopup="dialog" aria-controls="ram-dialog">
-                <span>RAM</span><span class="ram-total"><output id="ram-value">—</output><span class="chevron" aria-hidden="true"></span></span>
-                <meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter>
-              </button>
-            </div>
-            <div id="gpus" class="gpus"></div>
-            <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
+      <section class="panel system-panel" aria-labelledby="system-title">
+        <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
+        <div class="panel-body system">
+          <div class="system-host">
+            <div class="metric"><span>CPU</span><output id="cpu-value">—</output></div>
+            <button id="ram-expand" class="metric ram-trigger" type="button" aria-haspopup="dialog" aria-controls="ram-dialog">
+              <span>RAM</span><span class="ram-total"><output id="ram-value">—</output><span class="chevron" aria-hidden="true"></span></span>
+              <meter id="ram" aria-label="Загрузка RAM" max="100" hidden></meter>
+            </button>
           </div>
-        </section>
+          <div id="gpus" class="gpus"></div>
+          <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
+        </div>
+      </section>
 
-        <section class="panel activity" aria-labelledby="activity-title">
-          <header class="panel-header"><h2 id="activity-title">Ход выполнения</h2><time id="elapsed">—</time></header>
-          <div id="phase" class="phase" data-status="idle" role="status">Готов к запуску</div>
-          <ol id="timeline" aria-label="События Pi"></ol>
-          <p id="empty" class="empty">События появятся после запуска.</p>
-          <p id="result" class="result" hidden></p>
-          <div id="workspace-row" class="workspace" hidden><span>Тестовая папка</span><code id="workspace"></code></div>
-          <details id="thinking" class="thinking" hidden>
-            <summary>Вывод thinking <span>последний фрагмент</span></summary>
-            <pre id="trace"></pre>
-          </details>
-        </section>
-      </div>
-
-      <aside aria-label="Управление моделями">
+      <div class="model-workspace">
         <section id="models-panel" class="panel models-panel" aria-labelledby="model-title">
           <header class="panel-header"><h2 id="model-title">Модели</h2><span id="ollama" class="service">Ollama</span></header>
           <div class="panel-body">
@@ -97,17 +74,43 @@
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>
               </div>
-              <section class="model-benchmark" aria-labelledby="benchmark-title">
-                <h3 id="benchmark-title">Бенчмарк</h3>
-                <button id="benchmark-run" class="unload" type="button" disabled>Запустить бенчмарк</button>
-                <p id="benchmark-summary" class="secondary"></p>
-                <dl id="benchmark-results" class="facts" hidden></dl>
-              </section>
             </div>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
           </div>
         </section>
-      </aside>
+        <section id="benchmark-panel" class="panel model-benchmark" aria-labelledby="benchmark-title" hidden>
+          <header class="benchmark-heading">
+            <h2 id="benchmark-title">Бенчмарк</h2>
+            <span id="benchmark-model" class="service"></span>
+          </header>
+          <div class="benchmark-body">
+            <button id="benchmark-run" class="unload" type="button" disabled>Запустить бенчмарк</button>
+            <p id="benchmark-summary" class="secondary"></p>
+            <dl id="benchmark-results" class="facts" hidden></dl>
+          </div>
+        </section>
+      </div>
+
+      <section class="hero" aria-labelledby="title">
+        <div>
+          <h2 id="title">Монитор Pi</h2>
+          <p>Встроенная задача создаёт и читает <code>smoke.txt</code>.</p>
+        </div>
+        <button id="run" type="button" disabled>Запустить проверку</button>
+      </section>
+
+      <section class="panel activity" aria-labelledby="activity-title">
+        <header class="panel-header"><h2 id="activity-title">Ход выполнения</h2><time id="elapsed">—</time></header>
+        <div id="phase" class="phase" data-status="idle" role="status">Готов к запуску</div>
+        <ol id="timeline" aria-label="События Pi"></ol>
+        <p id="empty" class="empty">События появятся после запуска.</p>
+        <p id="result" class="result" hidden></p>
+        <div id="workspace-row" class="workspace" hidden><span>Тестовая папка</span><code id="workspace"></code></div>
+        <details id="thinking" class="thinking" hidden>
+          <summary>Вывод thinking <span>последний фрагмент</span></summary>
+          <pre id="trace"></pre>
+        </details>
+      </section>
     </div>
   </main>
   <dialog id="ram-dialog" class="ram-dialog" aria-labelledby="ram-title">

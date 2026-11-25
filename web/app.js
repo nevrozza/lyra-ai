@@ -629,8 +629,11 @@ function renderModel(models, benchmarkUpdated = false) {
   renderModelList(names, models);
   get('models-panel').dataset.mode = orchestratorMode.checked ? 'orchestrator' : 'manual';
   get('orchestrator-placeholder').hidden = !orchestratorMode.checked;
-  get('selected-model').hidden = !names?.includes(model);
+  const hasModel = Boolean(names?.includes(model));
+  get('selected-model').hidden = !hasModel;
+  get('benchmark-panel').hidden = !hasModel;
   get('model-name').textContent = model ?? '';
+  get('benchmark-model').textContent = model ?? '';
   renderContextChoice();
   const { loaded, action, benchmarking, pinned } = modelStatus(model, models);
   benchmarkRun.textContent = benchmarking ? 'Бенчмарк выполняется…' : 'Запустить бенчмарк';
