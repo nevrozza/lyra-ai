@@ -14,7 +14,7 @@ use tokio::{
     sync::watch,
 };
 
-use crate::{benchmark, context, telemetry::ModelAction};
+use crate::{benchmark, context, ollama::ModelAction};
 
 const PROMPT: &str = "Create smoke.txt in the current directory with exactly this line: Pi работает\nThen use the read tool to read the file and report its content. Only access this file.";
 const EXPECTED: &str = "Pi работает";

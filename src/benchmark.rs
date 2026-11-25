@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{context, telemetry};
+use crate::{context, ollama};
 
 const PROMPT: &str = "Explain how a hash table works to a beginner. Cover hashing, collisions, and resizing. Give a short example and then describe the time complexity.";
 const TOKEN_LIMIT: u32 = 128;
@@ -272,10 +272,10 @@ pub fn measure(
     mut on_stage: impl FnMut(Stage),
 ) -> Result<Measurement, String> {
     let backend = context::backend_model(model, context_tokens)?;
-    let loaded = telemetry::ollama().ok_or("Не удалось проверить память Ollama.")?;
+    let loaded = ollama::running_models().ok_or("Не удалось проверить память Ollama.")?;
     let resident = loaded
         .iter()
-        .find(|entry| telemetry::same_model(&entry.name, &backend));
+        .find(|entry| ollama::same_model(&entry.name, &backend));
     let was_loaded = resident.is_some_and(|entry| {
         context_tokens
             .zip(entry.context_length)
@@ -298,7 +298,7 @@ pub fn measure(
     } else {
         Stage::LoadingAndPrefill
     });
-    let response = telemetry::ollama_agent(Duration::from_secs(300))
+    let response = ollama::agent(Duration::from_secs(300))
         .post("http://127.0.0.1:11434/api/generate")
         .send_json(request)
         .map_err(|error| match error {
@@ -315,13 +315,13 @@ pub fn measure(
 
     let response = read_generation(BufReader::new(response.into_reader()), &mut on_stage)?;
     on_stage(Stage::MeasuringMemory);
-    let measured_model = telemetry::ollama().and_then(|models| {
+    let measured_model = ollama::running_models().and_then(|models| {
         models
             .into_iter()
-            .find(|entry| telemetry::same_model(&entry.name, &backend))
+            .find(|entry| ollama::same_model(&entry.name, &backend))
     });
     if resident.is_none()
-        && let Err(error) = telemetry::unload_profile(&backend)
+        && let Err(error) = ollama::unload_profile(&backend)
     {
         eprintln!("Could not unload benchmark model {backend}: {error}");
     }
@@ -349,9 +349,7 @@ pub fn measure(
         was_loaded,
         context_tokens,
         measured_context_tokens,
-        model_ram_bytes: measured_model
-            .as_ref()
-            .and_then(telemetry::Model::ram_bytes),
+        model_ram_bytes: measured_model.as_ref().and_then(ollama::Model::ram_bytes),
         model_vram_bytes: measured_model.as_ref().and_then(|entry| entry.size_vram),
         token_memory_bytes_f16: bytes_per_token
             .and_then(|bytes| bytes.checked_mul(occupied_tokens)),
@@ -405,7 +403,7 @@ fn read_generation(
     Err("Ollama завершила поток без итоговых замеров.".into())
 }
 
-fn retention(resident: Option<&telemetry::Model>) -> Option<Value> {
+fn retention(resident: Option<&ollama::Model>) -> Option<Value> {
     let Some(model) = resident else {
         // Leave time to sample /api/ps before unloading the cold benchmark.
         return Some(json!("10s"));

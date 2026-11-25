@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, sync::Mutex, time::Duration};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{benchmark::Store, telemetry};
+use crate::{benchmark::Store, ollama};
 
 pub const PRESETS: [u32; 7] = [2048, 4096, 8192, 16384, 32768, 65536, 131072];
 const ALIAS_PREFIX: &str = "lyra-context/model:";
@@ -30,7 +30,7 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
     };
     let _profiles = PROFILES.lock().map_err(|error| error.to_string())?;
     let installed =
-        telemetry::installed_models().ok_or("Не удалось получить список моделей Ollama.")?;
+        ollama::installed_models().ok_or("Не удалось получить список моделей Ollama.")?;
     if !installed.iter().any(|name| same_source(name, model)) {
         return Err(format!("Модель больше не установлена в Ollama: {model}."));
     }
@@ -40,7 +40,7 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
     struct Created {
         status: String,
     }
-    let result = telemetry::ollama_agent(Duration::from_secs(90))
+    let result = ollama::agent(Duration::from_secs(90))
         .post("http://127.0.0.1:11434/api/create")
         .send_json(json!({
             "model": alias,
@@ -90,7 +90,7 @@ pub(crate) fn clean_orphans(store: &Store, previous: BTreeSet<String>) -> BTreeS
     let Ok(_profiles) = PROFILES.lock() else {
         return BTreeSet::new();
     };
-    let Some(installed) = telemetry::model_tag_names() else {
+    let Some(installed) = ollama::model_tag_names() else {
         return BTreeSet::new();
     };
     if !installed.iter().any(|model| is_alias(model)) {
@@ -116,22 +116,22 @@ pub(crate) fn clean_orphans(store: &Store, previous: BTreeSet<String>) -> BTreeS
 
 fn delete_profile(profile: &str) -> Result<bool, String> {
     let is_loaded = || {
-        telemetry::ollama()
+        ollama::running_models()
             .map(|models| {
                 models
                     .iter()
-                    .any(|entry| telemetry::same_model(&entry.name, profile))
+                    .any(|entry| ollama::same_model(&entry.name, profile))
             })
             .ok_or("could not read Ollama's loaded models")
     };
     if is_loaded()? {
-        telemetry::unload_profile(profile)?;
+        ollama::unload_profile(profile)?;
         // Ollama can acknowledge an unload before the runner releases the files.
         if is_loaded()? {
             return Ok(false);
         }
     }
-    match telemetry::ollama_agent(Duration::from_secs(4))
+    match ollama::agent(Duration::from_secs(4))
         .delete("http://127.0.0.1:11434/api/delete")
         .send_json(json!({ "model": profile }))
     {
@@ -157,7 +157,7 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
         model_info: Value,
         parameters: Option<String>,
     }
-    let info = telemetry::ollama_agent(Duration::from_secs(2))
+    let info = ollama::agent(Duration::from_secs(2))
         .post("http://127.0.0.1:11434/api/show")
         .send_json(json!({ "model": model, "verbose": false }))
         .ok()?
