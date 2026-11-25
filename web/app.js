@@ -23,6 +23,7 @@ let modelSubmitting;
 let modelRequestError = '';
 let ramTimer;
 let readingRam = false;
+let detailedRam;
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -237,13 +238,17 @@ function renderMetrics(next) {
   metrics = next;
   get('sampled').textContent = clock.format(new Date());
   get('cpu-value').textContent = next.cpu_percent == null ? '—' : `${whole.format(next.cpu_percent)}%`;
-  get('ram-value').textContent = memoryLabel(next.ram);
   meter(get('cpu'), next.cpu_percent);
-  meter(get('ram'), memoryPercent(next.ram));
+  renderRamTotal((ramExpand.open && detailedRam) || next.ram);
   get('gpus').replaceChildren(...next.gpus.map(gpuCard));
   get('no-gpu').hidden = next.gpus.length > 0;
   get('no-gpu').textContent = 'Данные NVIDIA GPU недоступны.';
   renderModel(next.models);
+}
+
+function renderRamTotal(ram) {
+  get('ram-value').textContent = memoryLabel(ram);
+  meter(get('ram'), memoryPercent(ram));
 }
 
 function scheduleMetrics(delay) {
@@ -283,14 +288,17 @@ async function readRam() {
   readingRam = true;
   const list = get('ram-list');
   const message = get('ram-message');
-  const windows = get('ram-windows');
   try {
     const response = await fetch('/ram');
     if (!response.ok) throw new Error();
-    const { applications: apps, windows_bytes: windowsBytes } = await response.json();
+    const usage = await response.json();
     if (!ramExpand.open || document.hidden) return;
-    windows.hidden = windowsBytes == null;
-    if (windowsBytes != null) get('ram-windows-value').textContent = memoryAmount(windowsBytes);
+    const apps = usage.applications;
+    detailedRam = usage.physical;
+    renderRamTotal(detailedRam ?? metrics?.ram);
+    renderRamRow('ram-windows', usage.windows_bytes);
+    renderRamRow('ram-other', usage.other_process_bytes || null);
+    renderRamRow('ram-unattributed', usage.unattributed_bytes);
     list.replaceChildren(...(apps ?? []).map((app) => {
       const row = element('li', '');
       row.append(element('span', app.name), element('output', memoryAmount(app.bytes)));
@@ -299,7 +307,9 @@ async function readRam() {
     message.hidden = Boolean(apps?.length);
     message.textContent = apps === null ? 'Данные по приложениям недоступны.' : 'Нет приложений от 300 МиБ.';
   } catch {
-    windows.hidden = true;
+    detailedRam = undefined;
+    renderRamTotal(metrics?.ram);
+    for (const id of ['ram-windows', 'ram-other', 'ram-unattributed']) renderRamRow(id, null);
     list.replaceChildren();
     message.hidden = false;
     message.textContent = 'Не удалось получить список приложений.';
@@ -309,7 +319,18 @@ async function readRam() {
   }
 }
 
-ramExpand.addEventListener('toggle', () => scheduleRam(0));
+function renderRamRow(id, bytes) {
+  get(id).hidden = bytes == null;
+  if (bytes != null) get(`${id}-value`).textContent = memoryAmount(bytes);
+}
+
+ramExpand.addEventListener('toggle', () => {
+  if (!ramExpand.open) {
+    detailedRam = undefined;
+    renderRamTotal(metrics?.ram);
+  }
+  scheduleRam(0);
+});
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {

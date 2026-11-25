@@ -92,6 +92,10 @@ h2 { font-size: .96rem; font-weight: 650; }
 .ram-breakdown ul { list-style: none; margin: 0; padding: 0; }
 .ram-breakdown li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: .78rem; overflow-wrap: anywhere; }
 .ram-breakdown li output { flex-shrink: 0; }
+.ram-remainder { margin: 0; }
+.ram-remainder > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 4px 0; color: var(--muted); font-size: .78rem; }
+.ram-remainder > div:first-child:not([hidden]), .ram-remainder > div[hidden] + div:not([hidden]) { margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--line); }
+.ram-remainder dd { margin: 0; flex-shrink: 0; }
 meter { grid-column: 1 / -1; width: 100%; height: 7px; appearance: none; }
 meter::-webkit-meter-bar { background: #2c382e; border: 0; }
 meter::-webkit-meter-optimum-value { background: #b6d99a; border-radius: 7px; }

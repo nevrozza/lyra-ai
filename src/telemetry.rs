@@ -21,9 +21,9 @@ pub struct Metrics {
 }
 
 #[derive(Clone, Serialize)]
-struct Memory {
-    used: u64,
-    total: u64,
+pub(crate) struct Memory {
+    pub(crate) used: u64,
+    pub(crate) total: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -208,6 +208,27 @@ fn system() -> System {
             (u64::from(self.high) << 32) | u64::from(self.low)
         }
     }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemTimes(idle: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
+    }
+
+    let (mut idle, mut kernel, mut user) = (
+        FileTime::default(),
+        FileTime::default(),
+        FileTime::default(),
+    );
+    // The FFI buffers use the Win32 layout and point to initialized, writable values.
+    let cpu = (unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0)
+        .then(|| (kernel.ticks() + user.ticks(), idle.ticks()));
+    System {
+        cpu,
+        ram: windows_ram(),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_ram() -> Option<Memory> {
     #[repr(C)]
     #[derive(Default)]
     struct MemoryStatus {
@@ -223,27 +244,17 @@ fn system() -> System {
     }
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn GetSystemTimes(idle: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
         fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
     }
-
-    let (mut idle, mut kernel, mut user) = (
-        FileTime::default(),
-        FileTime::default(),
-        FileTime::default(),
-    );
     let mut memory = MemoryStatus {
         length: size_of::<MemoryStatus>() as u32,
         ..MemoryStatus::default()
     };
-    // The FFI buffers use the Win32 layouts and point to initialized, writable values.
-    let cpu = (unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0)
-        .then(|| (kernel.ticks() + user.ticks(), idle.ticks()));
-    let ram = (unsafe { GlobalMemoryStatusEx(&mut memory) } != 0).then(|| Memory {
+    // Win32 expects the buffer size to be initialized before the call.
+    (unsafe { GlobalMemoryStatusEx(&mut memory) } != 0).then(|| Memory {
         used: memory.total_phys.saturating_sub(memory.avail_phys),
         total: memory.total_phys,
-    });
-    System { cpu, ram }
+    })
 }
 
 #[cfg(target_os = "linux")]

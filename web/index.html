@@ -71,6 +71,14 @@
                 </div>
                 <p id="ram-message" class="secondary">Считаем память приложений…</p>
                 <ul id="ram-list" aria-label="Приложения по использованию RAM"></ul>
+                <dl class="ram-remainder">
+                  <div id="ram-other" hidden>
+                    <dt title="Собственная физическая память измеренных процессов ниже порога или за пределами топ-7">Другие процессы</dt><dd id="ram-other-value"></dd>
+                  </div>
+                  <div id="ram-unattributed" hidden>
+                    <dt title="Разница между общей занятой RAM и измеренными строками. Сюда может входить общая память, сжатая память и системные выделения.">Прочая память</dt><dd id="ram-unattributed-value"></dd>
+                  </div>
+                </dl>
               </div>
             </details>
             <div id="gpus" class="gpus"></div>

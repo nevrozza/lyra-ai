@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::telemetry::Memory;
+
 #[derive(Clone, Serialize)]
 pub struct Application {
     name: String,
@@ -10,8 +12,11 @@ pub struct Application {
 
 #[derive(Clone, Default, Serialize)]
 pub struct Usage {
+    physical: Option<Memory>,
     windows_bytes: Option<u64>,
     applications: Option<Vec<Application>>,
+    other_process_bytes: Option<u64>,
+    unattributed_bytes: Option<u64>,
 }
 
 #[derive(Default)]
@@ -32,23 +37,58 @@ impl Cache {
     }
 }
 
+#[cfg(windows)]
 fn collect() -> Usage {
-    #[cfg(windows)]
-    return Usage {
-        windows_bytes: windows_memory(),
-        applications: applications(),
-    };
+    let apps = applications();
+    let windows = windows_memory();
+    Usage::from_samples(crate::telemetry::windows_ram(), windows, apps)
+}
 
-    #[cfg(not(windows))]
+#[cfg(not(windows))]
+fn collect() -> Usage {
     Usage::default()
 }
 
 #[cfg(any(windows, test))]
-fn rank(processes: impl IntoIterator<Item = (String, u64)>) -> Vec<Application> {
+struct RankedApplications {
+    top: Vec<Application>,
+    total_bytes: u64,
+    other_bytes: u64,
+}
+
+#[cfg(any(windows, test))]
+impl Usage {
+    fn from_samples(
+        physical: Option<Memory>,
+        windows_bytes: Option<u64>,
+        apps: Option<RankedApplications>,
+    ) -> Self {
+        let other_process_bytes = apps.as_ref().map(|apps| apps.other_bytes);
+        let unattributed_bytes = physical
+            .as_ref()
+            .zip(apps.as_ref())
+            .and_then(|(ram, apps)| {
+                ram.used
+                    .checked_sub(apps.total_bytes)?
+                    .checked_sub(windows_bytes.unwrap_or_default())
+            });
+        Self {
+            physical,
+            windows_bytes,
+            applications: apps.map(|apps| apps.top),
+            other_process_bytes,
+            unattributed_bytes,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn rank(processes: impl IntoIterator<Item = (String, u64)>) -> RankedApplications {
     let mut totals = std::collections::HashMap::<String, u64>::new();
     for (name, bytes) in processes {
         *totals.entry(name).or_default() += bytes;
     }
+    let total_bytes = totals.values().sum::<u64>();
     let mut apps: Vec<_> = totals
         .into_iter()
         .filter_map(|(name, bytes)| {
@@ -62,11 +102,16 @@ fn rank(processes: impl IntoIterator<Item = (String, u64)>) -> Vec<Application> 
             .then(left.name.cmp(&right.name))
     });
     apps.truncate(7);
-    apps
+    let other_bytes = total_bytes - apps.iter().map(|app| app.bytes).sum::<u64>();
+    RankedApplications {
+        top: apps,
+        total_bytes,
+        other_bytes,
+    }
 }
 
 #[cfg(windows)]
-fn applications() -> Option<Vec<Application>> {
+fn applications() -> Option<RankedApplications> {
     use std::collections::HashMap;
     use std::ffi::c_void;
 
@@ -292,14 +337,42 @@ mod tests {
             ("small".into(), 299 * MIB),
         ];
         let apps = rank(readings.clone());
-        assert_eq!(apps.len(), 1);
-        assert_eq!(apps[0].name, "browser");
-        assert_eq!(apps[0].bytes, 300 * MIB);
+        assert_eq!(apps.top.len(), 1);
+        assert_eq!(apps.top[0].name, "browser");
+        assert_eq!(apps.top[0].bytes, 300 * MIB);
+        assert_eq!(apps.other_bytes, 299 * MIB);
 
         readings.extend((1..=8).map(|n| (format!("app{n}"), (300 + n) * MIB)));
         let apps = rank(readings);
-        assert_eq!(apps.len(), 7);
-        assert_eq!(apps[0].name, "app8");
-        assert_eq!(apps[6].name, "app2");
+        assert_eq!(apps.top.len(), 7);
+        assert_eq!(apps.top[0].name, "app8");
+        assert_eq!(apps.top[6].name, "app2");
+        assert_eq!(apps.other_bytes, 900 * MIB);
+    }
+
+    #[test]
+    fn reconciles_physical_memory_without_counting_hidden_apps_twice() {
+        const MIB: u64 = 1024 * 1024;
+        let readings = vec![("browser".into(), 4000 * MIB), ("small".into(), 200 * MIB)];
+        let usage = Usage::from_samples(
+            Some(Memory {
+                used: 12000 * MIB,
+                total: 16000 * MIB,
+            }),
+            Some(1800 * MIB),
+            Some(rank(readings.clone())),
+        );
+        assert_eq!(usage.other_process_bytes, Some(200 * MIB));
+        assert_eq!(usage.unattributed_bytes, Some(6000 * MIB));
+
+        let usage = Usage::from_samples(
+            Some(Memory {
+                used: 5000 * MIB,
+                total: 16000 * MIB,
+            }),
+            Some(1800 * MIB),
+            Some(rank(readings)),
+        );
+        assert_eq!(usage.unattributed_bytes, None);
     }
 }
