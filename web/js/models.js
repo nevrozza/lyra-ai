@@ -232,7 +232,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     } else if (action === 'unload') {
       mode = 'loading';
       label = 'Выгружается';
-    } else if (!loaded && ((isTaskModel && session.run?.status === 'running') || action === 'pin')) {
+    } else if (!loaded && ((isTaskModel && session.run?.status === 'running') || action === 'pin' || action === 'load')) {
       mode = 'loading';
       label = 'Загружается';
     } else if (loaded) {

@@ -246,15 +246,26 @@ async fn change_model(
         Err(status) => return status,
     };
     if !app.task.send_if_modified(|snapshot| {
-        matches_selection(snapshot, headers) && snapshot.begin_model_action(model.clone(), action)
+        snapshot.mode() == run::Mode::Manual
+            && matches_selection(snapshot, headers)
+            && snapshot.begin_model_action(model.clone(), action)
     }) {
         return StatusCode::CONFLICT;
     }
 
+    execute_model_action(app, model, action);
+    StatusCode::ACCEPTED
+}
+
+pub(super) fn execute_model_action(
+    app: Arc<App>,
+    model: String,
+    action: ollama::ModelAction,
+) -> tokio::task::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let tokens = if matches!(action, ollama::ModelAction::Pin) {
+            let tokens = if action.uses_context() {
                 model_context(&store, &model)?
             } else {
                 None
@@ -264,10 +275,11 @@ async fn change_model(
         .await
         .unwrap_or_else(|error| Err(error.to_string()));
         app.metrics.lock().await.invalidate();
-        app.task
-            .send_modify(|snapshot| snapshot.finish_model_action(action, result));
-    });
-    StatusCode::ACCEPTED
+        app.task.send_modify(|snapshot| {
+            snapshot.finish_model_action(action, result.clone());
+        });
+        result
+    })
 }
 
 pub(super) async fn clean_context_profiles(app: Arc<App>) {

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use chrono::{DateTime, Utc};
@@ -26,12 +26,21 @@ impl Model {
     }
 
     pub(crate) fn remaining_keep_alive(&self) -> Option<Value> {
-        let expires = DateTime::parse_from_rfc3339(self.expires_at.as_deref()?).ok()?;
-        let remaining = expires.signed_duration_since(DateTime::<Utc>::from(SystemTime::now()));
+        let remaining = self.remaining_lifetime()?;
         if remaining.num_days() > 36_500 {
             return Some(json!(-1));
         }
         Some(json!(format!("{}ms", remaining.num_milliseconds().max(1))))
+    }
+
+    pub(crate) fn is_pinned(&self) -> bool {
+        self.remaining_lifetime()
+            .is_some_and(|remaining| remaining.num_days() > 36_500)
+    }
+
+    fn remaining_lifetime(&self) -> Option<chrono::TimeDelta> {
+        let expires = DateTime::parse_from_rfc3339(self.expires_at.as_deref()?).ok()?;
+        Some(expires.signed_duration_since(DateTime::<Utc>::from(SystemTime::now())))
     }
 }
 
@@ -70,13 +79,23 @@ pub(crate) fn chat(
     prompt: &str,
     max_output_tokens: u32,
     context_tokens: Option<u32>,
+    require_loaded: bool,
 ) -> Result<ChatReply, String> {
-    let backend = context::backend_model(model, context_tokens)?;
-    let resident = running_models().and_then(|models| {
-        models
-            .into_iter()
-            .find(|entry| same_model(&entry.name, &backend))
-    });
+    let running = running_models();
+    let resident = running
+        .as_deref()
+        .and_then(|entries| loaded_backend(entries, model, context_tokens));
+    let backend = match resident {
+        Some(entry) => entry.name.clone(),
+        None if require_loaded => {
+            return Err(if running.is_some() {
+                format!("{model} is not loaded with its configured context")
+            } else {
+                "Could not check loaded models in Ollama".into()
+            });
+        }
+        None => context::backend_model(model, context_tokens)?,
+    };
     let mut request = json!({
         "model": backend,
         "messages": [{"role": "user", "content": prompt}],
@@ -141,6 +160,21 @@ pub(crate) fn same_model(left: &str, right: &str) -> bool {
         || right.strip_suffix(":latest") == Some(left)
 }
 
+fn loaded_backend<'a>(entries: &'a [Model], model: &str, tokens: Option<u32>) -> Option<&'a Model> {
+    if let Some(tokens) = tokens {
+        let alias = context::alias(model);
+        let entry = entries.iter().find(|entry| entry.name == alias)?;
+        let tokens = Some(u64::from(tokens));
+        // Ollama can report a smaller effective context than the profile requests.
+        (entry.context_length == tokens
+            || context::estimate(&alias)
+                .is_some_and(|profile| profile.configured_context_tokens == tokens))
+        .then_some(entry)
+    } else {
+        entries.iter().find(|entry| same_model(&entry.name, model))
+    }
+}
+
 pub fn installed_models() -> Option<Vec<String>> {
     Some(model_catalog()?.into_keys().collect())
 }
@@ -195,35 +229,72 @@ fn model_tags() -> Option<Vec<CatalogEntry>> {
     )
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAction {
+    Load,
     Pin,
     Unpin,
     Unload,
 }
+
+impl ModelAction {
+    pub(crate) fn uses_context(self) -> bool {
+        matches!(self, Self::Load | Self::Pin)
+    }
+}
+
+const SESSION_KEEP_ALIVE: &str = "5m";
 
 pub fn change_model(
     model: &str,
     action: ModelAction,
     context_tokens: Option<u32>,
 ) -> Result<(), String> {
-    if matches!(action, ModelAction::Pin) {
-        let backend = context::backend_model(model, context_tokens)?;
-        return set_keep_alive(&backend, serde_json::json!(-1), Duration::from_secs(180));
+    if action.uses_context() {
+        let running = running_models();
+        if matches!(action, ModelAction::Load) && running.is_none() {
+            return Err("Не удалось проверить загруженные модели Ollama.".into());
+        }
+        let resident = running
+            .as_deref()
+            .and_then(|entries| loaded_backend(entries, model, context_tokens));
+        let backend = match resident {
+            Some(entry) => entry.name.clone(),
+            None => context::backend_model(model, context_tokens)?,
+        };
+        let keep_alive =
+            if matches!(action, ModelAction::Pin) || resident.is_some_and(Model::is_pinned) {
+                json!(-1)
+            } else {
+                json!(SESSION_KEEP_ALIVE)
+            };
+        return set_keep_alive(&backend, keep_alive, Duration::from_secs(180));
     }
     let alias = context::alias(model);
+    let matches_model = |entry: &Model| same_model(&entry.name, model) || entry.name == alias;
     let loaded = running_models().ok_or("Ollama недоступна")?;
-    let keep_alive = if matches!(action, ModelAction::Unload) {
-        serde_json::json!(0)
+    let unload = matches!(action, ModelAction::Unload);
+    let keep_alive = if unload {
+        json!(0)
     } else {
-        serde_json::json!("5m")
+        json!(SESSION_KEEP_ALIVE)
     };
-    for entry in loaded
-        .iter()
-        .filter(|entry| same_model(&entry.name, model) || entry.name == alias)
-    {
+    for entry in loaded.iter().filter(|entry| matches_model(entry)) {
         set_keep_alive(&entry.name, keep_alive.clone(), Duration::from_secs(180))?;
+    }
+    if unload && loaded.iter().any(matches_model) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let remaining = running_models().ok_or("Не удалось подтвердить выгрузку модели.")?;
+            if !remaining.iter().any(matches_model) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("Ollama ещё держит модель в памяти после команды выгрузки.".into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
     Ok(())
 }

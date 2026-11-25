@@ -163,7 +163,7 @@ impl Snapshot {
     }
 
     pub fn begin_model_action(&mut self, model: String, action: ModelAction) -> bool {
-        if self.mode != Mode::Manual || self.busy() {
+        if self.busy() {
             return false;
         }
         self.model_action = Some(action);
@@ -175,7 +175,9 @@ impl Snapshot {
     pub fn finish_model_action(&mut self, action: ModelAction, result: Result<(), String>) {
         self.model_action = None;
         match result {
-            Ok(()) if self.operation_model == self.model => {
+            Ok(())
+                if self.operation_model == self.model && !matches!(action, ModelAction::Load) =>
+            {
                 self.pinned = Some(matches!(action, ModelAction::Pin))
             }
             Ok(()) => {}
