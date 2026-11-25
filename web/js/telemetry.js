@@ -73,18 +73,19 @@ export function createTelemetry(session, { beginSample, onSample }) {
   async function readMetrics() {
     if (session.closed || document.hidden) return;
     polling = true;
+    const revision = session.run?.metrics_revision;
     const sample = beginSample();
     try {
       const response = await fetch('/metrics');
       if (!response.ok) throw new Error();
       const next = await response.json();
-      if (!session.closed) {
+      if (!session.closed && session.run?.metrics_revision === revision) {
         session.metrics = next;
         renderMetrics(next);
         onSample(sample);
       }
     } catch {
-      if (!session.closed) get('sampled').textContent = 'Нет связи';
+      if (!session.closed && session.run?.metrics_revision === revision) get('sampled').textContent = 'Нет связи';
     } finally {
       polling = false;
       const delay = metricsRefreshPending ? 0 : (session.run?.status === 'running' ? 5_000 : 15_000);

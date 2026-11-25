@@ -51,15 +51,19 @@ function receiveRun(next, restarted) {
   const wasChanging = models.isMemoryChanging();
   const justStarted = session.run?.status !== 'running' && next.status === 'running';
   const benchmarkUpdated = session.run?.benchmark_revision !== next.benchmark_revision;
+  const metricsUpdated = session.run?.metrics_revision !== next.metrics_revision;
   const delegationChanged = session.run?.delegated_model !== next.delegated_model;
-  const actionFinished = models.acceptRun(next, restarted);
+  models.acceptRun(next, restarted);
   session.run = next;
   session.pending = false;
-  if (wasChanging && !models.isMemoryChanging()) models.refreshMemoryWarning();
+  if (metricsUpdated || (wasChanging && !models.isMemoryChanging())) {
+    models.refreshMemoryWarning();
+  } else if (justStarted || benchmarkUpdated || delegationChanged) {
+    telemetry.scheduleMetrics(0);
+  }
   updateControls();
   activity.render(next);
   models.render(session.metrics?.models, benchmarkUpdated);
-  if (justStarted || actionFinished || benchmarkUpdated || delegationChanged) telemetry.scheduleMetrics(0);
 }
 
 function showClosed() {

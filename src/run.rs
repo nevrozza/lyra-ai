@@ -43,6 +43,7 @@ pub struct Snapshot {
     benchmark_running: bool,
     benchmark_stage: Option<benchmark::Stage>,
     benchmark_revision: u64,
+    metrics_revision: u64,
     status: &'static str,
     phase: String,
     started_at: Option<u128>,
@@ -75,6 +76,7 @@ impl Snapshot {
             benchmark_running: false,
             benchmark_stage: None,
             benchmark_revision: 0,
+            metrics_revision: 0,
             status: "idle",
             phase: "Готов к запуску".into(),
             started_at: None,
@@ -94,6 +96,7 @@ impl Snapshot {
             mode: self.mode,
             pinned: self.pinned,
             benchmark_revision: self.benchmark_revision,
+            metrics_revision: self.metrics_revision,
             ..Self::new(self.model.clone())
         };
         self.status = "running";
@@ -160,6 +163,7 @@ impl Snapshot {
 
     pub fn finish_delegation(&mut self) {
         self.delegated_model = None;
+        self.metrics_revision += 1;
     }
 
     pub fn begin_model_action(&mut self, model: String, action: ModelAction) -> bool {
@@ -174,6 +178,7 @@ impl Snapshot {
 
     pub fn finish_model_action(&mut self, action: ModelAction, result: Result<(), String>) {
         self.model_action = None;
+        self.metrics_revision += 1;
         match result {
             Ok(())
                 if self.operation_model == self.model && !matches!(action, ModelAction::Load) =>
@@ -203,6 +208,7 @@ impl Snapshot {
     pub fn finish_benchmark(&mut self, result: Result<(), String>) {
         self.benchmark_running = false;
         self.benchmark_stage = None;
+        self.metrics_revision += 1;
         match result {
             Ok(()) => self.model_record_changed(),
             Err(error) => self.model_error = Some(error),
@@ -241,6 +247,7 @@ pub async fn execute(
     let elapsed_ms = started.elapsed().as_millis();
     before_finish.await;
     state.send_modify(|state| {
+        state.metrics_revision += 1;
         state.elapsed_ms = Some(elapsed_ms);
         state.model_working = false;
         let (status, phase, mut message) = match result {

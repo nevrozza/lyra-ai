@@ -288,10 +288,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       return !isBlocked() && !orchestratorMode.checked && session.metrics?.installed_models?.includes(session.run?.model);
     },
     acceptRun(next, restarted) {
-      const finished = (modelSubmitting != null || session.run?.model_action != null) && next.model_action == null;
       if (restarted || selectingModel === next.model) selectingModel = undefined;
       modelSubmitting = undefined;
-      return finished;
     },
     showClosed() {
       get('context-memory-warning').hidden = true;
