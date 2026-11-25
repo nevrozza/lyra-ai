@@ -2,6 +2,7 @@ const get = (id) => document.getElementById(id);
 const runButton = get('run');
 const pinModel = get('pin-model');
 const unloadModel = get('unload-model');
+const modelList = get('model-list');
 const ramExpand = get('ram-expand');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
@@ -21,6 +22,8 @@ let metricsTimer;
 let metricsRefreshPending = false;
 let modelSubmitting;
 let modelRequestError = '';
+let selectingModel;
+let modelRows = new Map();
 let ramTimer;
 let readingRam = false;
 let detailedRam;
@@ -38,10 +41,13 @@ function connectionState(value, label) {
 }
 
 function updateControls() {
-  const blocked = !state || connection.dataset.state !== 'online' || modelSubmitting != null || state.model_action != null || state.status === 'running';
-  runButton.disabled = blocked || pending;
-  pinModel.disabled = blocked || pending || metrics?.models == null;
-  unloadModel.disabled = blocked || pending || !loadedModel(metrics?.models);
+  const blocked = !state || connection.dataset.state !== 'online' || pending || selectingModel != null ||
+    modelSubmitting != null || state.model_action != null || state.status === 'running';
+  const installed = metrics?.installed_models?.includes(state?.model);
+  runButton.disabled = blocked || !installed;
+  pinModel.disabled = blocked || !installed || metrics?.models == null;
+  unloadModel.disabled = blocked || !installed || !loadedModel(metrics?.models, state?.model);
+  for (const { button } of modelRows.values()) button.disabled = blocked;
 }
 
 function duration(ms) {
@@ -58,6 +64,7 @@ function renderRun(next) {
   const justStarted = state?.status !== 'running' && next.status === 'running';
   const actionFinished = (modelSubmitting != null || state?.model_action != null) && next.model_action == null;
   state = next;
+  if (selectingModel === next.model) selectingModel = undefined;
   pending = false;
   modelSubmitting = undefined;
   updateControls();
@@ -65,7 +72,7 @@ function renderRun(next) {
   const phase = get('phase');
   phase.dataset.status = next.status;
   if (phase.textContent !== next.phase) phase.textContent = next.phase;
-  get('model-name').textContent = next.model;
+  get('model-name').textContent = next.model ?? '';
   get('workspace-row').hidden = !next.workspace;
   get('workspace').textContent = next.workspace ?? '';
   get('result').hidden = !next.result;
@@ -99,8 +106,8 @@ runButton.addEventListener('click', async () => {
   pending = true;
   updateControls();
   try {
-    const response = await fetch('/run', { method: 'POST' });
-    if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
+    const response = await postModel('/run', state.model);
+    if (!response.ok) throw new Error(modelResponseError(response));
   } catch (error) {
     pending = false;
     updateControls();
@@ -116,18 +123,45 @@ pinModel.addEventListener('change', () => {
 
 unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
 
+function postModel(path, selected, payload) {
+  const options = { method: 'POST', headers: { 'X-Lyra-Model': selected ?? '' } };
+  if (payload) {
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(payload);
+  }
+  return fetch(path, options);
+}
+
+function modelResponseError(response) {
+  if (response.status === 409) return 'Модель изменилась или выполняется другая операция.';
+  if (response.status === 404) return 'Модель больше не установлена.';
+  if (response.status === 503) return 'Ollama недоступна.';
+  return `Запрос завершился ошибкой (${response.status}).`;
+}
+
+async function selectModel(model) {
+  if (model === state?.model) return;
+  selectingModel = model;
+  modelRequestError = '';
+  renderModel(metrics?.models);
+  try {
+    const response = await postModel('/model/select', state?.model, { model });
+    if (!response.ok) throw new Error(modelResponseError(response));
+  } catch (error) {
+    selectingModel = undefined;
+    modelRequestError = error.message;
+    renderModel(metrics?.models);
+    scheduleMetrics(0);
+  }
+}
+
 async function changeModel(action, path, payload) {
   modelSubmitting = action;
   modelRequestError = '';
   renderModel(metrics?.models);
   try {
-    const options = { method: 'POST' };
-    if (payload) {
-      options.headers = { 'Content-Type': 'application/json' };
-      options.body = JSON.stringify(payload);
-    }
-    const response = await fetch(path, options);
-    if (!response.ok) throw new Error(response.status === 409 ? 'Дождитесь завершения текущей операции.' : `Запрос завершился ошибкой (${response.status}).`);
+    const response = await postModel(path, state.model, payload);
+    if (!response.ok) throw new Error(modelResponseError(response));
   } catch (error) {
     modelSubmitting = undefined;
     modelRequestError = error.message;
@@ -156,12 +190,44 @@ function meter(node, value) {
   if (value != null) node.value = value;
 }
 
-function loadedModel(models) {
-  return models?.find((model) => model.name === state?.model || model.name === `${state?.model}:latest`);
+function loadedModel(models, name) {
+  return models?.find((model) => model.name === name || model.name === `${name}:latest` || `${model.name}:latest` === name);
+}
+
+function renderModelList(names, loaded) {
+  const installed = names ?? [];
+  if (installed.length !== modelRows.size || installed.some((name) => !modelRows.has(name))) {
+    modelRows = new Map(installed.map((name) => {
+      const row = element('li', '');
+      const button = element('button', '');
+      const status = element('span', '');
+      button.type = 'button';
+      button.append(element('span', name), status);
+      button.addEventListener('click', () => selectModel(name));
+      row.append(button);
+      return [name, { row, button, status }];
+    }));
+    modelList.replaceChildren(...Array.from(modelRows.values(), ({ row }) => row));
+  }
+  for (const [name, { button, status }] of modelRows) {
+    const selected = name === state?.model;
+    const resident = loadedModel(loaded, name);
+    button.setAttribute('aria-pressed', String(selected));
+    status.textContent = selected && state?.model_working ? 'Работает' :
+      resident ? 'В памяти' : loaded == null ? '—' : 'На диске';
+  }
+  modelList.hidden = installed.length === 0;
+  const message = get('model-list-message');
+  message.hidden = installed.length > 0;
+  message.textContent = names === undefined ? 'Получаем список моделей…' :
+    names === null ? 'Список Ollama недоступен.' : 'Локальных моделей пока нет. Добавьте модель через ollama pull.';
 }
 
 function renderModel(models) {
-  const loaded = loadedModel(models);
+  const names = metrics?.installed_models;
+  renderModelList(names, models);
+  get('selected-model').hidden = !names?.includes(state?.model);
+  const loaded = loadedModel(models, state?.model);
   const action = modelSubmitting ?? state?.model_action;
   const expiry = Date.parse(loaded?.expires_at);
   const remaining = expiry - Date.now();

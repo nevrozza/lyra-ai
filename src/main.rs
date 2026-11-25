@@ -9,7 +9,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{
         Html, IntoResponse, Response, Sse,
@@ -27,9 +27,12 @@ use tokio::{
 #[derive(Parser)]
 #[command(about = "Local dashboard for a Pi agent running on Ollama")]
 struct Options {
-    /// Name of the local model, as shown by `ollama list`.
+    /// Preferred local model, as shown by `ollama list`.
     #[arg(long, value_parser = model_name)]
-    model: String,
+    model: Option<String>,
+    /// Pi configuration directory managed by the Lyra launcher.
+    #[arg(long)]
+    pi_agent_dir: Option<PathBuf>,
     /// Local dashboard port.
     #[arg(long, default_value_t = 8787)]
     port: u16,
@@ -59,6 +62,7 @@ struct App {
     metrics: Mutex<telemetry::Cache>,
     ram: Mutex<ram::Cache>,
     startup_log: Option<PathBuf>,
+    pi_agent_dir: Option<PathBuf>,
 }
 
 fn main() -> std::io::Result<()> {
@@ -72,15 +76,33 @@ fn main() -> std::io::Result<()> {
 }
 
 async fn serve(options: Options) -> std::io::Result<()> {
+    let catalog = tokio::task::spawn_blocking(telemetry::installed_models)
+        .await
+        .ok()
+        .flatten();
+    let model = match catalog {
+        Some(names) => names
+            .iter()
+            .find(|name| {
+                options.model.as_deref().is_some_and(|preferred| {
+                    name.eq_ignore_ascii_case(preferred)
+                        || name.eq_ignore_ascii_case(&format!("{preferred}:latest"))
+                })
+            })
+            .or_else(|| names.first())
+            .cloned(),
+        None => options.model,
+    };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, options.port)).await?;
     let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
     let app = Arc::new(App {
         origin: format!("http://{host}"),
         host,
-        task: watch::channel(run::Snapshot::new(options.model)).0,
+        task: watch::channel(run::Snapshot::new(model)).0,
         metrics: Mutex::default(),
         ram: Mutex::default(),
         startup_log: options.startup_log,
+        pi_agent_dir: options.pi_agent_dir,
     });
     let router = Router::new()
         .route(
@@ -116,6 +138,7 @@ async fn serve(options: Options) -> std::io::Result<()> {
         .route("/run", post(start))
         .route("/model/pin", post(pin_model))
         .route("/model/unload", post(unload_model))
+        .route("/model/select", post(select_model))
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 
@@ -185,11 +208,14 @@ async fn local_only(State(app): State<Arc<App>>, request: Request, next: Next) -
     response
 }
 
-async fn start(State(app): State<Arc<App>>) -> StatusCode {
-    if !app.task.send_if_modified(run::Snapshot::start) {
+async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    if !app
+        .task
+        .send_if_modified(|snapshot| matches_selection(snapshot, &headers) && snapshot.start())
+    {
         return StatusCode::CONFLICT;
     }
-    tokio::spawn(run::execute(app.task.clone()));
+    tokio::spawn(run::execute(app.task.clone(), app.pi_agent_dir.clone()));
     StatusCode::ACCEPTED
 }
 
@@ -225,29 +251,71 @@ struct PinRequest {
     pinned: bool,
 }
 
-async fn pin_model(State(app): State<Arc<App>>, Json(request): Json<PinRequest>) -> StatusCode {
+async fn pin_model(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<PinRequest>,
+) -> StatusCode {
     let action = if request.pinned {
         telemetry::ModelAction::Pin
     } else {
         telemetry::ModelAction::Unpin
     };
-    change_model(app, action)
+    change_model(app, &headers, action)
 }
 
-async fn unload_model(State(app): State<Arc<App>>) -> StatusCode {
-    change_model(app, telemetry::ModelAction::Unload)
+async fn unload_model(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    change_model(app, &headers, telemetry::ModelAction::Unload)
 }
 
-fn change_model(app: Arc<App>, action: telemetry::ModelAction) -> StatusCode {
-    if !app
-        .task
-        .send_if_modified(|snapshot| snapshot.begin_model_action(action))
-    {
+#[derive(serde::Deserialize)]
+struct SelectRequest {
+    model: String,
+}
+
+async fn select_model(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<SelectRequest>,
+) -> StatusCode {
+    let Some(names) = tokio::task::spawn_blocking(telemetry::installed_models)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    if !names.contains(&request.model) {
+        return StatusCode::NOT_FOUND;
+    }
+    if !app.task.send_if_modified(|snapshot| {
+        matches_selection(snapshot, &headers) && snapshot.select_model(request.model)
+    }) {
+        return StatusCode::CONFLICT;
+    }
+    StatusCode::NO_CONTENT
+}
+
+fn matches_selection(snapshot: &run::Snapshot, headers: &HeaderMap) -> bool {
+    headers.get("x-lyra-model").is_none_or(|requested| {
+        requested.as_bytes() == snapshot.model().unwrap_or_default().as_bytes()
+    })
+}
+
+fn change_model(app: Arc<App>, headers: &HeaderMap, action: telemetry::ModelAction) -> StatusCode {
+    if !app.task.send_if_modified(|snapshot| {
+        matches_selection(snapshot, headers) && snapshot.begin_model_action(action)
+    }) {
         return StatusCode::CONFLICT;
     }
 
     tokio::spawn(async move {
-        let model = app.task.borrow().model().to_owned();
+        let model = app
+            .task
+            .borrow()
+            .model()
+            .expect("model action has a selection")
+            .to_owned();
         let result = tokio::task::spawn_blocking(move || telemetry::change_model(&model, action))
             .await
             .unwrap_or_else(|error| Err(error.to_string()));

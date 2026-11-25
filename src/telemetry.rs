@@ -18,6 +18,7 @@ pub struct Metrics {
     ram: Option<Memory>,
     gpus: Vec<Gpu>,
     models: Option<Vec<Model>>,
+    installed_models: Option<Vec<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -75,12 +76,17 @@ impl Cache {
         );
         self.previous_cpu = local.cpu;
 
-        let (models, gpus) = tokio::join!(tokio::task::spawn_blocking(ollama), nvidia());
+        let (models, installed_models, gpus) = tokio::join!(
+            tokio::task::spawn_blocking(ollama),
+            tokio::task::spawn_blocking(installed_models),
+            nvidia(),
+        );
         let metrics = Metrics {
             cpu_percent,
             ram: local.ram,
             gpus,
             models: models.ok().flatten(),
+            installed_models: installed_models.ok().flatten(),
         };
         self.snapshot = Some((Instant::now(), metrics.clone()));
         metrics
@@ -105,6 +111,38 @@ fn ollama() -> Option<Vec<Model>> {
             .ok()?
             .models,
     )
+}
+
+pub fn installed_models() -> Option<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        models: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        name: Option<String>,
+        model: Option<String>,
+        remote_host: Option<String>,
+    }
+
+    let catalog = ollama_agent(Duration::from_millis(800))
+        .get("http://127.0.0.1:11434/api/tags")
+        .call()
+        .ok()?
+        .into_json::<Catalog>()
+        .ok()?;
+    let mut names: Vec<_> = catalog
+        .models
+        .into_iter()
+        .filter(|entry| entry.remote_host.as_deref().unwrap_or_default().is_empty())
+        .filter_map(|entry| entry.name.or(entry.model))
+        .filter(|name| {
+            !name.to_ascii_lowercase().ends_with(":cloud") && crate::model_name(name).is_ok()
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    Some(names)
 }
 
 #[derive(Clone, Copy, Serialize)]

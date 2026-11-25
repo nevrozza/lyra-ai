@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -23,7 +23,7 @@ const EVENT_LIMIT: usize = 32;
 
 #[derive(Serialize)]
 pub struct Snapshot {
-    model: String,
+    model: Option<String>,
     model_working: bool,
     pinned: Option<bool>,
     model_action: Option<ModelAction>,
@@ -46,7 +46,7 @@ struct Activity {
 }
 
 impl Snapshot {
-    pub fn new(model: String) -> Self {
+    pub fn new(model: Option<String>) -> Self {
         Self {
             model,
             model_working: false,
@@ -65,7 +65,7 @@ impl Snapshot {
     }
 
     pub fn start(&mut self) -> bool {
-        if self.status == "running" || self.model_action.is_some() {
+        if self.model.is_none() || self.busy() {
             return false;
         }
         *self = Self {
@@ -84,12 +84,26 @@ impl Snapshot {
         true
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    fn busy(&self) -> bool {
+        self.status == "running" || self.model_action.is_some()
+    }
+
+    pub fn select_model(&mut self, model: String) -> bool {
+        if self.busy() {
+            return false;
+        }
+        self.model = Some(model);
+        self.pinned = None;
+        self.model_error = None;
+        true
     }
 
     pub fn begin_model_action(&mut self, action: ModelAction) -> bool {
-        if self.status == "running" || self.model_action.is_some() {
+        if self.model.is_none() || self.busy() {
             return false;
         }
         self.model_action = Some(action);
@@ -114,10 +128,14 @@ impl Snapshot {
     }
 }
 
-pub async fn execute(state: watch::Sender<Snapshot>) {
+pub async fn execute(state: watch::Sender<Snapshot>, pi_agent_dir: Option<PathBuf>) {
     let started = Instant::now();
-    let model = state.borrow().model.clone();
-    let result = run_pi(&state, &model, started).await;
+    let model = state
+        .borrow()
+        .model
+        .clone()
+        .expect("running task has a model");
+    let result = run_pi(&state, &model, pi_agent_dir.as_deref(), started).await;
     let elapsed_ms = started.elapsed().as_millis();
     state.send_modify(|state| {
         state.elapsed_ms = Some(elapsed_ms);
@@ -140,6 +158,7 @@ pub async fn execute(state: watch::Sender<Snapshot>) {
 async fn run_pi(
     state: &watch::Sender<Snapshot>,
     model: &str,
+    pi_agent_dir: Option<&Path>,
     started: Instant,
 ) -> Result<(), String> {
     let workspace = tokio::task::spawn_blocking(create_workspace)
@@ -148,7 +167,12 @@ async fn run_pi(
         .map_err(|error| format!("Не удалось создать тестовую папку: {error}"))?;
     state.send_modify(|state| state.workspace = Some(workspace.display().to_string()));
 
-    let mut child = spawn_pi(&workspace, model).map_err(|error| {
+    if let Some(directory) = pi_agent_dir {
+        configure_pi(directory, model)
+            .await
+            .map_err(|error| format!("Не удалось настроить модель для Pi: {error}"))?;
+    }
+    let mut child = spawn_pi(&workspace, model, pi_agent_dir).map_err(|error| {
         format!("Не удалось запустить Pi. Проверьте `pi --version` в терминале: {error}")
     })?;
     let mut stdin = child.stdin.take().expect("piped stdin");
@@ -286,9 +310,32 @@ fn create_workspace() -> io::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn spawn_pi(workspace: &Path, model: &str) -> io::Result<tokio::process::Child> {
+async fn configure_pi(directory: &Path, model: &str) -> io::Result<()> {
+    let config = serde_json::json!({
+        "providers": {
+            "ollama": {
+                "baseUrl": "http://127.0.0.1:11434/v1",
+                "api": "openai-completions",
+                "apiKey": "ollama",
+                "models": [{ "id": model }]
+            }
+        }
+    });
+    tokio::fs::create_dir_all(directory).await?;
+    tokio::fs::write(directory.join("models.json"), config.to_string()).await
+}
+
+fn spawn_pi(
+    workspace: &Path,
+    model: &str,
+    pi_agent_dir: Option<&Path>,
+) -> io::Result<tokio::process::Child> {
     let spawn = |program: &str| {
-        Command::new(program)
+        let mut command = Command::new(program);
+        if let Some(directory) = pi_agent_dir {
+            command.env("PI_CODING_AGENT_DIR", directory);
+        }
+        command
             .args([
                 "--provider",
                 "ollama",

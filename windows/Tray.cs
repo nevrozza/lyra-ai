@@ -157,14 +157,15 @@ namespace LyraTray
                 CheckAlive(ollama, "Ollama", Log("ollama"));
                 if (stage == Stage.StartingOllama)
                 {
-                    string tags = ReadWhenReady(OllamaUrl + "/api/tags");
-                    if (tags == null) return;
-                    string model = ConfigurePi(tags);
-                    Console.WriteLine("Ollama is ready. Starting Lyra with " + model + "...");
+                    if (ReadWhenReady(OllamaUrl + "/api/tags") == null) return;
+                    string model = PreferredModel();
+                    Console.WriteLine("Ollama is ready. Starting Lyra...");
                     string executable = Path.Combine(target, "release", "local-agent.exe");
-                    lyra = StartWithEnvironment(executable, "--model \"" + model + "\" --port " + port +
+                    string modelArgument = string.IsNullOrEmpty(model) ? "" : " --model \"" + model + "\"";
+                    lyra = job.Start(executable, "--port " + port + modelArgument +
+                        " --pi-agent-dir \"" + piDirectory + "\"" +
                         " --startup-log \"" + Path.Combine(startupDirectory, "startup.log") + "\"",
-                        "lyra", "PI_CODING_AGENT_DIR", piDirectory);
+                        root, Log("lyra"));
                     FollowLog("lyra");
                     BeginProbe(Stage.StartingLyra);
                 }
@@ -190,16 +191,8 @@ namespace LyraTray
             }
         }
 
-        private string ConfigurePi(string tags)
+        private string PreferredModel()
         {
-            var library = json.Deserialize<OllamaLibrary>(tags);
-            var names = (library.models ?? new ModelEntry[0])
-                .Where(entry => !string.IsNullOrWhiteSpace(entry.name) && ValidModel.IsMatch(entry.name)
-                    && !entry.name.EndsWith(":cloud", StringComparison.OrdinalIgnoreCase)
-                    && string.IsNullOrEmpty(entry.remote_host))
-                .Select(entry => entry.name).ToArray();
-            if (names.Length == 0) throw new InvalidOperationException("No local Ollama model found. Run ollama pull MODEL first.");
-
             string desired = requestedModel;
             var original = Environment.GetEnvironmentVariable("PI_CODING_AGENT_DIR");
             if (string.IsNullOrWhiteSpace(original)) original = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pi", "agent");
@@ -208,22 +201,16 @@ namespace LyraTray
                 var settings = Path.Combine(original, "settings.json");
                 if (File.Exists(settings))
                 {
-                    try { desired = json.Deserialize<PiSettings>(File.ReadAllText(settings)).defaultModel; }
+                    try
+                    {
+                        var config = json.Deserialize<PiSettings>(File.ReadAllText(settings));
+                        if (config != null) desired = config.defaultModel;
+                    }
                     catch (ArgumentException) { /* Pi may have a config this launcher cannot read. */ }
                     catch (InvalidOperationException) { /* Use an installed model below. */ }
                 }
             }
-            string model = names.FirstOrDefault(name => string.Equals(name, desired, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, desired + ":latest", StringComparison.OrdinalIgnoreCase));
-            if (model == null && !string.IsNullOrWhiteSpace(requestedModel))
-                throw new InvalidOperationException("The requested model is not installed: " + requestedModel);
-            model = model ?? names.FirstOrDefault(name => name == "qwen3:8b") ?? names[0];
-
-            Directory.CreateDirectory(piDirectory);
-            var configured = new { id = model };
-            var config = new { providers = new { ollama = new { baseUrl = OllamaUrl + "/v1", api = "openai-completions", apiKey = "ollama", models = new[] { configured } } } };
-            File.WriteAllText(Path.Combine(piDirectory, "models.json"), json.Serialize(config), new UTF8Encoding(false));
-            return model;
+            return !string.IsNullOrEmpty(desired) && ValidModel.IsMatch(desired) ? desired : null;
         }
 
         private ProcessJob.Child StartWithEnvironment(string executable, string arguments, string log, string name, string value)
@@ -348,8 +335,6 @@ namespace LyraTray
             timer.Dispose();
         }
 
-        public sealed class OllamaLibrary { public ModelEntry[] models { get; set; } }
-        public sealed class ModelEntry { public string name { get; set; } public string remote_host { get; set; } }
         public sealed class PiSettings { public string defaultModel { get; set; } }
     }
 }
