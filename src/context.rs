@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Mutex, time::Duration};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{benchmark::Store, telemetry};
@@ -141,9 +141,21 @@ fn delete_profile(profile: &str) -> Result<bool, String> {
 }
 
 pub fn cache_bytes_per_token(model: &str) -> Option<u64> {
+    estimate(model)?.bytes_per_token_f16
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct Estimate {
+    pub bytes_per_token_f16: Option<u64>,
+    pub configured_context_tokens: Option<u64>,
+}
+
+pub(crate) fn estimate(model: &str) -> Option<Estimate> {
     #[derive(Deserialize)]
     struct Show {
+        #[serde(default)]
         model_info: Value,
+        parameters: Option<String>,
     }
     let info = telemetry::ollama_agent(Duration::from_secs(2))
         .post("http://127.0.0.1:11434/api/show")
@@ -151,7 +163,23 @@ pub fn cache_bytes_per_token(model: &str) -> Option<u64> {
         .ok()?
         .into_json::<Show>()
         .ok()?;
-    estimate_f16(&info.model_info)
+    let configured_context_tokens = info.parameters.as_deref().and_then(|parameters| {
+        parameters.lines().find_map(|line| {
+            let mut words = line.split_whitespace();
+            if words.next()? != "num_ctx" {
+                return None;
+            }
+            words
+                .next()?
+                .parse::<u64>()
+                .ok()
+                .filter(|&tokens| tokens > 0)
+        })
+    });
+    Some(Estimate {
+        bytes_per_token_f16: estimate_f16(&info.model_info),
+        configured_context_tokens,
+    })
 }
 
 fn estimate_f16(info: &Value) -> Option<u64> {

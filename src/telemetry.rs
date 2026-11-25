@@ -43,7 +43,9 @@ struct Gpu {
 pub(crate) struct Model {
     pub(crate) name: String,
     size: Option<u64>,
-    size_vram: Option<u64>,
+    pub(crate) size_vram: Option<u64>,
+    #[serde(skip_deserializing)]
+    context_profile: bool,
     pub(crate) context_length: Option<u64>,
     pub(crate) expires_at: Option<String>,
 }
@@ -120,6 +122,7 @@ impl Cache {
             {
                 if let Some(source) = aliases.get(&entry.name) {
                     entry.name = (*source).clone();
+                    entry.context_profile = true;
                 }
             }
         }

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     sync::Mutex,
     time::{Duration, SystemTime},
@@ -16,6 +16,17 @@ use crate::{context, telemetry};
 const PROMPT: &str = "Explain how a hash table works to a beginner. Cover hashing, collisions, and resizing. Give a short example and then describe the time complexity.";
 const TOKEN_LIMIT: u32 = 128;
 const SEED: u32 = 42;
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Preparing,
+    LoadingAndPrefill,
+    Prefill,
+    Generating,
+    MeasuringMemory,
+    Saving,
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -81,6 +92,8 @@ pub struct Measurement {
     measured_context_tokens: Option<u64>,
     #[serde(default)]
     model_ram_bytes: Option<u64>,
+    #[serde(default)]
+    model_vram_bytes: Option<u64>,
     #[serde(default)]
     token_memory_bytes_f16: Option<u64>,
     #[serde(default)]
@@ -244,7 +257,6 @@ fn default_path() -> PathBuf {
 #[derive(Deserialize)]
 struct Generation {
     created_at: String,
-    done: bool,
     load_duration: u64,
     total_duration: u64,
     prompt_eval_count: Option<u64>,
@@ -254,7 +266,11 @@ struct Generation {
     eval_duration: u64,
 }
 
-pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, String> {
+pub fn measure(
+    model: &str,
+    context_tokens: Option<u32>,
+    mut on_stage: impl FnMut(Stage),
+) -> Result<Measurement, String> {
     let backend = context::backend_model(model, context_tokens)?;
     let loaded = telemetry::ollama().ok_or("Не удалось проверить память Ollama.")?;
     let resident = loaded
@@ -268,7 +284,7 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
     let mut request = json!({
         "model": backend,
         "prompt": PROMPT,
-        "stream": false,
+        "stream": true,
         "options": { "num_predict": TOKEN_LIMIT, "seed": SEED, "temperature": 0.0 }
     });
     if let Some(tokens) = context_tokens {
@@ -277,6 +293,11 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
     if let Some(keep_alive) = retention(resident) {
         request["keep_alive"] = keep_alive;
     }
+    on_stage(if was_loaded {
+        Stage::Prefill
+    } else {
+        Stage::LoadingAndPrefill
+    });
     let response = telemetry::ollama_agent(Duration::from_secs(300))
         .post("http://127.0.0.1:11434/api/generate")
         .send_json(request)
@@ -290,10 +311,10 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
                 format!("Ollama (HTTP {status}): {detail}")
             }
             error => format!("Не удалось выполнить бенчмарк Ollama: {error}"),
-        })?
-        .into_json::<Generation>()
-        .map_err(|error| format!("Не удалось прочитать замеры Ollama: {error}"))?;
+        })?;
 
+    let response = read_generation(BufReader::new(response.into_reader()), &mut on_stage)?;
+    on_stage(Stage::MeasuringMemory);
     let measured_model = telemetry::ollama().and_then(|models| {
         models
             .into_iter()
@@ -304,7 +325,7 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
     {
         eprintln!("Could not unload benchmark model {backend}: {error}");
     }
-    if !response.done || response.eval_count == 0 {
+    if response.eval_count == 0 {
         return Err("Ollama не сгенерировала токены для замера.".into());
     }
     let prompt_tokens = response.prompt_eval_count.unwrap_or_default();
@@ -331,6 +352,7 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
         model_ram_bytes: measured_model
             .as_ref()
             .and_then(telemetry::Model::ram_bytes),
+        model_vram_bytes: measured_model.as_ref().and_then(|entry| entry.size_vram),
         token_memory_bytes_f16: bytes_per_token
             .and_then(|bytes| bytes.checked_mul(occupied_tokens)),
         context_memory_bytes_f16: context_capacity
@@ -350,6 +372,37 @@ pub fn measure(model: &str, context_tokens: Option<u32>) -> Result<Measurement, 
         seed: SEED,
         temperature: 0.0,
     })
+}
+
+fn read_generation(
+    reader: impl BufRead,
+    mut on_stage: impl FnMut(Stage),
+) -> Result<Generation, String> {
+    let mut started_generating = false;
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("Не удалось прочитать замеры Ollama: {error}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let chunk: Value = serde_json::from_str(&line)
+            .map_err(|error| format!("Не удалось прочитать замеры Ollama: {error}"))?;
+        if let Some(error) = chunk["error"].as_str() {
+            return Err(format!("Ollama: {error}"));
+        }
+        if chunk["done"] == true {
+            return serde_json::from_value(chunk)
+                .map_err(|error| format!("Не удалось прочитать итоговые замеры Ollama: {error}"));
+        }
+        if !started_generating
+            && ["response", "thinking"]
+                .iter()
+                .any(|field| chunk[*field].as_str().is_some_and(|text| !text.is_empty()))
+        {
+            started_generating = true;
+            on_stage(Stage::Generating);
+        }
+    }
+    Err("Ollama завершила поток без итоговых замеров.".into())
 }
 
 fn retention(resident: Option<&telemetry::Model>) -> Option<Value> {

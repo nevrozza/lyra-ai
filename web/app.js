@@ -22,6 +22,14 @@ const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-dig
 const benchmarkDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 const contextPresets = [null, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+const benchmarkStages = {
+  preparing: 'Подготовка',
+  loading_and_prefill: 'Загрузка и промпт',
+  prefill: 'Обработка промпта',
+  generating: 'Генерация',
+  measuring_memory: 'Замер памяти',
+  saving: 'Сохранение',
+};
 let stream;
 let applicationClosed = false;
 let state;
@@ -43,6 +51,9 @@ let descriptionSaving = false;
 let contextSaving = false;
 let contextEstimateRequest = 0;
 let contextBytesPerToken;
+let configuredAutoContext;
+let waitingForMemorySample = false;
+let memorySampleEpoch = 0;
 let ramTimer;
 let readingRam = false;
 let detailedRam;
@@ -100,6 +111,7 @@ function renderTime() {
 }
 
 function renderRun(next) {
+  const memoryWasChanging = modelMemoryChanging();
   const justStarted = state?.status !== 'running' && next.status === 'running';
   const actionFinished = (modelSubmitting != null || state?.model_action != null) && next.model_action == null;
   const benchmarkUpdated = state?.benchmark_revision !== next.benchmark_revision;
@@ -107,6 +119,7 @@ function renderRun(next) {
   if (selectingModel === next.model) selectingModel = undefined;
   pending = false;
   modelSubmitting = undefined;
+  if (memoryWasChanging && !modelMemoryChanging()) refreshMemoryWarning();
   updateControls();
   runButton.textContent = next.status === 'running' ? 'Выполняется…' : 'Запустить проверку';
   const phase = get('phase');
@@ -176,6 +189,7 @@ function showClosed() {
   get('phase').dataset.status = 'closed';
   get('phase').textContent = 'Lyra закрыта';
   get('sampled').textContent = 'Остановлено';
+  get('context-memory-warning').hidden = true;
   renderModelList(metrics?.installed_models, metrics?.models);
   runButton.textContent = 'Запустить проверку';
   if (document.hidden) disconnect();
@@ -188,12 +202,15 @@ function disconnect() {
 
 runButton.addEventListener('click', async () => {
   pending = true;
+  renderContextChoice();
   updateControls();
   try {
     const response = await postModel('/run', state.model);
     if (!response.ok) throw new Error(modelResponseError(response));
   } catch (error) {
     pending = false;
+    refreshMemoryWarning();
+    renderContextChoice();
     updateControls();
     get('result').hidden = false;
     get('result').textContent = `Не удалось запустить проверку. ${error.message}`;
@@ -250,7 +267,26 @@ function renderContextChoice() {
     'Оценка для KV-кэша в FP16. Веса модели и рабочие буферы занимают память дополнительно.' :
     tokens && contextBytesPerToken === null ? 'Для этой модели оценка памяти недоступна.' :
     'Лимит действует при следующей загрузке.';
-  renderContextMemoryWarning(estimated);
+  const autoTokens = tokens == null ? autoContextTokens(displayedModel()) : null;
+  const autoEstimate = autoTokens && contextBytesPerToken ? autoTokens * contextBytesPerToken : null;
+  renderContextMemoryWarning(estimated ?? autoEstimate);
+}
+
+function autoContextTokens(model) {
+  const loaded = metrics?.models?.find((entry) => !entry.context_profile && sameModelName(entry.name, model));
+  const latest = benchmarkRecord?.latest;
+  return configuredAutoContext ?? loaded?.context_length ??
+    (latest?.context_tokens == null ? latest?.measured_context_tokens : null);
+}
+
+function modelMemoryChanging() {
+  return pending || Boolean(modelSubmitting || state?.model_action || state?.benchmark_running || state?.status === 'running');
+}
+
+function refreshMemoryWarning() {
+  waitingForMemorySample = true;
+  memorySampleEpoch++;
+  scheduleMetrics(0);
 }
 
 function memoryRoom(memory, resident) {
@@ -295,6 +331,10 @@ function contextMemoryWarning(snapshot, model, resident, contextBytes) {
 
 function renderContextMemoryWarning(contextBytes) {
   const warning = get('context-memory-warning');
+  if (applicationClosed || modelMemoryChanging() || waitingForMemorySample) {
+    warning.hidden = true;
+    return;
+  }
   const model = displayedModel();
   const message = contextMemoryWarning(metrics, model, loadedModel(metrics?.models, model), contextBytes);
   warning.hidden = !message;
@@ -304,17 +344,19 @@ function renderContextMemoryWarning(contextBytes) {
 async function readContextEstimate(model) {
   const request = ++contextEstimateRequest;
   contextBytesPerToken = undefined;
+  configuredAutoContext = undefined;
   renderContextChoice();
   if (!model) return;
-  let bytes = null;
+  let estimate;
   try {
     const response = await fetch(`/model/context/estimate?model=${encodeURIComponent(model)}`);
-    if (response.ok) bytes = (await response.json()).bytes_per_token_f16;
+    if (response.ok) estimate = await response.json();
   } catch {
     // The slider still works if Ollama can't provide model metadata.
   }
   if (request !== contextEstimateRequest) return;
-  contextBytesPerToken = bytes;
+  contextBytesPerToken = estimate?.bytes_per_token_f16 ?? null;
+  configuredAutoContext = estimate?.configured_context_tokens;
   renderContextChoice();
 }
 
@@ -361,6 +403,7 @@ async function readBenchmark(model, modelChanged) {
       renderContextChoice();
     }
     benchmarkRecord = record;
+    renderContextChoice();
     renderBenchmark();
   } catch {
     if (request === benchmarkRead) renderBenchmark('Не удалось прочитать результаты.');
@@ -387,8 +430,7 @@ function renderBenchmark(message) {
         : contextLabel(result.context_tokens)],
       ['Среднее время запуска', launch == null ? '—' : elapsed(launch), 'Среднее время загрузки модели в память по холодным запускам'],
       ['Скорость • вход / выход', `${rate(result.prompt_tokens_per_second)} / ${rate(result.generated_tokens_per_second)} ток/с`],
-      ['ОЗУ модели', result.model_ram_bytes == null ? '—' : memoryAmount(result.model_ram_bytes), 'Разность между общим размером загруженной модели и её VRAM по данным Ollama'],
-      ['Память токенов', result.token_memory_bytes_f16 == null ? '—' : `≈ ${memoryAmount(result.token_memory_bytes_f16)}`, 'Оценка KV-кэша FP16 для входных и сгенерированных токенов этого замера'],
+      ['VRAM модели', result.model_vram_bytes == null ? '—' : memoryAmount(result.model_vram_bytes), 'Видеопамять загруженной модели по данным Ollama, включая часть контекста на GPU'],
     ];
     facts.replaceChildren(...rows.map(([label, value, hint]) => {
       const row = document.createElement('div');
@@ -451,6 +493,7 @@ async function changeModel(action, path, payload) {
     if (!response.ok) throw new Error(modelResponseError(response));
   } catch (error) {
     modelSubmitting = undefined;
+    refreshMemoryWarning();
     if (displayedModel() === model) modelRequestError = error.message;
     renderModel(metrics?.models);
   }
@@ -478,9 +521,13 @@ function meter(node, value) {
 }
 
 function loadedModel(models, name) {
-  const matches = models?.filter((model) => model.name === name || model.name === `${name}:latest` || `${model.name}:latest` === name);
+  const matches = models?.filter((model) => sameModelName(model.name, name));
   const desired = name === observedModel ? benchmarkRecord?.context_tokens : null;
   return matches?.find((model) => desired != null && model.context_length === desired) ?? matches?.[0];
+}
+
+function sameModelName(left, right) {
+  return left === right || left === `${right}:latest` || `${left}:latest` === right;
 }
 
 function modelStatus(name, models) {
@@ -495,7 +542,7 @@ function modelStatus(name, models) {
   // Ollama represents indefinite retention with a deadline centuries ahead.
   const pinned = Boolean(loaded && (Number.isFinite(expiry) && expiry > 0 ? remaining > farFuture : isTaskModel && state?.pinned));
   let mode = 'idle';
-  let label = 'На диске';
+  let label = 'Не загружена';
   if (applicationClosed) {
     label = 'Остановлена';
   } else if (benchmarking) {
@@ -517,8 +564,13 @@ function modelStatus(name, models) {
     mode = 'resident';
     label = pinned ? 'В памяти · закреплена' : 'В памяти';
   }
-  const countdown = mode === 'resident' && !pinned && remaining > 0 ? `до выгрузки ≈ ${duration(remaining)}` : '';
-  return { loaded, mode, label, countdown, pinned, benchmarking, action };
+  let detail = '';
+  if (!applicationClosed && benchmarking) {
+    detail = benchmarkStages[isOperationModel ? state?.benchmark_stage : undefined] ?? benchmarkStages.preparing;
+  } else if (mode === 'resident' && !pinned && remaining > 0) {
+    detail = `до выгрузки ≈ ${duration(remaining)}`;
+  }
+  return { loaded, mode, label, detail, pinned, benchmarking, action };
 }
 
 function renderModelList(names, loaded) {
@@ -537,26 +589,26 @@ function renderModelList(names, loaded) {
       dot.className = 'model-dot';
       dot.setAttribute('aria-hidden', 'true');
       const status = element('span', '');
-      const countdown = element('span', '');
-      countdown.className = 'list-model-countdown';
+      const detail = element('span', '');
+      detail.className = 'list-model-detail';
       button.type = 'button';
       statusLine.append(dot, status);
-      badge.append(statusLine, countdown);
+      badge.append(statusLine, detail);
       button.append(modelName, badge);
       button.addEventListener('click', () => selectModel(name));
       row.append(button);
-      return [name, { row, button, dot, status, countdown }];
+      return [name, { row, button, dot, status, detail }];
     }));
     modelList.replaceChildren(...Array.from(modelRows.values(), ({ row }) => row));
   }
-  for (const [name, { button, dot, status, countdown }] of modelRows) {
+  for (const [name, { button, dot, status, detail }] of modelRows) {
     const selected = name === observedModel;
     const view = modelStatus(name, loaded);
     button.setAttribute('aria-pressed', String(selected));
     dot.dataset.state = view.mode;
     if (status.textContent !== view.label) status.textContent = view.label;
-    countdown.hidden = !view.countdown;
-    if (countdown.textContent !== view.countdown) countdown.textContent = view.countdown;
+    detail.hidden = !view.detail;
+    if (detail.textContent !== view.detail) detail.textContent = view.detail;
   }
   modelList.hidden = installed.length === 0;
   const message = get('model-list-message');
@@ -651,11 +703,16 @@ function scheduleMetrics(delay) {
 async function readMetrics() {
   if (applicationClosed || document.hidden) return;
   polling = true;
+  const epoch = memorySampleEpoch;
+  const changing = modelMemoryChanging();
   try {
     const response = await fetch('/metrics');
     if (!response.ok) throw new Error();
     const next = await response.json();
-    if (!applicationClosed) renderMetrics(next);
+    if (!applicationClosed) {
+      if (!changing && epoch === memorySampleEpoch && !modelMemoryChanging()) waitingForMemorySample = false;
+      renderMetrics(next);
+    }
   } catch {
     if (!applicationClosed) get('sampled').textContent = 'Нет связи';
   } finally {
@@ -739,7 +796,7 @@ document.addEventListener('visibilitychange', () => {
 setInterval(() => {
   if (applicationClosed || document.hidden) return;
   if (state?.status === 'running') renderTime();
-  if ([...modelRows.values()].some(({ countdown }) => !countdown.hidden)) {
+  if ([...modelRows.values()].some(({ dot, detail }) => dot.dataset.state === 'resident' && !detail.hidden)) {
     renderModelList(metrics?.installed_models, metrics?.models);
   }
 }, 1_000);

@@ -14,7 +14,7 @@ use tokio::{
     sync::watch,
 };
 
-use crate::{context, telemetry::ModelAction};
+use crate::{benchmark, context, telemetry::ModelAction};
 
 const PROMPT: &str = "Create smoke.txt in the current directory with exactly this line: Pi работает\nThen use the read tool to read the file and report its content. Only access this file.";
 const EXPECTED: &str = "Pi работает";
@@ -31,6 +31,7 @@ pub struct Snapshot {
     operation_model: Option<String>,
     model_error: Option<String>,
     benchmark_running: bool,
+    benchmark_stage: Option<benchmark::Stage>,
     benchmark_revision: u64,
     status: &'static str,
     phase: String,
@@ -60,6 +61,7 @@ impl Snapshot {
             operation_model: None,
             model_error: None,
             benchmark_running: false,
+            benchmark_stage: None,
             benchmark_revision: 0,
             status: "idle",
             phase: "Готов к запуску".into(),
@@ -148,13 +150,19 @@ impl Snapshot {
             return false;
         }
         self.benchmark_running = true;
+        self.benchmark_stage = Some(benchmark::Stage::Preparing);
         self.operation_model = Some(model);
         self.model_error = None;
         true
     }
 
+    pub fn set_benchmark_stage(&mut self, stage: benchmark::Stage) {
+        self.benchmark_stage = Some(stage);
+    }
+
     pub fn finish_benchmark(&mut self, result: Result<(), String>) {
         self.benchmark_running = false;
+        self.benchmark_stage = None;
         match result {
             Ok(()) => self.model_record_changed(),
             Err(error) => self.model_error = Some(error),
@@ -178,6 +186,7 @@ pub async fn execute(
     state: watch::Sender<Snapshot>,
     pi_agent_dir: Option<PathBuf>,
     context_tokens: Result<Option<u32>, String>,
+    before_finish: impl Future<Output = ()>,
 ) {
     let started = Instant::now();
     let model = state
@@ -190,6 +199,7 @@ pub async fn execute(
         Err(error) => Err(error),
     };
     let elapsed_ms = started.elapsed().as_millis();
+    before_finish.await;
     state.send_modify(|state| {
         state.elapsed_ms = Some(elapsed_ms);
         state.model_working = false;

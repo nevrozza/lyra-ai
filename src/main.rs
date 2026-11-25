@@ -294,7 +294,10 @@ async fn start(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
         let tokens = tokio::task::spawn_blocking(move || model_context(&store, &model))
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
-        run::execute(app.task.clone(), app.pi_agent_dir.clone(), tokens).await;
+        run::execute(app.task.clone(), app.pi_agent_dir.clone(), tokens, async {
+            app.metrics.lock().await.invalidate();
+        })
+        .await;
     });
     StatusCode::ACCEPTED
 }
@@ -418,23 +421,16 @@ struct ContextRequest {
     context_tokens: Option<u32>,
 }
 
-#[derive(serde::Serialize)]
-struct ContextEstimate {
-    bytes_per_token_f16: Option<u64>,
-}
-
 async fn context_estimate(
     Query(request): Query<SelectRequest>,
-) -> Result<Json<ContextEstimate>, StatusCode> {
+) -> Result<Json<context::Estimate>, StatusCode> {
     model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bytes_per_token_f16 =
-        tokio::task::spawn_blocking(move || context::cache_bytes_per_token(&request.model))
-            .await
-            .ok()
-            .flatten();
-    Ok(Json(ContextEstimate {
-        bytes_per_token_f16,
-    }))
+    let estimate = tokio::task::spawn_blocking(move || context::estimate(&request.model))
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    Ok(Json(estimate))
 }
 async fn set_model_context(
     State(app): State<Arc<App>>,
@@ -497,7 +493,14 @@ async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> Sta
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
             let tokens = model_context(&store, &model)?;
-            let measurement = benchmark::measure(&model, tokens)?;
+            let measurement = benchmark::measure(&model, tokens, |stage| {
+                store
+                    .task
+                    .send_modify(|snapshot| snapshot.set_benchmark_stage(stage));
+            })?;
+            store
+                .task
+                .send_modify(|snapshot| snapshot.set_benchmark_stage(benchmark::Stage::Saving));
             store
                 .benchmarks
                 .save(model, measurement)
