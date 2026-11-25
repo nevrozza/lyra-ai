@@ -11,6 +11,7 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 body { margin: 0; }
 button, summary { font: inherit; }
 button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
@@ -58,7 +59,20 @@ h2 { font-size: .96rem; font-weight: 650; }
 .thinking summary span { margin-left: 5px; color: var(--muted); font-size: .75rem; }
 .thinking pre { max-height: 230px; overflow: auto; margin-bottom: 0; font: .75rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .model-name { display: block; font: 600 .96rem/1.4 var(--mono); color: var(--accent); overflow-wrap: anywhere; }
-#model-state { margin-top: 7px; }
+.model-status { display: flex; align-items: center; gap: 8px; min-height: 18px; margin-top: 7px; }
+.model-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #708075; }
+.model-dot[data-state="loading"] { background: #e1c580; }
+.model-dot[data-state="resident"] { background: #82a490; }
+.model-dot[data-state="running"] { background: var(--accent); }
+.model-dot[data-state="unknown"] { background: #778077; }
+.model-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); padding-top: 12px; margin-top: 15px; }
+.pin { display: flex; align-items: center; gap: 8px; font-size: .82rem; cursor: pointer; }
+.pin input { accent-color: var(--accent); margin: 0; }
+.pin input:disabled { opacity: .65; }
+.unload { background: transparent; border: 1px solid #536453; color: #d7e9cf; padding: 6px 10px; font-size: .78rem; }
+.unload:hover:not(:disabled) { background: #2c382e; }
+.unload:disabled { background: transparent; border-color: var(--line); color: var(--muted); opacity: .6; }
+.model-error { margin-top: 8px; color: #f0ac9c; overflow-wrap: anywhere; }
 .facts { margin: 15px 0 0; }
 .facts > div + div { margin-top: 7px; }
 .facts dt { color: var(--muted); font-size: .82rem; }

@@ -1,5 +1,7 @@
 const get = (id) => document.getElementById(id);
 const runButton = get('run');
+const pinModel = get('pin-model');
+const unloadModel = get('unload-model');
 const connection = get('connection');
 const connectionLabel = document.createTextNode('Подключение');
 connection.lastChild.replaceWith(connectionLabel);
@@ -7,6 +9,7 @@ const timeline = get('timeline');
 const oneDecimal = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
 const whole = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 let stream;
 let state;
 let metrics;
@@ -14,6 +17,9 @@ let lastTimeline;
 let pending = false;
 let polling = false;
 let metricsTimer;
+let metricsRefreshPending = false;
+let modelSubmitting;
+let modelRequestError = '';
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -24,7 +30,14 @@ function element(tag, text) {
 function connectionState(value, label) {
   connection.dataset.state = value;
   connectionLabel.textContent = label;
-  runButton.disabled = value !== 'online' || pending || state?.status === 'running';
+  updateControls();
+}
+
+function updateControls() {
+  const blocked = !state || connection.dataset.state !== 'online' || modelSubmitting != null || state.model_action != null || state.status === 'running';
+  runButton.disabled = blocked || pending;
+  pinModel.disabled = blocked || pending || metrics?.models == null;
+  unloadModel.disabled = blocked || pending || !loadedModel(metrics?.models);
 }
 
 function duration(ms) {
@@ -39,9 +52,11 @@ function renderTime() {
 
 function renderRun(next) {
   const justStarted = state?.status !== 'running' && next.status === 'running';
+  const actionFinished = (modelSubmitting != null || state?.model_action != null) && next.model_action == null;
   state = next;
   pending = false;
-  runButton.disabled = next.status === 'running';
+  modelSubmitting = undefined;
+  updateControls();
   runButton.textContent = next.status === 'running' ? 'Выполняется…' : 'Запустить проверку';
   const phase = get('phase');
   phase.dataset.status = next.status;
@@ -65,8 +80,8 @@ function renderRun(next) {
     }));
   }
   renderTime();
-  if (metrics) renderModel(metrics.models);
-  if (justStarted) scheduleMetrics(0);
+  renderModel(metrics?.models);
+  if (justStarted || actionFinished) scheduleMetrics(0);
 }
 
 function connect() {
@@ -78,17 +93,43 @@ function connect() {
 
 runButton.addEventListener('click', async () => {
   pending = true;
-  runButton.disabled = true;
+  updateControls();
   try {
     const response = await fetch('/run', { method: 'POST' });
     if (!response.ok && response.status !== 409) throw new Error(`HTTP ${response.status}`);
   } catch (error) {
     pending = false;
-    runButton.disabled = connection.dataset.state !== 'online';
+    updateControls();
     get('result').hidden = false;
     get('result').textContent = `Не удалось запустить проверку. ${error.message}`;
   }
 });
+
+pinModel.addEventListener('change', () => {
+  const pinned = pinModel.checked;
+  changeModel(pinned ? 'pin' : 'unpin', '/model/pin', { pinned });
+});
+
+unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
+
+async function changeModel(action, path, payload) {
+  modelSubmitting = action;
+  modelRequestError = '';
+  renderModel(metrics?.models);
+  try {
+    const options = { method: 'POST' };
+    if (payload) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify(payload);
+    }
+    const response = await fetch(path, options);
+    if (!response.ok) throw new Error(response.status === 409 ? 'Дождитесь завершения текущей операции.' : `Запрос завершился ошибкой (${response.status}).`);
+  } catch (error) {
+    modelSubmitting = undefined;
+    modelRequestError = error.message;
+    renderModel(metrics?.models);
+  }
+}
 
 function gib(value) {
   return `${oneDecimal.format(value / 2 ** 30)} ГиБ`;
@@ -107,15 +148,57 @@ function meter(node, value) {
   if (value != null) node.value = value;
 }
 
+function loadedModel(models) {
+  return models?.find((model) => model.name === state?.model || model.name === `${state?.model}:latest`);
+}
+
 function renderModel(models) {
-  const loaded = models?.find((model) => model.name === state?.model || model.name === `${state?.model}:latest`);
+  const loaded = loadedModel(models);
+  const action = modelSubmitting ?? state?.model_action;
+  const expiry = Date.parse(loaded?.expires_at);
+  const remaining = expiry - Date.now();
+  // Ollama represents indefinite retention with a deadline centuries ahead.
+  const pinned = Boolean(loaded && (Number.isFinite(expiry) && expiry > 0 ? remaining > farFuture : state?.pinned));
+  const dot = get('model-dot');
+  const status = get('model-state');
+  let mode = 'idle';
+  let label = 'Модель выгружена';
+  if (state?.model_working) {
+    mode = 'running';
+    label = 'Работает';
+  } else if (models === null) {
+    mode = 'unknown';
+    label = 'Проверьте, запущена ли Ollama';
+  } else if (action === 'unload') {
+    mode = 'loading';
+    label = 'Выгружается';
+  } else if (!loaded && (state?.status === 'running' || action === 'pin')) {
+    mode = 'loading';
+    label = 'Загружается';
+  } else if (loaded) {
+    mode = 'resident';
+    label = pinned ? 'В памяти · закреплена' : 'В памяти';
+  } else if (models === undefined) {
+    mode = 'unknown';
+    label = 'Проверяем Ollama…';
+  }
+  dot.dataset.state = mode;
+  dot.parentElement.title = label;
+  status.classList.toggle('visually-hidden', mode === 'idle');
+  if (status.textContent !== label) status.textContent = label;
+  const countdown = get('model-countdown');
+  countdown.textContent = mode === 'resident' && !pinned && remaining > 0 ? `· до выгрузки ≈ ${duration(remaining)}` : '';
   get('ollama').textContent = models === null ? 'Ollama недоступна' : 'Ollama';
-  get('model-state').textContent = models === null ? 'Проверьте, запущена ли Ollama' : (loaded ? 'В памяти' : 'Ожидает загрузки');
+  pinModel.checked = action === 'pin' || (action !== 'unpin' && pinned);
+  const modelError = modelRequestError || state?.model_error;
+  get('model-error').hidden = !modelError;
+  get('model-error').textContent = modelError ?? '';
   get('model-details').hidden = !loaded;
   if (loaded) {
     get('context').textContent = loaded.context_length != null ? `${whole.format(loaded.context_length)} токенов` : '—';
     get('model-vram').textContent = loaded.size_vram != null ? gib(loaded.size_vram) : '—';
   }
+  updateControls();
 }
 
 function gpuCard(gpu) {
@@ -158,7 +241,12 @@ function renderMetrics(next) {
 
 function scheduleMetrics(delay) {
   clearTimeout(metricsTimer);
-  if (!document.hidden && !polling) metricsTimer = setTimeout(readMetrics, delay);
+  if (document.hidden) return;
+  if (polling) {
+    metricsRefreshPending ||= delay === 0;
+  } else {
+    metricsTimer = setTimeout(readMetrics, delay);
+  }
 }
 
 async function readMetrics() {
@@ -172,7 +260,9 @@ async function readMetrics() {
     get('sampled').textContent = 'Нет связи';
   } finally {
     polling = false;
-    scheduleMetrics(state?.status === 'running' ? 5_000 : 15_000);
+    const delay = metricsRefreshPending ? 0 : (state?.status === 'running' ? 5_000 : 15_000);
+    metricsRefreshPending = false;
+    scheduleMetrics(delay);
   }
 }
 
@@ -188,7 +278,9 @@ document.addEventListener('visibilitychange', () => {
 });
 
 setInterval(() => {
-  if (!document.hidden && state?.status === 'running') renderTime();
+  if (document.hidden) return;
+  if (state?.status === 'running') renderTime();
+  if (get('model-countdown').textContent) renderModel(metrics?.models);
 }, 1_000);
 
 if (!document.hidden) {

@@ -52,9 +52,17 @@ struct App {
     metrics: Mutex<telemetry::Cache>,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
     let options = Options::parse();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(serve(options));
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+async fn serve(options: Options) -> std::io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, options.port)).await?;
     let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
     let app = Arc::new(App {
@@ -89,6 +97,8 @@ async fn main() -> std::io::Result<()> {
         .route("/events", get(events))
         .route("/metrics", get(metrics))
         .route("/run", post(start))
+        .route("/model/pin", post(pin_model))
+        .route("/model/unload", post(unload_model))
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 
@@ -148,4 +158,42 @@ async fn events(State(app): State<Arc<App>>) -> impl IntoResponse {
 
 async fn metrics(State(app): State<Arc<App>>) -> Json<telemetry::Metrics> {
     Json(app.metrics.lock().await.sample().await)
+}
+
+#[derive(serde::Deserialize)]
+struct PinRequest {
+    pinned: bool,
+}
+
+async fn pin_model(State(app): State<Arc<App>>, Json(request): Json<PinRequest>) -> StatusCode {
+    let action = if request.pinned {
+        telemetry::ModelAction::Pin
+    } else {
+        telemetry::ModelAction::Unpin
+    };
+    change_model(app, action)
+}
+
+async fn unload_model(State(app): State<Arc<App>>) -> StatusCode {
+    change_model(app, telemetry::ModelAction::Unload)
+}
+
+fn change_model(app: Arc<App>, action: telemetry::ModelAction) -> StatusCode {
+    if !app
+        .task
+        .send_if_modified(|snapshot| snapshot.begin_model_action(action))
+    {
+        return StatusCode::CONFLICT;
+    }
+
+    tokio::spawn(async move {
+        let model = app.task.borrow().model().to_owned();
+        let result = tokio::task::spawn_blocking(move || telemetry::change_model(&model, action))
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
+        app.metrics.lock().await.invalidate();
+        app.task
+            .send_modify(|snapshot| snapshot.finish_model_action(action, result));
+    });
+    StatusCode::ACCEPTED
 }

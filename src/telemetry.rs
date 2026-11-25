@@ -39,6 +39,7 @@ struct Model {
     name: String,
     size_vram: Option<u64>,
     context_length: Option<u64>,
+    expires_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +54,10 @@ struct System {
 }
 
 impl Cache {
+    pub fn invalidate(&mut self) {
+        self.snapshot = None;
+    }
+
     pub async fn sample(&mut self) -> Metrics {
         if let Some((sampled, snapshot)) = &self.snapshot
             && sampled.elapsed() < Duration::from_secs(4)
@@ -82,14 +87,17 @@ impl Cache {
     }
 }
 
-fn ollama() -> Option<Vec<Model>> {
-    let agent = ureq::AgentBuilder::new()
+fn ollama_agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
         .redirects(0)
-        .timeout(Duration::from_millis(800))
-        .build();
+        .timeout(timeout)
+        .build()
+}
+
+fn ollama() -> Option<Vec<Model>> {
     Some(
-        agent
+        ollama_agent(Duration::from_millis(800))
             .get("http://127.0.0.1:11434/api/ps")
             .call()
             .ok()?
@@ -97,6 +105,49 @@ fn ollama() -> Option<Vec<Model>> {
             .ok()?
             .models,
     )
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAction {
+    Pin,
+    Unpin,
+    Unload,
+}
+
+pub fn change_model(model: &str, action: ModelAction) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Acknowledgement {
+        done: bool,
+    }
+
+    if matches!(action, ModelAction::Unpin) {
+        let loaded = ollama().ok_or("Ollama недоступна")?;
+        let latest = format!("{model}:latest");
+        if !loaded
+            .iter()
+            .any(|entry| entry.name == model || entry.name == latest)
+        {
+            return Ok(());
+        }
+    }
+
+    let keep_alive = match action {
+        ModelAction::Pin => serde_json::json!(-1),
+        ModelAction::Unpin => serde_json::json!("5m"),
+        ModelAction::Unload => serde_json::json!(0),
+    };
+    let acknowledgement = ollama_agent(Duration::from_secs(180))
+        .post("http://127.0.0.1:11434/api/generate")
+        .send_json(serde_json::json!({ "model": model, "prompt": "", "stream": false, "keep_alive": keep_alive }))
+        .map_err(|error| format!("Ollama отклонила команду: {error}"))?
+        .into_json::<Acknowledgement>()
+        .map_err(|error| format!("Не удалось прочитать ответ Ollama: {error}"))?;
+    if acknowledgement.done {
+        Ok(())
+    } else {
+        Err("Ollama ещё не завершила команду.".into())
+    }
 }
 
 async fn nvidia() -> Vec<Gpu> {

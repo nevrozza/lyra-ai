@@ -14,6 +14,8 @@ use tokio::{
     sync::watch,
 };
 
+use crate::telemetry::ModelAction;
+
 const PROMPT: &str = "Create smoke.txt in the current directory with exactly this line: Pi работает\nThen use the read tool to read the file and report its content. Only access this file.";
 const EXPECTED: &str = "Pi работает";
 const TRACE_LIMIT: usize = 6_000;
@@ -22,6 +24,10 @@ const EVENT_LIMIT: usize = 32;
 #[derive(Serialize)]
 pub struct Snapshot {
     model: String,
+    model_working: bool,
+    pinned: Option<bool>,
+    model_action: Option<ModelAction>,
+    model_error: Option<String>,
     status: &'static str,
     phase: String,
     started_at: Option<u128>,
@@ -43,6 +49,10 @@ impl Snapshot {
     pub fn new(model: String) -> Self {
         Self {
             model,
+            model_working: false,
+            pinned: None,
+            model_action: None,
+            model_error: None,
             status: "idle",
             phase: "Готов к запуску".into(),
             started_at: None,
@@ -55,10 +65,13 @@ impl Snapshot {
     }
 
     pub fn start(&mut self) -> bool {
-        if self.status == "running" {
+        if self.status == "running" || self.model_action.is_some() {
             return false;
         }
-        *self = Self::new(self.model.clone());
+        *self = Self {
+            pinned: self.pinned,
+            ..Self::new(self.model.clone())
+        };
         self.status = "running";
         self.phase = "Запускаем Pi".into();
         self.started_at = Some(
@@ -69,6 +82,27 @@ impl Snapshot {
         );
         self.log(0, "info", "Запуск Pi".into());
         true
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn begin_model_action(&mut self, action: ModelAction) -> bool {
+        if self.status == "running" || self.model_action.is_some() {
+            return false;
+        }
+        self.model_action = Some(action);
+        self.model_error = None;
+        true
+    }
+
+    pub fn finish_model_action(&mut self, action: ModelAction, result: Result<(), String>) {
+        self.model_action = None;
+        match result {
+            Ok(()) => self.pinned = Some(matches!(action, ModelAction::Pin)),
+            Err(error) => self.model_error = Some(error),
+        }
     }
 
     fn log(&mut self, at_ms: u128, kind: &'static str, mut text: String) {
@@ -87,6 +121,7 @@ pub async fn execute(state: watch::Sender<Snapshot>) {
     let elapsed_ms = started.elapsed().as_millis();
     state.send_modify(|state| {
         state.elapsed_ms = Some(elapsed_ms);
+        state.model_working = false;
         let (status, phase, mut message) = match result {
             Ok(()) => (
                 "success",
@@ -143,12 +178,16 @@ async fn run_pi(
                 if update["type"] == "thinking_delta" {
                     if let Some(delta) = update["delta"].as_str() {
                         state.send_modify(|state| {
+                            state.model_working = true;
                             state.phase = "Модель рассуждает".into();
                             append_tail(&mut state.thinking, delta, TRACE_LIMIT);
                         });
                     }
-                } else if update["type"] == "text_start" {
-                    state.send_modify(|state| state.phase = "Модель пишет ответ".into());
+                } else if update["type"] == "text_start" || update["type"] == "toolcall_start" {
+                    state.send_modify(|state| {
+                        state.model_working = true;
+                        state.phase = "Модель генерирует ответ".into();
+                    });
                 }
             }
             Some("tool_execution_start") => {
@@ -165,6 +204,7 @@ async fn run_pi(
                     format!("{title} · {path}")
                 };
                 state.send_modify(|state| {
+                    state.model_working = false;
                     state.phase = title;
                     state.log(at_ms, "info", text);
                 });
@@ -182,6 +222,7 @@ async fn run_pi(
                 state.send_modify(|state| state.log(at_ms, kind, format!("{name} · {label}")));
             }
             Some("message_end") if event["message"]["role"] == "assistant" => {
+                state.send_if_modified(|state| std::mem::replace(&mut state.model_working, false));
                 let message = &event["message"];
                 last_error = match message["stopReason"].as_str() {
                     Some("error" | "aborted") => Some(
