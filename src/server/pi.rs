@@ -29,6 +29,8 @@ pub(super) struct Task<'a> {
     pub(super) search_skill: Option<(&'a str, &'a Path)>,
     pub(super) origin: projects::MessageOrigin,
     pub(super) request_id: Option<&'a str>,
+    pub(super) text_only: bool,
+    pub(super) model: &'a str,
 }
 
 pub(super) struct Reply {
@@ -152,6 +154,7 @@ pub(super) async fn run(
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
     let trace = task.as_ref().map(|task| task.trace);
     let commands = trace;
+    let text_only = task.as_ref().is_some_and(|task| task.text_only);
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let project_instructions;
     let agents_file = if let (Some(project), Some(directory), Some(task)) =
@@ -172,10 +175,7 @@ pub(super) async fn run(
     } else {
         None
     };
-    let session = task
-        .as_ref()
-        .and_then(|task| project?.session_file.as_deref().map(|path| (path, task)));
-    if let Some((file, _)) = session {
+    if let Some(file) = project.and_then(|project| project.session_file.as_deref()) {
         tokio::fs::create_dir_all(file.parent().expect("Pi session directory"))
             .await
             .map_err(|error| format!("Could not prepare Pi session: {error}"))?;
@@ -199,7 +199,7 @@ pub(super) async fn run(
         extension.as_deref(),
         skills,
         agents_file,
-        session,
+        task.as_ref(),
     )
     .map_err(|error| format!("Could not start Pi: {error}"))?;
     let log = |kind, title: &str, text: &str, status| {
@@ -269,7 +269,9 @@ pub(super) async fn run(
                         .await?;
                         ready = true;
                     }
-                    Some("input") if ready && event["title"] == "lyra:run-command" => {
+                    Some("input")
+                        if ready && !text_only && event["title"] == "lyra:run-command" =>
+                    {
                         let id = event["id"]
                             .as_str()
                             .ok_or("Missing Pi command request ID")?;
@@ -493,6 +495,9 @@ async fn write_project_instructions(
             directory.display()
         );
     }
+    if task.text_only {
+        text.push_str("\nThis turn is text-only. Answer from the available conversation and instructions. File and shell tools are unavailable. If the task needs them, say so.\n");
+    }
     tokio::fs::write(path, text).await
 }
 
@@ -536,8 +541,15 @@ fn spawn_pi(
     extension: Option<&Path>,
     skills: &[PathBuf],
     agents_file: Option<&Path>,
-    session: Option<(&Path, &Task<'_>)>,
+    task: Option<&Task<'_>>,
 ) -> io::Result<tokio::process::Child> {
+    let session = task.and_then(|task| {
+        task.project?
+            .session_file
+            .as_deref()
+            .map(|path| (path, task))
+    });
+    let text_only = task.is_some_and(|task| task.text_only);
     let spawn = |program: &str| {
         let mut command = Command::new(program);
         command.env("PI_CODING_AGENT_DIR", pi_agent_dir);
@@ -551,22 +563,29 @@ fn spawn_pi(
             "--no-extensions",
             "--no-skills",
             "--no-context-files",
-            "--tools",
-            if extension.is_some() {
+        ]);
+        command.env_remove("LYRA_PI_TEXT_ONLY");
+        if text_only {
+            command.env("LYRA_PI_TEXT_ONLY", "1").arg("--no-tools");
+        } else {
+            let tools = if extension.is_some() {
                 "read,grep,find,ls,write,edit,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
-            },
-        ]);
+            };
+            command.args(["--tools", tools]);
+        }
         command.env_remove("LYRA_MESSAGE_REQUEST_ID");
         if let Some((path, task)) = session {
             command.env("LYRA_MESSAGE_ORIGIN", task.origin.as_str());
+            command.env("LYRA_CHAT_MODEL", task.model);
             if let Some(request_id) = task.request_id {
                 command.env("LYRA_MESSAGE_REQUEST_ID", request_id);
             }
             command.arg("--session").arg(path);
         } else {
             command.env_remove("LYRA_MESSAGE_ORIGIN");
+            command.env_remove("LYRA_CHAT_MODEL");
             command.arg("--no-session");
         }
         if extension.is_some() || session.is_some() {

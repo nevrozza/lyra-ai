@@ -225,10 +225,10 @@ export function createProjects() {
       const item = element('li', '');
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
-      const author = message.role === 'user'
-        ? ({ dashboard: 'Ты', orchestrator: 'Оркестратор' }[message.origin] ?? 'Запрос')
-        : message.model ? `Pi · ${message.model}` : 'Pi';
-      item.append(element('strong', author), element('p', message.text));
+      const label = message.role === 'assistant' ? message.model
+        : message.origin === 'orchestrator' ? 'Оркестратор' : '';
+      if (label) item.append(element('strong', label));
+      item.append(element('p', message.text));
       return item;
     }));
     if (atEnd || scrollToEnd) reading.scrollTop = reading.scrollHeight;
@@ -506,6 +506,7 @@ export function createProjects() {
       if (chatId === chat.id) {
         if (restoreDraft) report('Генерация остановлена.');
         else if (reply.structuredContent?.truncated) report('Ответ достиг лимита генерации.');
+        else if (reply.structuredContent?.text_only) report('Модель ответила в режиме разговора без инструментов Pi.');
       }
     } catch (error) {
       restoreDraft = true;

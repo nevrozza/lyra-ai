@@ -346,6 +346,8 @@ struct GenerationInfo {
     stop_reason: Option<String>,
     truncated: bool,
     max_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_only: Option<bool>,
 }
 
 struct ToolOutput {
@@ -428,7 +430,9 @@ async fn call(
         }
         "read_project_session" => {
             let input = arguments(args)?;
-            project_result(projects::work(app, |app| app.projects.history(input)).await)
+            project_result(
+                projects::work(app, |app| app.projects.history(input, &app.benchmarks)).await,
+            )
         }
         "archive_project" => {
             let input = arguments(args)?;
@@ -576,6 +580,7 @@ async fn run_model(
         truncated: stop_reason.as_deref() == Some("length") || !reply.completed(),
         stop_reason,
         max_output_tokens: limit,
+        text_only: None,
     });
     if let Some(thinking) = reply.thinking() {
         trace.event(Kind::Thinking, "Ollama", thinking, None);
@@ -639,17 +644,51 @@ async fn run_pi(
             .map_err(|error| format!("Could not resolve workspace: {error}"))?;
         (None, workspace)
     };
+    let model = installed_model(&request.model).await?;
+    let dashboard = matches!(origin, projects::MessageOrigin::Dashboard);
+    let store = app.clone();
+    let source = model.clone();
+    let (tokens, text_only) = tokio::task::spawn_blocking(move || {
+        let estimate = context::estimate(&source);
+        if dashboard && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
+            .is_some_and(|capabilities| !capabilities.iter().any(|item| item == "completion"))
+        {
+            return Err(format!("Модель {source} не поддерживает текстовые ответы."));
+        }
+        let unsupported = estimate.and_then(|info| info.supports_agent_tools()) == Some(false);
+        if unsupported && !dashboard {
+            return Err(format!(
+                "{source} lacks Ollama text generation or tool calling support required for agentic Pi tasks. Inspect another model."
+            ));
+        }
+        let record = store.benchmarks.get(&source)
+            .map_err(|error| format!("Не удалось прочитать настройки модели: {error}"))?;
+        let failed = record.pi_check == Some(false);
+        if failed && !dashboard {
+            return Err(format!(
+                "{source} failed Lyra's Pi benchmark. Choose another model or rerun the Pi benchmark in Lyra."
+            ));
+        }
+        Ok((record.context_tokens, unsupported || failed))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     let search_skill = project
         .as_ref()
         .and_then(|project| project.project.search_skill.as_deref())
         .filter(|skill| {
-            request
-                .skills
-                .as_ref()
-                .is_none_or(|skills| skills.iter().any(|name| name == skill))
+            !text_only
+                && request
+                    .skills
+                    .as_ref()
+                    .is_none_or(|skills| skills.iter().any(|name| name == skill))
         });
     let skill_store = app.clone();
-    let selected = request.skills;
+    let selected = if text_only {
+        Some(Vec::new())
+    } else {
+        request.skills
+    };
     let skills = tokio::task::spawn_blocking(move || skill_store.skills.paths(selected.as_deref()))
         .await
         .map_err(|_| "Could not read installed Pi skills")??;
@@ -666,75 +705,46 @@ async fn run_pi(
                 .ok_or_else(|| format!("Project search skill is not installed: {name}"))
         })
         .transpose()?;
-    let model = installed_model(&request.model).await?;
-    let candidate = model.clone();
-    let supported = tokio::task::spawn_blocking(move || {
-        context::estimate(&candidate).and_then(|details| details.supports_agent_tools())
-    })
-    .await
-    .map_err(|_| "Could not check Ollama capabilities")?;
-    if supported == Some(false) {
-        return Err(format!(
-            "{model} lacks Ollama text generation or tool calling support required for agentic Pi tasks. Inspect another model."
-        ));
-    }
     let scope = if project.is_some() {
         DelegationScope::Project { session_id }
     } else {
         DelegationScope::Standalone
     };
     let delegation = begin_delegation(&app, &model, scope)?;
-    let store = app.clone();
-    let source = model.clone();
-    let tokens = tokio::task::spawn_blocking(move || {
-        let record = store
-            .benchmarks
-            .get(&source)
-            .map_err(|error| format!("Не удалось прочитать настройки модели: {error}"))?;
-        if record.pi_check == Some(false) {
-            return Err(format!(
-                "{source} failed Lyra's Pi benchmark. Choose another model or rerun the Pi benchmark in Lyra."
-            ));
-        }
-        Ok(record.context_tokens)
-    })
-    .await;
     let config = app
         .pi_agent_dir
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join(format!("lyra-pi-{}", std::process::id())));
-    let result = match tokens {
-        Ok(Ok(tokens)) => {
-            let mut state = app.task.subscribe();
-            let task = pi::Task {
-                trace,
-                skills: &skills,
-                agents_file: &app.agents_file,
-                project: project.as_ref(),
-                search_skill,
-                origin,
-                request_id: match origin {
-                    projects::MessageOrigin::Dashboard => request.request_id.as_deref(),
-                    projects::MessageOrigin::Orchestrator => None,
-                },
-            };
-            tokio::select! {
-                biased;
-                cancelled = async {
-                    // Drop the watch borrow before cancellation can drop a pending command.
-                    state.wait_for(|snapshot| snapshot.closed() || snapshot.delegation_stopping(delegation))
-                        .await.is_ok_and(|snapshot| !snapshot.closed())
-                } => {
-                    if cancelled { None } else { Some(Err("Lyra stopped".into())) }
-                },
-                result = tokio::time::timeout(
-                    Duration::from_secs(900),
-                    pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)),
-                ) => Some(result.unwrap_or_else(|_| Err("Pi timed out".into()))),
-            }
+    let result = {
+        let mut state = app.task.subscribe();
+        let task = pi::Task {
+            trace,
+            skills: &skills,
+            agents_file: &app.agents_file,
+            project: project.as_ref(),
+            search_skill,
+            origin,
+            text_only,
+            model: &model,
+            request_id: match origin {
+                projects::MessageOrigin::Dashboard => request.request_id.as_deref(),
+                projects::MessageOrigin::Orchestrator => None,
+            },
+        };
+        tokio::select! {
+            biased;
+            cancelled = async {
+                // Drop the watch borrow before cancellation can drop a pending command.
+                state.wait_for(|snapshot| snapshot.closed() || snapshot.delegation_stopping(delegation))
+                    .await.is_ok_and(|snapshot| !snapshot.closed())
+            } => {
+                if cancelled { None } else { Some(Err("Lyra stopped".into())) }
+            },
+            result = tokio::time::timeout(
+                Duration::from_secs(900),
+                pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)),
+            ) => Some(result.unwrap_or_else(|_| Err("Pi timed out".into()))),
         }
-        Ok(Err(error)) => Some(Err(error)),
-        Err(error) => Some(Err(error.to_string())),
     };
     let Some(result) = result else {
         finish_delegation(&app, delegation, false, false).await;
@@ -747,6 +757,7 @@ async fn run_pi(
                 stop_reason: Some("aborted".into()),
                 truncated: false,
                 max_output_tokens: limit,
+                text_only: None,
             }),
         });
     };
@@ -776,6 +787,7 @@ async fn run_pi(
             stop_reason: reply.stop_reason,
             truncated: reply.truncated,
             max_output_tokens: limit,
+            text_only: text_only.then_some(true),
         }),
     })
 }

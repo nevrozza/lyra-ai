@@ -106,12 +106,15 @@ h2 { font-size: .96rem; font-weight: 650; }
 @keyframes project-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .project-spinner { animation: none; } }
 #project-messages { display: grid; gap: 14px; width: min(100%, 740px); margin: 0 auto; padding: 0; list-style: none; }
-#project-messages li { max-width: 90%; padding: 11px 14px; border-radius: 12px; overflow-wrap: anywhere; }
-#project-messages li[data-role="user"] { justify-self: end; background: #263a2e; }
-#project-messages li[data-origin="orchestrator"] { border: 1px solid #58664b; background: #2a3325; }
-#project-messages li[data-role="assistant"] { justify-self: start; border: 1px solid var(--line); background: #1b2520; }
-#project-messages strong { font-size: .78rem; color: var(--accent); }
-#project-messages p { margin-top: 3px; font-size: .89rem; line-height: 1.55; white-space: pre-wrap; }
+#project-messages li { display: grid; gap: 5px; max-width: 90%; overflow-wrap: anywhere; }
+#project-messages li[data-role="user"] { justify-self: end; }
+#project-messages li[data-role="user"] > strong { justify-self: end; }
+#project-messages li[data-role="user"] > p { background: #263a2e; }
+#project-messages li[data-origin="orchestrator"] > p { border: 1px solid #58664b; background: #2a3325; }
+#project-messages li[data-role="assistant"] { justify-self: start; }
+#project-messages li[data-role="assistant"] > p { border: 1px solid var(--line); background: #1b2520; }
+#project-messages strong { padding: 0 4px; font-size: .78rem; color: var(--muted); }
+#project-messages p { padding: 11px 14px; border-radius: 12px; font-size: .89rem; line-height: 1.55; white-space: pre-wrap; }
 .project-composer { display: grid; gap: 10px; width: min(calc(100% - 40px), 740px); margin: 0 auto 16px; padding: 10px 12px; border: 1px solid #435749; border-radius: 12px; background: #141b17; }
 .project-composer:focus-within { border-color: #70886d; }
 .project-composer textarea { width: 100%; min-height: 52px; max-height: 32vh; padding: 5px 3px; resize: vertical; border: none; background: transparent; color: inherit; font: inherit; }

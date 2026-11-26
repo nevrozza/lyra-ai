@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
@@ -14,6 +14,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::{benchmark, context};
 
 use super::App;
 
@@ -130,6 +132,7 @@ struct MessageOriginEntry {
     message_timestamp: u64,
     origin: MessageOrigin,
     request_id: Option<String>,
+    model: Option<String>,
 }
 
 pub(super) struct Task {
@@ -187,10 +190,13 @@ async fn history(
     RoutePath((project_id, project_session_id)): RoutePath<(u64, u64)>,
 ) -> Result<Json<VecDeque<Message>>> {
     work(app, move |app| {
-        app.projects.history(SessionKey {
-            project_id,
-            project_session_id,
-        })
+        app.projects.history(
+            SessionKey {
+                project_id,
+                project_session_id,
+            },
+            &app.benchmarks,
+        )
     })
     .await
     .map(Json)
@@ -426,7 +432,11 @@ impl Store {
         self.directory.join("sessions").join(format!("{id}.jsonl"))
     }
 
-    pub(super) fn history(&self, key: SessionKey) -> Result<VecDeque<Message>> {
+    pub(super) fn history(
+        &self,
+        key: SessionKey,
+        benchmarks: &benchmark::Store,
+    ) -> Result<VecDeque<Message>> {
         let catalog = self.list()?;
         let project = catalog
             .projects
@@ -441,6 +451,8 @@ impl Store {
             Err(error) => return Err(storage(error)),
         };
         let mut pending_origin = None;
+        let mut turn_model = None;
+        let mut model_aliases: Option<HashMap<String, String>> = None;
         for line in BufReader::new(file).lines() {
             let line = line.map_err(storage)?;
             let Ok(entry) = serde_json::from_str::<Value>(&line) else {
@@ -467,6 +479,11 @@ impl Store {
             } else {
                 None
             };
+            if role == "user" {
+                turn_model = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.model.clone());
+            }
             let content = &message["content"];
             let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
                 content
@@ -482,10 +499,31 @@ impl Store {
                 if messages.len() == 100 {
                     messages.pop_front();
                 }
+                let model = if role == "assistant" {
+                    turn_model.clone().or_else(|| {
+                        let model = message["model"].as_str()?;
+                        if !context::is_alias(model) {
+                            return Some(model.to_owned());
+                        }
+                        model_aliases
+                            .get_or_insert_with(|| {
+                                benchmarks
+                                    .known_models()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|name| (context::alias(&name), name))
+                                    .collect()
+                            })
+                            .get(model)
+                            .cloned()
+                    })
+                } else {
+                    None
+                };
                 messages.push_back(Message {
                     role,
                     text: text[..text.floor_char_boundary(24_000)].to_owned(),
-                    model: message["model"].as_str().map(str::to_owned),
+                    model,
                     origin: metadata.as_ref().map(|metadata| metadata.origin),
                     request_id: metadata.and_then(|metadata| metadata.request_id),
                 });
