@@ -1,3 +1,4 @@
+mod agents;
 mod ai_settings;
 mod assets;
 mod commands;
@@ -35,6 +36,7 @@ struct App {
     sessions: std::sync::Mutex<sessions::History>,
     commands: std::sync::Mutex<commands::State>,
     skills: skills::Store,
+    agents_file: PathBuf,
 }
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
@@ -72,6 +74,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
             crate::data_directory().join("command-mode.json"),
         )),
         skills: skills::Store::new(crate::data_directory().join("skills")),
+        agents_file: std::path::absolute(crate::data_directory().join("AGENTS.md"))?,
     });
     if let Some(names) = catalog {
         runtime::register_benchmarks(app.clone(), names).await;
@@ -83,6 +86,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .merge(sessions::routes())
         .merge(commands::routes())
         .merge(skills::routes())
+        .merge(agents::routes())
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 

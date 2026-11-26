@@ -428,6 +428,7 @@ mod tests {
             sessions: Default::default(),
             commands: std::sync::Mutex::new(State::new(mode_path.clone())),
             skills: super::super::skills::Store::new(workspace.path().join("skills")),
+            agents_file: workspace.path().join("AGENTS.md"),
         });
         let trace = Call::start(app.clone(), "run_pi", None, "", None);
         let shell = "printf approved";

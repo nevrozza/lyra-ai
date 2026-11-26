@@ -1,6 +1,7 @@
 import { element, get } from './ui.js';
 
 export function createSkills() {
+  const agents = createAgentsEditor();
   const form = get('skill-import');
   const button = get('install-skill');
   const folder = get('skill-folder');
@@ -46,7 +47,7 @@ export function createSkills() {
     updateControls();
   }
 
-  async function refresh() {
+  async function refreshCatalog() {
     const request = ++revision;
     try {
       const response = await fetch('/skills');
@@ -94,7 +95,7 @@ export function createSkills() {
       files = [];
       selection.textContent = emptySelection;
       result.textContent = `Скилл «${skill.name}» установлен.`;
-      await refresh();
+      await refreshCatalog();
     } catch (error) {
       result.dataset.error = 'true';
       result.textContent = error instanceof TypeError || !error.message
@@ -102,6 +103,86 @@ export function createSkills() {
         : error.message;
     } finally {
       saving = false;
+      updateControls();
+    }
+  });
+
+  return {
+    refresh() {
+      return Promise.all([refreshCatalog(), agents.refresh()]);
+    },
+    setOnline(value) {
+      online = value;
+      updateControls();
+      agents.setOnline(value);
+    },
+  };
+}
+
+function createAgentsEditor() {
+  const form = get('agents-form');
+  const content = get('agents-content');
+  const button = get('save-agents');
+  const result = get('agents-result');
+  let online = false;
+  let busy = false;
+  let saved = null;
+
+  function updateControls() {
+    content.readOnly = busy || saved === null;
+    button.disabled = !online || content.readOnly || content.value === saved;
+  }
+
+  async function refresh() {
+    if (!online || busy || (saved !== null && content.value !== saved)) return;
+    busy = true;
+    updateControls();
+    try {
+      const response = await fetch('/skills/agents');
+      if (!response.ok) throw new Error(await response.text());
+      content.value = await response.json();
+      saved = content.value;
+      result.textContent = '';
+    } catch (error) {
+      result.dataset.error = 'true';
+      result.textContent = error instanceof TypeError || !error.message
+        ? 'Не удалось загрузить AGENTS.md.'
+        : error.message;
+    } finally {
+      busy = false;
+      updateControls();
+    }
+  }
+
+  content.addEventListener('input', () => {
+    result.textContent = '';
+    updateControls();
+  });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (button.disabled) return;
+    const draft = content.value;
+    busy = true;
+    result.dataset.error = 'false';
+    result.textContent = 'Сохраняем…';
+    updateControls();
+    try {
+      const response = await fetch('/skills/agents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draft),
+      });
+      if (response.status === 413) throw new Error('Текст AGENTS.md слишком большой.');
+      if (!response.ok) throw new Error(await response.text());
+      saved = draft;
+      result.textContent = 'AGENTS.md сохранён.';
+    } catch (error) {
+      result.dataset.error = 'true';
+      result.textContent = error instanceof TypeError || !error.message
+        ? 'Не удалось сохранить AGENTS.md.'
+        : error.message;
+    } finally {
+      busy = false;
       updateControls();
     }
   });

@@ -25,6 +25,7 @@ pub(super) struct Task<'a> {
     pub(super) trace: &'a Call,
     pub(super) allow_commands: bool,
     pub(super) skills: &'a [PathBuf],
+    pub(super) agents_file: &'a Path,
 }
 
 pub(super) struct Reply {
@@ -130,6 +131,16 @@ pub(super) async fn run(
         .filter(|task| task.allow_commands)
         .map(|task| task.trace);
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
+    let agents_file = if let Some(task) = &task {
+        match tokio::fs::metadata(task.agents_file).await {
+            Ok(metadata) if metadata.is_file() => (metadata.len() > 0).then_some(task.agents_file),
+            Ok(_) => return Err("Lyra AGENTS.md must be a file".into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Could not access Lyra AGENTS.md: {error}")),
+        }
+    } else {
+        None
+    };
     let command_directory = commands
         .map(|_| TemporaryDirectory::new("commands", nonce()))
         .transpose()
@@ -142,8 +153,15 @@ pub(super) async fn run(
             .await
             .map_err(|error| format!("Could not prepare Pi command extension: {error}"))?;
     }
-    let mut child = spawn_pi(workspace, &backend, config, extension.as_deref(), skills)
-        .map_err(|error| format!("Could not start Pi: {error}"))?;
+    let mut child = spawn_pi(
+        workspace,
+        &backend,
+        config,
+        extension.as_deref(),
+        skills,
+        agents_file,
+    )
+    .map_err(|error| format!("Could not start Pi: {error}"))?;
     let log = |kind, title: &str, text: &str, status| {
         if let Some(trace) = trace {
             trace.event(kind, title, text, status);
@@ -429,6 +447,7 @@ fn spawn_pi(
     pi_agent_dir: &Path,
     extension: Option<&Path>,
     skills: &[PathBuf],
+    agents_file: Option<&Path>,
 ) -> io::Result<tokio::process::Child> {
     let spawn = |program: &str| {
         let mut command = Command::new(program);
@@ -456,6 +475,9 @@ fn spawn_pi(
                 .arg("--no-prompt-templates")
                 .arg("--extension")
                 .arg(path);
+        }
+        if let Some(path) = agents_file {
+            command.arg("--append-system-prompt").arg(path);
         }
         for skill in skills {
             command.arg("--skill").arg(skill);

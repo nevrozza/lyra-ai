@@ -139,6 +139,15 @@
             <p id="skill-result" class="secondary" role="status"></p>
             <p id="skill-catalog-message" class="secondary"></p>
             <ul id="skill-catalog" aria-label="Установленные скиллы"></ul>
+            <form id="agents-form">
+              <label for="agents-content">Глобальный <code>AGENTS.md</code></label>
+              <p id="agents-help" class="secondary">Общие инструкции для всех новых запусков агентов Pi в Lyra.</p>
+              <textarea id="agents-content" rows="6" aria-describedby="agents-help" readonly></textarea>
+              <div class="skill-import-controls">
+                <button id="save-agents" class="unload" type="submit" disabled>Сохранить AGENTS.md</button>
+              </div>
+              <p id="agents-result" class="secondary" role="status"></p>
+            </form>
           </div>
         </section>
       </div>

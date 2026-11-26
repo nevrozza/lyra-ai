@@ -561,6 +561,7 @@ async fn run_pi(app: Arc<App>, request: RunPi, trace: &Call) -> Result<ToolOutpu
                 trace,
                 allow_commands: request.allow_commands,
                 skills: &skills,
+                agents_file: &app.agents_file,
             };
             tokio::select! {
                 biased;
