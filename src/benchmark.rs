@@ -32,7 +32,7 @@ pub enum Stage {
 #[serde(default)]
 pub struct Record {
     description: String,
-    pi_check: Option<bool>,
+    pub(crate) pi_check: Option<bool>,
     pub context_tokens: Option<u32>,
     pub latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
