@@ -152,6 +152,15 @@ pub(crate) struct Estimate {
     pub capabilities: Option<Vec<String>>,
 }
 
+impl Estimate {
+    pub(crate) fn supports_agent_tools(&self) -> Option<bool> {
+        self.capabilities.as_ref().map(|capabilities| {
+            capabilities.iter().any(|item| item == "completion")
+                && capabilities.iter().any(|item| item == "tools")
+        })
+    }
+}
+
 pub(crate) fn estimate(model: &str) -> Option<Estimate> {
     #[derive(Deserialize)]
     struct Show {
