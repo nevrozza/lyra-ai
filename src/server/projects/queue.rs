@@ -157,6 +157,7 @@ impl Job {
         Some(Message {
             role: "user",
             text: text[..text.floor_char_boundary(24_000)].to_owned(),
+            thinking: None,
             model: None,
             origin: Some(self.origin),
             request_id: Some(format!("queue-{id}")),
@@ -184,6 +185,7 @@ impl Job {
                         .join("\n")
                 )
             },
+            thinking: None,
             model: None,
             origin: None,
             request_id: None,

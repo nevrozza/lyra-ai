@@ -218,10 +218,10 @@ fn tools() -> Value {
             "description": "Send a bounded text task to one installed Ollama model. Use the user's chosen model or choose from inspect by task fit, memory and speed.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name from Lyra inspect"},
-                "prompt": {"type": "string", "minLength": 1},
+                "prompt": {"type": "string", "minLength": 1, "description": "Task text. Put any Thinking override in the separate think argument. Do not insert /think, /no_think, or other Thinking directives."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or Ollama default."},
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens, "description": "Generation budget. On reasoning models it can include thinking tokens and run out before any visible text."},
-                "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional override for the thinking switch or model-specific level. Omit to use the Lyra model setting or the Ollama default."},
+                "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional Thinking override. Pass false for Off, true for On, or a model-supported level. Omit to use the Lyra model setting or the Ollama default."},
                 "require_loaded": {"type": "boolean", "description": "Use only a model already loaded with the requested or configured context"}
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
@@ -278,7 +278,7 @@ fn tools() -> Value {
                 "project_id": {"type": "integer", "minimum": 1},
                 "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
                 "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "properties": {
-                    "name": {"type": "string"}, "prompt": {"type": "string"}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
+                    "name": {"type": "string"}, "prompt": {"type": "string", "description": "Task text. Thinking for local tasks follows the model configuration. Do not insert Thinking directives into the prompt."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
                     "key": {"type": "string", "description": "Unique key for this task within the batch."},
                     "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
                     "external": {"type": "boolean", "default": false, "description": "Codex or a connected specialist tool executes this step and reports completion."},
@@ -325,7 +325,7 @@ fn tools() -> Value {
                 "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. With project_session_id, the folder is set by the chat."},
                 "project_id": {"type": "integer", "minimum": 1, "description": "Lyra project to use. Loads instructions from its registered folders."},
                 "project_session_id": {"type": "integer", "minimum": 1, "description": "Saved project chat to continue. Requires project_id."},
-                "prompt": {"type": "string", "minLength": 1},
+                "prompt": {"type": "string", "minLength": 1, "description": "Task text. Thinking follows the model configuration. Do not insert Thinking directives into the prompt."},
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to the given installed Lyra skill names. Omit to make all installed Lyra skills available, or pass [] to run without skills."},
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens}

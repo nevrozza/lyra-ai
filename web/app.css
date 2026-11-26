@@ -117,6 +117,10 @@ h2 { font-size: .96rem; font-weight: 650; }
 #project-messages li[data-role="assistant"] > p { border: 1px solid var(--line); background: #1b2520; }
 #project-messages strong { padding: 0 4px; font-size: .78rem; color: var(--muted); }
 #project-messages p { padding: 11px 14px; border-radius: 12px; font-size: .89rem; line-height: 1.55; white-space: pre-wrap; }
+.project-thinking { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
+.project-thinking summary { cursor: pointer; font-size: .8rem; }
+.project-thinking > p, #project-messages .project-thinking > p { margin: 7px 0 0; padding: 0; font-size: .8rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+#project-live-thinking { box-sizing: border-box; width: min(100%, 740px); margin: 0 auto; }
 #project-messages li[data-role="notice"] { justify-self: center; }
 #project-messages li[data-role="notice"] p { padding: 4px 0; font-size: .78rem; color: var(--muted); text-align: center; }
 .project-composer { display: grid; gap: 10px; width: min(calc(100% - 40px), 740px); margin: 0 auto 16px; padding: 10px 12px; border: 1px solid #435749; border-radius: 12px; background: #141b17; }

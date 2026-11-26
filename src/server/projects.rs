@@ -15,7 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{benchmark, context};
+use crate::{benchmark, context, run::CHAT_THINKING_LIMIT};
 
 use super::App;
 
@@ -105,6 +105,8 @@ pub(super) struct Archive {
 pub(super) struct Message {
     role: &'static str,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,7 +471,7 @@ impl Store {
         &self,
         key: SessionKey,
         benchmarks: &benchmark::Store,
-        include_context_notices: bool,
+        dashboard: bool,
     ) -> Result<VecDeque<Message>> {
         let catalog = self.list()?;
         let project = catalog
@@ -482,7 +484,7 @@ impl Store {
             .job
             .as_ref()
             .and_then(|job| job.initial_message(session.id));
-        let status_message = include_context_notices
+        let status_message = dashboard
             .then(|| session.job.as_ref().and_then(queue::Job::status_message))
             .flatten();
         let mut saw_queued_prompt = false;
@@ -509,13 +511,14 @@ impl Store {
                     serde_json::from_value::<MessageOriginEntry>(entry["data"].clone()).ok();
                 continue;
             }
-            if include_context_notices && entry["type"] == "compaction" {
+            if dashboard && entry["type"] == "compaction" {
                 if messages.len() == 100 {
                     messages.pop_front();
                 }
                 messages.push_back(Message {
                     role: "notice",
                     text: "История сжата для модели. Исходная переписка сохранена.".into(),
+                    thinking: None,
                     model: None,
                     origin: None,
                     request_id: None,
@@ -559,7 +562,19 @@ impl Store {
                     .collect::<Vec<_>>()
                     .join("\n")
             });
-            if !text.is_empty() {
+            let thinking = (dashboard && role == "assistant")
+                .then(|| {
+                    content
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|part| part["type"] == "thinking")
+                        .filter_map(|part| part["thinking"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .filter(|thinking| !thinking.trim().is_empty());
+            if !text.is_empty() || thinking.is_some() {
                 if messages.len() == 100 {
                     messages.pop_front();
                 }
@@ -587,6 +602,10 @@ impl Store {
                 messages.push_back(Message {
                     role,
                     text: text[..text.floor_char_boundary(24_000)].to_owned(),
+                    thinking: thinking.map(|mut text| {
+                        text.truncate(text.floor_char_boundary(CHAT_THINKING_LIMIT));
+                        text
+                    }),
                     model,
                     origin: metadata.as_ref().map(|metadata| metadata.origin),
                     request_id: metadata.and_then(|metadata| metadata.request_id),

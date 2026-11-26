@@ -27,6 +27,8 @@ export function createProjects() {
   const prompt = get('project-prompt');
   const composer = get('project-prompt-form');
   const messages = get('project-messages');
+  const liveThinking = get('project-live-thinking');
+  const liveThinkingText = liveThinking.querySelector('p');
   const actions = get('project-actions');
   const sendButton = get('send-project-prompt');
   const stopButton = get('stop-project-prompt');
@@ -56,6 +58,7 @@ export function createProjects() {
   let historyRequest = 0;
   let preferredSelection;
   let history = [];
+  let thinkingDelegation;
 
   const selectedProject = () => catalog?.projects.find(project => project.id === projectId);
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
@@ -81,6 +84,7 @@ export function createProjects() {
     const project = selectedProject();
     const chat = selectedChat();
     const delegation = chatRun(chat?.id);
+    renderLiveThinking(delegation);
     const queued = chat?.job?.status === 'queued';
     const taskPending = pendingTask(chat);
     const active = chat && (sending.has(chat.id) || delegation || taskPending);
@@ -291,10 +295,31 @@ export function createProjects() {
       const label = message.role === 'assistant' ? (message.model || 'Lyra')
         : { orchestrator: 'Оркестратор', lyra: 'Lyra · Следующий шаг' }[message.origin] ?? '';
       if (label) item.append(element('strong', label));
-      item.append(element('p', message.text));
+      if (message.thinking) {
+        const details = element('details', '');
+        details.className = 'project-thinking';
+        details.append(element('summary', 'Размышления модели'), element('p', message.thinking));
+        item.append(details);
+      }
+      if (message.text) item.append(element('p', message.text));
       return item;
     }));
     if (atEnd || scrollToEnd) reading.scrollTop = reading.scrollHeight;
+  }
+
+  function renderLiveThinking(delegation) {
+    const [id, task] = delegation ?? [];
+    const text = task?.thinking ?? '';
+    if (thinkingDelegation !== id) {
+      thinkingDelegation = id;
+      liveThinking.open = true;
+    }
+    if (liveThinkingText.textContent === text) return;
+    const reading = messages.parentElement;
+    const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
+    liveThinkingText.textContent = text;
+    liveThinking.hidden = !text.trim();
+    if (atEnd) reading.scrollTop = reading.scrollHeight;
   }
 
   async function refreshHistory() {

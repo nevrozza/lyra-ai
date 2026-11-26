@@ -19,7 +19,10 @@ orchestrator_instructions: >-
   If run_model supplies context_tokens, Lyra saves that setting when Ollama finishes, even if the output budget ran out before visible text.
   Use inspect with model and context_tokens if you need a memory estimate for that size.
   On reasoning models max_output_tokens can include thinking, leaving no visible answer.
-  Respect benchmark_and_settings.think when it is set. For short tasks that do not need reasoning, use think=false if no preference is saved and inspect shows the model supports it.
+  Respect benchmark_and_settings.think when it is set. For short tasks that need no reasoning, think=false is optional when no preference is saved and inspect shows the model supports it.
+  When testing Thinking, reviewing work, or verifying correctness, honor the requested or saved setting and otherwise leave thinking at the model default.
+  Set per-call Thinking only through the run_model think parameter (for example, think=false for Off). run_pi and queued tasks use the model's saved setting or the Ollama default.
+  Keep Thinking controls out of prompt text. Never add /think, /no_think, or any other Thinking directive as a prefix or elsewhere in the prompt.
   If reasoning is needed, explicitly set a larger max_output_tokens budget for both thinking and the answer.
   Check truncated and stop_reason on run_model and run_pi before treating their text as complete.
   Pass require_loaded=true when the task must use a model already in memory.

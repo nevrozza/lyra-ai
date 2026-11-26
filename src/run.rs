@@ -4,6 +4,8 @@ use serde::Serialize;
 
 use crate::{benchmark, ollama::ModelAction};
 
+pub(crate) const CHAT_THINKING_LIMIT: usize = 24_000;
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiAction {
@@ -43,6 +45,8 @@ struct Delegation {
     stopping: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_notice: Option<ContextNotice>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    thinking: String,
     #[serde(skip)]
     project: bool,
     #[serde(skip)]
@@ -154,6 +158,7 @@ impl Snapshot {
                 project_session_id,
                 stopping: false,
                 context_notice: None,
+                thinking: String::new(),
                 project,
                 exclusive,
             },
@@ -213,6 +218,29 @@ impl Snapshot {
             return false;
         }
         active.context_notice = Some(notice);
+        true
+    }
+
+    pub fn append_chat_thinking(&mut self, id: u64, delta: &str, new_message: bool) -> bool {
+        let Some(active) = self
+            .delegations
+            .get_mut(&id)
+            .filter(|active| active.project_session_id.is_some())
+        else {
+            return false;
+        };
+        let separator = if new_message && !active.thinking.is_empty() {
+            "\n\n"
+        } else {
+            ""
+        };
+        let remaining = CHAT_THINKING_LIMIT.saturating_sub(active.thinking.len() + separator.len());
+        let end = delta.floor_char_boundary(remaining);
+        if end == 0 {
+            return false;
+        }
+        active.thinking.push_str(separator);
+        active.thinking.push_str(&delta[..end]);
         true
     }
 

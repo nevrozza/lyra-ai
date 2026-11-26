@@ -285,6 +285,7 @@ pub(super) async fn run(
     let mut ready = commands.is_none();
     let mut legacy_rpc = false;
     let mut background = None::<BackgroundCommand>;
+    let mut first_thinking_delta = true;
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
     loop {
@@ -431,12 +432,25 @@ pub(super) async fn run(
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 text_deltas.clear();
                 delta_bytes = 0;
+                first_thinking_delta = true;
             }
             Some("message_update") => {
                 let update = &event["assistantMessageEvent"];
                 if let Some(delta) = update["delta"].as_str() {
                     match update["type"].as_str() {
-                        Some("thinking_delta") => log(Kind::Thinking, "Pi", delta, None),
+                        Some("thinking_delta") if !delta.is_empty() => {
+                            if let Some(task) = &task {
+                                task.trace.app().task.send_if_modified(|snapshot| {
+                                    snapshot.append_chat_thinking(
+                                        task.delegation,
+                                        delta,
+                                        first_thinking_delta,
+                                    )
+                                });
+                            }
+                            first_thinking_delta = false;
+                            log(Kind::Thinking, "Pi", delta, None);
+                        }
                         Some("text_delta") => {
                             delta_bytes = delta_bytes.saturating_add(delta.len());
                             append_tail(&mut text_deltas, delta, ANSWER_LIMIT);
