@@ -40,6 +40,8 @@ pub(super) struct Project {
     pub(super) folders: Vec<PathBuf>,
     pub(super) search_skill: Option<String>,
     pub(super) sessions: Vec<Session>,
+    #[serde(default)]
+    archived: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -47,6 +49,8 @@ pub(super) struct Session {
     pub(super) id: u64,
     name: String,
     folder: PathBuf,
+    #[serde(default)]
+    archived: bool,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +77,14 @@ pub(super) struct SessionKey {
     project_session_id: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Archive {
+    project_id: u64,
+    project_session_id: Option<u64>,
+    archived: bool,
+}
+
 #[derive(Serialize)]
 pub(super) struct Message {
     role: &'static str,
@@ -90,6 +102,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects", get(list).post(save))
         .route("/projects/pick-folder", post(folder_picker::pick))
         .route("/projects/sessions", post(create_session))
+        .route("/projects/archive", post(archive))
         .route("/projects/{project_id}/sessions/{session_id}", get(history))
         .route("/projects/run", post(super::mcp::run_project_chat))
 }
@@ -110,6 +123,10 @@ async fn create_session(
     Json(input): Json<NewSession>,
 ) -> Result<Json<Session>> {
     work(app, |app| add_session(app, input)).await.map(Json)
+}
+
+async fn archive(State(app): State<Arc<App>>, Json(input): Json<Archive>) -> Result<Json<Project>> {
+    work(app, |app| set_archive(app, input)).await.map(Json)
 }
 
 async fn history(
@@ -150,6 +167,12 @@ pub(super) fn add_session(app: &App, input: NewSession) -> Result<Session> {
     let session = app.projects.create_session(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
     Ok(session)
+}
+
+pub(super) fn set_archive(app: &App, input: Archive) -> Result<Project> {
+    let project = app.projects.set_archive(input)?;
+    app.task.send_modify(crate::run::Snapshot::projects_changed);
+    Ok(project)
 }
 
 impl Store {
@@ -201,6 +224,7 @@ impl Store {
                     .iter_mut()
                     .find(|project| project.id == id)
                     .ok_or_else(|| missing("Project"))?;
+                project.ensure_active()?;
                 project.name = name;
                 project.folders = folders;
                 project.search_skill = input.search_skill;
@@ -213,6 +237,7 @@ impl Store {
                 folders,
                 search_skill: input.search_skill,
                 sessions: Vec::new(),
+                archived: false,
             };
             catalog.projects.push(project.clone());
             Ok(project)
@@ -227,15 +252,38 @@ impl Store {
                 .iter_mut()
                 .find(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
+            project.ensure_active()?;
             let folder = project.workspace(input.folder.as_deref())?;
             catalog.next_id += 1;
             let session = Session {
                 id: catalog.next_id,
                 name,
                 folder,
+                archived: false,
             };
             project.sessions.push(session.clone());
             Ok(session)
+        })
+    }
+
+    fn set_archive(&self, input: Archive) -> Result<Project> {
+        self.change(|catalog| {
+            let project = catalog
+                .projects
+                .iter_mut()
+                .find(|project| project.id == input.project_id)
+                .ok_or_else(|| missing("Project"))?;
+            if let Some(id) = input.project_session_id {
+                let session = project
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == id)
+                    .ok_or_else(|| missing("Session"))?;
+                session.archived = input.archived;
+            } else {
+                project.archived = input.archived;
+            }
+            Ok(project.clone())
         })
     }
 
@@ -251,8 +299,16 @@ impl Store {
             .into_iter()
             .find(|project| project.id == project_id)
             .ok_or_else(|| missing("Project"))?;
+        project.ensure_active()?;
         let (workspace, session_file) = if let Some(id) = session_id {
-            let folder = &project.session(id)?.folder;
+            let session = project.session(id)?;
+            if session.archived {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Чат в архиве. Восстановите его, чтобы продолжить.".into(),
+                ));
+            }
+            let folder = &session.folder;
             if let Some(workspace) = workspace
                 && project.workspace(Some(workspace))? != *folder
             {
@@ -330,6 +386,16 @@ impl Store {
 }
 
 impl Project {
+    fn ensure_active(&self) -> Result<()> {
+        if self.archived {
+            return Err((
+                StatusCode::CONFLICT,
+                "Проект в архиве. Восстановите его, чтобы продолжить.".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn session(&self, id: u64) -> Result<&Session> {
         self.sessions
             .iter()

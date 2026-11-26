@@ -37,21 +37,17 @@ async fn choose() -> io::Result<Option<PathBuf>> {
     let system = std::env::var_os("SystemRoot")
         .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?;
     let powershell = PathBuf::from(system).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-    let script = r#"
+    let script = format!(
+        r#"
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = 'Lyra: choose a project folder'
-$dialog.ShowNewFolderButton = $false
-try {
-    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        [Console]::Write($dialog.SelectedPath)
-    }
-} finally {
-    $dialog.Dispose()
-}
-"#;
+Add-Type -TypeDefinition @'
+{}
+'@
+[Console]::Write([LyraFolderPicker]::Choose())
+"#,
+        include_str!("FolderPicker.cs")
+    );
     let output = Command::new(powershell)
         .creation_flags(CREATE_NO_WINDOW)
         .kill_on_drop(true)
@@ -61,7 +57,7 @@ try {
             "-NonInteractive",
             "-STA",
             "-Command",
-            script,
+            &script,
         ])
         .output()
         .await?;

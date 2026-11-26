@@ -83,6 +83,7 @@ async fn handle(
                     | "save_project"
                     | "create_project_session"
                     | "read_project_session"
+                    | "archive_project"
             ) {
                 return rpc_error(id, -32602, "Unknown tool");
             }
@@ -194,9 +195,19 @@ fn tools() -> Value {
         },
         {
             "name": "list_projects",
-            "description": "List Lyra projects, their registered folders, search skills and saved Pi chats, with IDs for run_pi.",
+            "description": "List Lyra projects and saved Pi chats with their IDs and archive status. Only active projects and chats can be used with run_pi.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "archive_project",
+            "description": "On explicit user request, archive or restore a Lyra project or one of its chats. Archived history remains readable.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "project_session_id": {"type": "integer", "minimum": 1, "description": "Omit to change the entire project."},
+                "archived": {"type": "boolean"}
+            }, "required": ["project_id", "archived"], "additionalProperties": false},
+            "annotations": {"idempotentHint": true, "destructiveHint": false}
         },
         {
             "name": "save_project",
@@ -392,6 +403,10 @@ async fn call(
         "read_project_session" => {
             let input = arguments(args)?;
             project_result(projects::work(app, |app| app.projects.history(input)).await)
+        }
+        "archive_project" => {
+            let input = arguments(args)?;
+            project_result(projects::work(app, |app| projects::set_archive(app, input)).await)
         }
         _ => unreachable!(),
     }?;
