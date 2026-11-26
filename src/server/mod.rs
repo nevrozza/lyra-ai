@@ -91,6 +91,9 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     if let Some(names) = catalog {
         runtime::register_benchmarks(app.clone(), names).await;
     }
+    if let Err((_, error)) = app.projects.recover_tasks() {
+        eprintln!("Could not recover project tasks: {error}");
+    }
     let router = assets::routes()
         .merge(runtime::routes())
         .merge(models::routes())
@@ -104,12 +107,14 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .with_state(app.clone());
 
     println!("Dashboard: {}", app.origin);
+    let dispatch = tokio::spawn(projects::queue::dispatch(app.clone()));
     let cleanup = tokio::spawn(models::clean_context_profiles(app));
     let result = tokio::select! {
         result = axum::serve(listener, router) => result,
         result = tokio::signal::ctrl_c() => result,
     };
     cleanup.abort();
+    dispatch.abort();
     result
 }
 

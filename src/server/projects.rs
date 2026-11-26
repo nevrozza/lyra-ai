@@ -20,6 +20,7 @@ use crate::{benchmark, context};
 use super::App;
 
 mod folder_picker;
+pub(super) mod queue;
 
 type HttpError = (StatusCode, String);
 type Result<T> = std::result::Result<T, HttpError>;
@@ -55,6 +56,8 @@ pub(super) struct Session {
     folders: Vec<PathBuf>,
     #[serde(default)]
     archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    job: Option<queue::Job>,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +118,7 @@ pub(super) struct Message {
 pub(super) enum MessageOrigin {
     Dashboard,
     Orchestrator,
+    Lyra,
 }
 
 impl MessageOrigin {
@@ -122,6 +126,7 @@ impl MessageOrigin {
         match self {
             Self::Dashboard => "dashboard",
             Self::Orchestrator => "orchestrator",
+            Self::Lyra => "lyra",
         }
     }
 }
@@ -152,10 +157,14 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects/{project_id}/sessions/{session_id}", get(history))
         .route("/projects/run", post(super::mcp::run_project_chat))
         .route("/projects/run/stop", post(super::mcp::stop_project_chat))
+        .route("/projects/tasks", post(queue::enqueue_http))
+        .route("/projects/tasks/cancel", post(queue::cancel_http))
 }
 
 async fn list(State(app): State<Arc<App>>) -> Result<Json<Catalog>> {
-    work(app, |app| app.projects.list()).await.map(Json)
+    work(app, |app| app.projects.catalog_summary())
+        .await
+        .map(Json)
 }
 
 async fn save(
@@ -220,25 +229,25 @@ pub(super) fn save_project(app: &App, input: SaveProject) -> Result<Project> {
     }
     let project = app.projects.save(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
-    Ok(project)
+    Ok(project.summary())
 }
 
 pub(super) fn add_session(app: &App, input: NewSession) -> Result<Session> {
     let session = app.projects.create_session(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
-    Ok(session)
+    Ok(session.summary())
 }
 
 pub(super) fn set_session_folders(app: &App, input: SessionFolders) -> Result<Session> {
     let session = app.projects.set_session_folders(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
-    Ok(session)
+    Ok(session.summary())
 }
 
 pub(super) fn set_archive(app: &App, input: Archive) -> Result<Project> {
     let project = app.projects.set_archive(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
-    Ok(project)
+    Ok(project.summary())
 }
 
 impl Store {
@@ -255,6 +264,12 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Catalog::default()),
             Err(error) => Err(storage(error)),
         }
+    }
+
+    pub(super) fn catalog_summary(&self) -> Result<Catalog> {
+        let mut catalog = self.list()?;
+        catalog.projects = catalog.projects.into_iter().map(Project::summary).collect();
+        Ok(catalog)
     }
 
     fn change<T>(&self, update: impl FnOnce(&mut Catalog) -> Result<T>) -> Result<T> {
@@ -335,6 +350,7 @@ impl Store {
                 folder: folders[0].clone(),
                 folders,
                 archived: false,
+                job: None,
             };
             project.sessions.push(session.clone());
             Ok(session)
@@ -356,6 +372,11 @@ impl Store {
                 .find(|session| session.id == input.project_session_id)
                 .ok_or_else(|| missing("Session"))?;
             session.ensure_active()?;
+            if session.job.as_ref().is_some_and(queue::Job::pending) {
+                return Err(invalid(
+                    "Дождитесь запуска и завершения задачи перед сменой папок.",
+                ));
+            }
             if folders[0] != session.folder {
                 return Err(invalid(
                     "Основная папка существующего чата остаётся первой.",
@@ -379,8 +400,19 @@ impl Store {
                     .iter_mut()
                     .find(|session| session.id == id)
                     .ok_or_else(|| missing("Session"))?;
+                if input.archived && session.job.as_ref().is_some_and(queue::Job::pending) {
+                    return Err(invalid("Остановите задачу перед архивацией."));
+                }
                 session.archived = input.archived;
             } else {
+                if input.archived
+                    && project
+                        .sessions
+                        .iter()
+                        .any(|session| session.job.as_ref().is_some_and(queue::Job::pending))
+                {
+                    return Err(invalid("Остановите задачи проекта перед архивацией."));
+                }
                 project.archived = input.archived;
             }
             Ok(project.clone())
@@ -445,11 +477,23 @@ impl Store {
             .iter()
             .find(|project| project.id == key.project_id)
             .ok_or_else(|| missing("Project"))?;
-        project.session(key.project_session_id)?;
+        let session = project.session(key.project_session_id)?;
+        let queued_message = session
+            .job
+            .as_ref()
+            .and_then(|job| job.initial_message(session.id));
+        let status_message = include_context_notices
+            .then(|| session.job.as_ref().and_then(queue::Job::status_message))
+            .flatten();
+        let mut saw_queued_prompt = false;
         let mut messages = VecDeque::new();
         let file = match fs::File::open(self.session_file(key.project_session_id)) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(messages),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                messages.extend(queued_message);
+                messages.extend(status_message);
+                return Ok(messages);
+            }
             Err(error) => return Err(storage(error)),
         };
         let mut pending_origin = None;
@@ -495,6 +539,11 @@ impl Store {
                 None
             };
             if role == "user" {
+                if let Some(queued) = &queued_message {
+                    saw_queued_prompt |= metadata
+                        .as_ref()
+                        .is_some_and(|meta| meta.request_id == queued.request_id);
+                }
                 turn_model = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.model.clone());
@@ -544,11 +593,33 @@ impl Store {
                 });
             }
         }
+        if !saw_queued_prompt
+            && messages.len() < 100
+            && let Some(message) = queued_message
+        {
+            messages.push_front(message);
+        }
+        if let Some(message) = status_message {
+            if messages.len() == 100 {
+                messages.pop_front();
+            }
+            messages.push_back(message);
+        }
         Ok(messages)
     }
 }
 
 impl Project {
+    fn summary(mut self) -> Self {
+        self.sessions = self.sessions.into_iter().map(Session::summary).collect();
+        self
+    }
+
+    pub(super) fn has_pending_task(&self, id: u64) -> bool {
+        self.session(id)
+            .is_ok_and(|session| session.job.as_ref().is_some_and(queue::Job::pending))
+    }
+
     fn ensure_active(&self) -> Result<()> {
         if self.archived {
             return Err((
@@ -600,6 +671,13 @@ impl Project {
 }
 
 impl Session {
+    fn summary(mut self) -> Self {
+        if let Some(job) = &mut self.job {
+            job.omit_payload();
+        }
+        self
+    }
+
     fn ensure_active(&self) -> Result<()> {
         if self.archived {
             return Err((

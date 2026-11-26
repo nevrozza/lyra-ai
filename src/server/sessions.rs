@@ -166,6 +166,10 @@ impl Call {
         &self.app
     }
 
+    pub(super) fn app_handle(&self) -> Arc<App> {
+        self.app.clone()
+    }
+
     pub(super) fn untracked(app: Arc<App>) -> Self {
         Self { app, tracked: None }
     }

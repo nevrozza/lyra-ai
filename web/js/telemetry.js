@@ -1,3 +1,4 @@
+import { residentRamBytes } from './memory-budget.js';
 import { element, get, memoryAmount, memoryLabel, memoryPercent, whole } from './ui.js';
 
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -10,6 +11,7 @@ function meter(node, value) {
 export function createTelemetry(session, { beginSample, onSample }) {
   const ramExpand = get('ram-expand');
   const ramDialog = get('ram-dialog');
+  const ollamaMemoryWarning = get('ollama-memory-warning');
   let polling = false;
   let metricsTimer;
   let metricsRefreshPending = false;
@@ -53,6 +55,23 @@ export function createTelemetry(session, { beginSample, onSample }) {
     get('gpus').replaceChildren(...next.gpus.map(gpuCard));
     get('no-gpu').hidden = next.gpus.length > 0;
     get('no-gpu').textContent = 'Данные NVIDIA GPU недоступны.';
+    renderOllamaMemory(next.models);
+  }
+
+  function renderOllamaMemory(models) {
+    const placements = (models ?? []).flatMap(model => {
+      const ram = residentRamBytes(model);
+      if (!ram) return [];
+      const name = model.context_profile && model.context_length
+        ? `${model.name} (${whole.format(model.context_length)} токенов)` : model.name;
+      const placement = model.size_vram > 0
+        ? `≈ ${memoryAmount(ram)} в ОЗУ, ${memoryAmount(model.size_vram)} в VRAM`
+        : `целиком в ОЗУ (≈ ${memoryAmount(ram)})`;
+      return [`${name} · ${placement}`];
+    });
+    const message = placements.length ? ['Ollama использует ОЗУ для моделей.', ...placements].join('\n') : '';
+    if (ollamaMemoryWarning.textContent !== message) ollamaMemoryWarning.textContent = message;
+    ollamaMemoryWarning.hidden = !message;
   }
 
   function renderRamTotal(ram) {
@@ -85,7 +104,10 @@ export function createTelemetry(session, { beginSample, onSample }) {
         onSample(sample);
       }
     } catch {
-      if (!session.closed && session.run?.metrics_revision === revision) get('sampled').textContent = 'Нет связи';
+      if (!session.closed && session.run?.metrics_revision === revision) {
+        get('sampled').textContent = 'Нет связи';
+        renderOllamaMemory(null);
+      }
     } finally {
       polling = false;
       const delay = metricsRefreshPending ? 0 : (session.run?.delegated_model || session.run?.benchmark_running ? 5_000 : 15_000);
@@ -166,6 +188,7 @@ export function createTelemetry(session, { beginSample, onSample }) {
     showClosed() {
       if (ramDialog.open) ramDialog.close();
       pause();
+      renderOllamaMemory(null);
       get('sampled').textContent = 'Остановлено';
     },
     updateControls() { ramExpand.disabled = session.closed; },

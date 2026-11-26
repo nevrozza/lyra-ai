@@ -85,6 +85,10 @@ async fn handle(
                     | "set_project_session_folders"
                     | "read_project_session"
                     | "archive_project"
+                    | "enqueue_project_tasks"
+                    | "get_project_tasks"
+                    | "cancel_project_task"
+                    | "complete_project_step"
             ) {
                 return rpc_error(id, -32602, "Unknown tool");
             }
@@ -152,6 +156,34 @@ fn rpc_error(id: &Value, code: i32, message: &str) -> Response {
 }
 
 fn tools() -> Value {
+    let complete_step = json!({
+        "name": "complete_project_step",
+        "description": "Report the result of a ready external step you executed with Codex or a connected tool. On success you can register existing files relative to the step's primary folder. This releases dependent tasks.",
+        "inputSchema": {"type": "object", "properties": {
+            "project_id": {"type": "integer", "minimum": 1},
+            "project_session_id": {"type": "integer", "minimum": 1},
+            "succeeded": {"type": "boolean"},
+            "summary": {"type": "string"},
+            "artifacts": {"type": "array", "maxItems": 16, "items": {"type": "string"}}
+        }, "required": ["project_id", "project_session_id", "succeeded", "summary"], "additionalProperties": false}
+    });
+    let stage = json!({
+        "type": "object",
+        "properties": {"model": {"type": "string"}, "prompt": {"type": "string"}},
+        "required": ["model", "prompt"],
+        "additionalProperties": false
+    });
+    let follow_up = json!({
+        "type": "object",
+        "description": "Pick a review model once. It reviews the full task diff, plans small fixes with a model for each, and reviews the full diff again after each batch. Up to three reviews. Follow-up stages run sequentially.",
+        "properties": {
+            "review": stage,
+            "launch": stage,
+            "max_fixes": {"type": "integer", "minimum": 0, "maximum": 8, "description": "Optional total fix limit across review rounds."}
+        },
+        "required": ["review"],
+        "additionalProperties": false
+    });
     let mut tools = json!([
         {
             "name": "inspect",
@@ -240,6 +272,43 @@ fn tools() -> Value {
             }, "required": ["project_id", "project_session_id", "folders"], "additionalProperties": false}
         },
         {
+            "name": "enqueue_project_tasks",
+            "description": "Queue tasks or build a project pipeline. Each gets a numbered saved chat. Dependencies must finish successfully before their consumers run. External steps wait for complete_project_step. Ready local tasks run in order unless they explicitly allow parallel execution.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
+                "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "prompt": {"type": "string"}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
+                    "key": {"type": "string", "description": "Unique key for this task within the batch."},
+                    "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
+                    "external": {"type": "boolean", "default": false, "description": "Codex or a connected specialist tool executes this step and reports completion."},
+                    "parallel": {"type": "boolean", "default": false, "description": "Allow overlapping work. Choose this for independent tasks when there is enough memory."},
+                    "folders": {"type": "array", "items": {"type": "string"}, "description": "Optional registered project folders, primary first. Defaults to the project's folders."},
+                    "skills": {"type": "array", "items": {"type": "string"}},
+                    "follow_up": follow_up,
+                    "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens}
+                }, "required": ["name", "prompt"], "additionalProperties": false}}
+            }, "required": ["project_id", "tasks"], "additionalProperties": false}
+        },
+        {
+            "name": "get_project_tasks",
+            "description": "Read queue status and results. Use task_ids from enqueue_project_tasks and wait_seconds to wait for those tasks and their automatic follow-up stages to finish or until the timeout.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "task_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 25, "default": 0}
+            }, "required": ["project_id"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "cancel_project_task",
+            "description": "Cancel a task waiting in the queue and keep its chat. For running work use the Stop control in its chat.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "project_session_id": {"type": "integer", "minimum": 1}
+            }, "required": ["project_id", "project_session_id"], "additionalProperties": false}
+        },
+        {
             "name": "read_project_session",
             "description": "Read recent user and assistant messages from a saved Pi chat.",
             "inputSchema": {"type": "object", "properties": {
@@ -264,6 +333,10 @@ fn tools() -> Value {
             "annotations": {"destructiveHint": false}
         }
     ]);
+    tools
+        .as_array_mut()
+        .expect("tool definitions")
+        .push(complete_step);
     for tool in tools.as_array_mut().expect("tool definitions") {
         tool["inputSchema"]["properties"]["session_id"] = json!({
             "type": "string", "description": "Shared ID for related calls in the dashboard",
@@ -284,7 +357,7 @@ fn tools() -> Value {
     tools
 }
 
-fn is_session_id(value: &str) -> bool {
+pub(super) fn is_session_id(value: &str) -> bool {
     (1..=80).contains(&value.len())
         && value
             .bytes()
@@ -340,6 +413,8 @@ pub(super) struct RunPi {
     skills: Option<Vec<String>>,
     #[serde(rename = "allow_commands")]
     _allow_commands: Option<bool>,
+    #[serde(skip)]
+    role: Option<pi::Role>,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq)]
@@ -415,12 +490,13 @@ async fn call(
                 arguments(args)?,
                 trace,
                 projects::MessageOrigin::Orchestrator,
+                None,
             )
             .await;
         }
         "list_projects" => {
             let _: NoArguments = arguments(args)?;
-            project_result(projects::work(app, |app| app.projects.list()).await)
+            project_result(projects::work(app, |app| app.projects.catalog_summary()).await)
         }
         "save_project" => {
             let input = arguments(args)?;
@@ -449,6 +525,20 @@ async fn call(
             let input = arguments(args)?;
             project_result(projects::work(app, |app| projects::set_archive(app, input)).await)
         }
+        "enqueue_project_tasks" => project_result(
+            projects::queue::enqueue(app, arguments(args)?, projects::MessageOrigin::Orchestrator)
+                .await,
+        ),
+        "get_project_tasks" => project_result(projects::queue::query(app, arguments(args)?).await),
+        "complete_project_step" => {
+            project_result(projects::queue::complete_external(app, arguments(args)?).await)
+        }
+        "cancel_project_task" => {
+            projects::queue::cancel(app, arguments(args)?)
+                .await
+                .map_err(|(_, error)| error)?;
+            Ok("Task cancelled".into())
+        }
         _ => unreachable!(),
     }?;
     Ok(ToolOutput {
@@ -470,7 +560,7 @@ fn arguments<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|error| format!("Invalid arguments: {error}"))
 }
 
-fn resolve_model(installed: &[String], name: &str) -> Result<String, String> {
+pub(super) fn resolve_model(installed: &[String], name: &str) -> Result<String, String> {
     installed
         .iter()
         .find(|model| model.as_str() == name)
@@ -518,7 +608,7 @@ async fn manage_model(app: Arc<App>, request: ManageModel) -> Result<String, Str
     Ok(format!("model={model} action={action} ok"))
 }
 
-fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
+pub(super) fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
     let limit = requested.unwrap_or(AI_SETTINGS.default_output_tokens);
     if !(AI_SETTINGS.minimum_output_tokens..=AI_SETTINGS.maximum_output_tokens).contains(&limit) {
         return Err(format!(
@@ -627,6 +717,7 @@ async fn run_pi(
     request: RunPi,
     trace: &Call,
     origin: projects::MessageOrigin,
+    reserved: Option<u64>,
 ) -> Result<ToolOutput, String> {
     let limit = output_limit(&request.prompt, request.max_output_tokens)?;
     let session_id = request.project_session_id;
@@ -637,6 +728,9 @@ async fn run_pi(
         })
         .await
         .map_err(|(_, error)| error)?;
+        if reserved.is_none() && session_id.is_some_and(|id| project.project.has_pending_task(id)) {
+            return Err("Дождитесь завершения задачи в очереди или отмените её.".into());
+        }
         let workspace = project.workspace.clone();
         (Some(project), workspace)
     } else {
@@ -743,7 +837,10 @@ async fn run_pi(
     } else {
         DelegationScope::Standalone
     };
-    let delegation = begin_delegation(&app, &model, scope)?;
+    let delegation = match reserved {
+        Some(id) => id,
+        None => begin_delegation(&app, &model, scope)?,
+    };
     let config = app
         .pi_agent_dir
         .clone()
@@ -762,10 +859,10 @@ async fn run_pi(
             delegation,
             context_window,
             think: think.as_ref(),
-            request_id: match origin {
-                projects::MessageOrigin::Dashboard => request.request_id.as_deref(),
-                projects::MessageOrigin::Orchestrator => None,
-            },
+            role: request.role,
+            request_id: (dashboard || reserved.is_some())
+                .then_some(request.request_id.as_deref())
+                .flatten(),
         };
         tokio::select! {
             biased;
@@ -838,6 +935,85 @@ async fn run_pi(
     })
 }
 
+pub(super) fn queued_request(
+    project_id: u64,
+    project_session_id: u64,
+    model: String,
+    prompt: String,
+    max_output_tokens: Option<u32>,
+    skills: Option<Vec<String>>,
+    role: Option<pi::Role>,
+) -> RunPi {
+    RunPi {
+        model,
+        prompt,
+        max_output_tokens,
+        skills,
+        workspace: None,
+        project_id: Some(project_id),
+        project_session_id: Some(project_session_id),
+        request_id: Some(format!("queue-{project_session_id}")),
+        mode: Some(ChatMode::Work),
+        _allow_commands: None,
+        role,
+    }
+}
+
+pub(super) async fn run_queued(
+    app: Arc<App>,
+    request: RunPi,
+    origin: projects::MessageOrigin,
+    delegation: u64,
+) -> (projects::queue::Status, projects::queue::JobResult) {
+    use projects::queue::{JobResult, Status};
+
+    let trace = Call::untracked(app.clone());
+    let result = run_pi(app.clone(), request, &trace, origin, Some(delegation)).await;
+    let pending = {
+        let snapshot = app.task.borrow();
+        snapshot
+            .has_delegation(delegation)
+            .then(|| snapshot.delegation_stopping(delegation))
+    };
+    if pending.is_some() {
+        finish_delegation(&app, delegation, false, false).await;
+    }
+    match result {
+        Ok(reply) => {
+            let (stop_reason, truncated) = reply.generation.map_or((None, false), |details| {
+                (details.stop_reason, details.truncated)
+            });
+            let status = if stop_reason.as_deref() == Some("aborted") {
+                Status::Cancelled
+            } else if reply.is_error {
+                Status::Failed
+            } else {
+                Status::Completed
+            };
+            (
+                status,
+                JobResult {
+                    text: reply.text,
+                    stop_reason,
+                    truncated,
+                },
+            )
+        }
+        Err(text) => (
+            if pending == Some(true) {
+                Status::Cancelled
+            } else {
+                Status::Failed
+            },
+            JobResult {
+                text,
+                stop_reason: None,
+                truncated: false,
+            },
+        ),
+    }
+}
+
 pub(super) async fn run_project_chat(
     State(app): State<Arc<App>>,
     Json(request): Json<RunPi>,
@@ -854,7 +1030,15 @@ pub(super) async fn run_project_chat(
     }
     tokio::spawn(async move {
         let trace = Call::untracked(app.clone());
-        match run_pi(app, request, &trace, projects::MessageOrigin::Dashboard).await {
+        match run_pi(
+            app,
+            request,
+            &trace,
+            projects::MessageOrigin::Dashboard,
+            None,
+        )
+        .await
+        {
             Ok(reply) if !reply.is_error => Ok(Json(reply.into_result())),
             Ok(reply) => Err((StatusCode::BAD_REQUEST, reply.text)),
             Err(error) => Err((StatusCode::BAD_REQUEST, error)),
@@ -890,7 +1074,7 @@ fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u6
         id.is_some()
     });
     id.ok_or_else(|| match scope {
-        DelegationScope::Project { .. } => {
+        DelegationScope::Project { .. } | DelegationScope::Queued { .. } => {
             "Lyra is busy, stopped, or the project chat is already active".into()
         }
         DelegationScope::Standalone => "Lyra is busy or stopped".into(),
@@ -1089,7 +1273,7 @@ fn memory_pair(memory: Option<&telemetry::Memory>) -> String {
     )
 }
 
-fn memory_estimate(
+pub(super) fn memory_estimate(
     metrics: &telemetry::Metrics,
     model: &str,
     record: &benchmark::Record,

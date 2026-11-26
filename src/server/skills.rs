@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use super::App;
 
 const MANIFEST: &str = "SKILL.md";
+pub(super) const IMPLEMENT: &str = include_str!("../../defaults/skills/lyra-implement/SKILL.md");
+pub(super) const FIX: &str = include_str!("../../defaults/skills/lyra-fix/SKILL.md");
+pub(super) const REVIEW: &str = include_str!("../../defaults/skills/lyra-review/SKILL.md");
 const BUILT_IN_SKILLS: &[(&str, &str)] = &[
     (
         "ast-index",
@@ -25,7 +28,14 @@ const BUILT_IN_SKILLS: &[(&str, &str)] = &[
         "post-code-review",
         include_str!("../../defaults/skills/post-code-review/SKILL.md"),
     ),
+    ("lyra-implement", IMPLEMENT),
+    ("lyra-fix", FIX),
+    ("lyra-review", REVIEW),
 ];
+
+pub(super) fn is_role_skill(name: &str) -> bool {
+    matches!(name, "lyra-implement" | "lyra-fix" | "lyra-review")
+}
 const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Store {
@@ -250,7 +260,12 @@ impl Store {
             fs::canonicalize(&self.directory).map_err(|error| storage_error(error).1)?;
         Ok(installed
             .into_iter()
-            .filter(|skill| selected.is_none_or(|names| names.contains(&skill.name)))
+            .filter(|skill| {
+                selected.map_or_else(
+                    || !is_role_skill(&skill.name),
+                    |names| names.contains(&skill.name),
+                )
+            })
             .map(|skill| directory.join(skill.name).join(MANIFEST))
             .collect())
     }
@@ -435,10 +450,20 @@ mod tests {
         store.install_defaults().unwrap();
 
         let skills = store.list().unwrap();
-        assert_eq!(skills.len(), 2);
+        assert_eq!(skills.len(), BUILT_IN_SKILLS.len());
         assert_eq!(skills[0].name, "ast-index");
         assert_eq!(skills[0].description, "Local version");
-        assert_eq!(skills[1].name, "post-code-review");
+        assert!(skills.iter().any(|skill| skill.name == "post-code-review"));
+        assert!(store.paths(None).unwrap().iter().all(|path| {
+            !is_role_skill(
+                path.parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+        }));
         assert_eq!(
             store.paths(Some(&["post-code-review".into()])).unwrap(),
             [fs::canonicalize(&store.directory)

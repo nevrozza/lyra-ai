@@ -45,6 +45,8 @@ struct Delegation {
     context_notice: Option<ContextNotice>,
     #[serde(skip)]
     project: bool,
+    #[serde(skip)]
+    exclusive: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize)]
@@ -60,6 +62,7 @@ pub enum ContextNotice {
 pub enum DelegationScope {
     Standalone,
     Project { session_id: Option<u64> },
+    Queued { session_id: u64, parallel: bool },
 }
 
 impl Snapshot {
@@ -119,19 +122,26 @@ impl Snapshot {
         if self.closed || self.model_action.is_some() || self.benchmark_running {
             return None;
         }
-        let (project, project_session_id) = match scope {
-            DelegationScope::Standalone if self.delegations.is_empty() => (false, None),
+        let (project, project_session_id, exclusive) = match scope {
+            DelegationScope::Standalone if self.delegations.is_empty() => (false, None, false),
             DelegationScope::Standalone => return None,
-            DelegationScope::Project { session_id } => {
-                if self.delegations.values().any(|active| {
-                    !active.project
-                        || session_id.is_some() && active.project_session_id == session_id
-                }) {
-                    return None;
-                }
-                (true, session_id)
-            }
+            DelegationScope::Project { session_id } => (true, session_id, false),
+            DelegationScope::Queued {
+                session_id,
+                parallel,
+            } => (true, Some(session_id), !parallel),
         };
+        if project
+            && self.delegations.values().any(|active| {
+                exclusive
+                    || active.exclusive
+                    || !active.project
+                    || project_session_id.is_some()
+                        && active.project_session_id == project_session_id
+            })
+        {
+            return None;
+        }
         self.next_delegation += 1;
         if let Some(session) = project_session_id {
             self.chat_context.remove(&session);
@@ -145,6 +155,7 @@ impl Snapshot {
                 stopping: false,
                 context_notice: None,
                 project,
+                exclusive,
             },
         );
         Some(self.next_delegation)
@@ -166,6 +177,10 @@ impl Snapshot {
         self.delegations
             .get(&id)
             .is_some_and(|active| active.stopping)
+    }
+
+    pub fn has_delegation(&self, id: u64) -> bool {
+        self.delegations.contains_key(&id)
     }
 
     pub fn finish_delegation(&mut self, id: u64, succeeded: bool) {

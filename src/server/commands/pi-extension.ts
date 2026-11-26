@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 export default function (pi) {
     const textOnly = process.env.LYRA_PI_TEXT_ONLY === "1";
+    const review = process.env.LYRA_PI_REVIEW === "1" && !textOnly;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
     if (effort) {
@@ -32,12 +33,44 @@ export default function (pi) {
             },
         });
     }
+    const reviewTools = [];
+    if (review) {
+        for (const [name, title, description, parameters, argument] of [
+            ["inspect_review_resources", "lyra:review-resources",
+                "Get a current CPU, system RAM, GPU VRAM, and Ollama residency sample. Use it to decide whether to overlap a build with diff review.",
+                Type.Object({}), () => ""],
+            ["start_background_command", "lyra:start-background-command",
+                "Submit one background build or check through Lyra's standard command approval. Continue inspecting files or the Git diff while it runs.",
+                Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }) }), args => args.command],
+            ["wait_background_command", "lyra:wait-background-command",
+                "Collect the background command's exit code and bounded logs. Collect the result before giving a review verdict.",
+                Type.Object({}), () => ""],
+            ["read_review_diff", "lyra:read-review-diff",
+                "Read the Git diff during a background build. Start with changed and untracked views, then use diff with each tracked path. Continue with the returned next_offset to read more. Read new untracked files with the file reader.",
+                Type.Object({
+                    view: Type.Union([Type.Literal("changed"), Type.Literal("untracked"), Type.Literal("diff")]),
+                    path: Type.Optional(Type.String()),
+                    offset: Type.Optional(Type.Integer({ minimum: 0 })),
+                }), args => JSON.stringify(args)],
+        ]) {
+            reviewTools.push(name);
+            pi.registerTool({
+                name, label: name, description, parameters, executionMode: "sequential",
+                async execute(_id, args, signal, _onUpdate, ctx) {
+                    const value = await ctx.ui.input(title, argument(args), { signal });
+                    if (value === undefined) throw new Error("Lyra did not return a result");
+                    return { content: [{ type: "text", text: value }], details: JSON.parse(value) };
+                },
+            });
+        }
+    }
     pi.on("session_start", (_event, ctx) => {
-        pi.setActiveTools(textOnly ? [] : ["read", "grep", "find", "ls", "write", "edit", "run_command"]);
+        const tools = ["read", "grep", "find", "ls", "run_command"];
+        pi.setActiveTools(textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit"]);
         if (origin) earlierMessages = savedMessages(ctx.sessionManager);
         ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");
     });
-    if (origin === "dashboard" || origin === "orchestrator") {
+    if (origin) {
         pi.on("message_end", ({ message }) => {
             if (message.role === "user") {
                 promptTimestamp = message.timestamp;

@@ -6,6 +6,11 @@ function memoryRoom(memory, resident) {
   return Math.max(0, memory.total - other);
 }
 
+export function residentRamBytes(model) {
+  return Number.isFinite(model?.size) && Number.isFinite(model.size_vram) && model.size_vram >= 0
+    ? Math.max(0, model.size - model.size_vram) : 0;
+}
+
 export function contextMemoryWarning(snapshot, model, resident, contextBytes) {
   const weights = snapshot?.model_sizes?.[model];
   if (!Number.isFinite(weights) || weights <= 0 || snapshot.models == null) return '';
@@ -16,9 +21,7 @@ export function contextMemoryWarning(snapshot, model, resident, contextBytes) {
   const scope = contextBytes == null ? ' · без оценки контекста' : '';
   const gpus = snapshot.gpus.filter((gpu) => gpu.vram?.total > 0);
   const ram = snapshot.ram;
-  const residentRam = resident?.size != null && resident.size_vram != null ?
-    Math.max(0, resident.size - resident.size_vram) : 0;
-  const ramAvailable = ram?.total > 0 ? memoryRoom(ram, residentRam) : null;
+  const ramAvailable = ram?.total > 0 ? memoryRoom(ram, residentRamBytes(resident)) : null;
 
   if (gpus.length === 0) {
     if (ramAvailable == null || needs + systemReserve <= ramAvailable) return '';

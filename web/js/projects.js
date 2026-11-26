@@ -1,12 +1,26 @@
 import { element, get } from './ui.js';
 import { createThinkingControl } from './chat-thinking.js';
 
+const taskStatuses = {
+  queued: 'В очереди', running: 'В работе', completed: 'Готово',
+  failed: 'Ошибка', cancelled: 'Отменена', interrupted: 'Прервана', blocked: 'Заблокирована',
+};
+
+function taskStatus(job) {
+  if (job.external && job.status === 'queued') return 'Внешний шаг';
+  return taskStatuses[job.status] ?? '';
+}
+
 export function createProjects() {
   const tree = get('project-tree');
   const projectDialog = get('project-dialog');
   const chatDialog = get('project-chat-dialog');
   const projectForm = get('project-form');
   const chatForm = get('project-chat-form');
+  const taskDialog = get('project-task-dialog');
+  const taskForm = get('project-task-form');
+  const taskModel = get('project-task-model');
+  const taskParallel = get('project-task-parallel');
   const folderList = get('project-folders');
   const pickFolder = get('pick-project-folder');
   const skill = get('project-skill');
@@ -22,7 +36,7 @@ export function createProjects() {
   const drafts = new Map();
   const chatModels = new Map();
   const chatModes = new Map();
-  const chatMode = () => chatModes.get(chatId) ?? 'chat';
+  const chatMode = () => chatModes.get(chatId) ?? (selectedChat()?.job ? 'work' : 'chat');
   const sending = new Map();
   const stopRequests = new Set();
   let catalog;
@@ -51,9 +65,12 @@ export function createProjects() {
     ? Object.entries(run?.delegations ?? {}).find(([, task]) => task.project_session_id === id)
     : undefined;
   const visibleChats = project => project.sessions.filter(chat => project.archived || chat.archived === archiveView);
+  const pendingTask = chat => ['queued', 'running'].includes(chat?.job?.status);
+  const chatLabel = chat => chat.job ? `#${chat.id} · ${chat.name}` : chat.name;
 
   function report(text = '', error = false) {
-    const target = projectDialog.open ? 'project-form-message'
+    const target = taskDialog.open ? 'project-task-form-message'
+      : projectDialog.open ? 'project-form-message'
       : chatDialog.open ? 'project-chat-form-message' : 'project-message';
     get(target).dataset.error = String(error);
     get(target).textContent = text;
@@ -64,7 +81,9 @@ export function createProjects() {
     const project = selectedProject();
     const chat = selectedChat();
     const delegation = chatRun(chat?.id);
-    const active = chat && (sending.has(chat.id) || delegation);
+    const queued = chat?.job?.status === 'queued';
+    const taskPending = pendingTask(chat);
+    const active = chat && (sending.has(chat.id) || delegation || taskPending);
     const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
     const contextNotice = delegation?.[1].context_notice ?? run?.chat_context?.[chat?.id];
     const contextStatus = {
@@ -83,7 +102,7 @@ export function createProjects() {
     }
     get('project-progress').hidden = !active;
     const progressText = stopping ? 'Останавливаем…' : contextNotice === 'compacting'
-      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : 'Отправляем…';
+      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : queued ? (chat.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
     const progress = get('project-progress-text');
     if (progress.textContent !== progressText) progress.textContent = progressText;
     get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));
@@ -96,21 +115,25 @@ export function createProjects() {
     get('new-project').disabled = !ready;
     get('new-project-chat').hidden = !project || project.archived || archiveView;
     get('new-project-chat').disabled = !ready;
+    get('new-project-task').hidden = !project || project.archived || archiveView;
+    get('new-project-task').disabled = !ready || !(installedModels.length || run?.model);
     get('edit-project').hidden = !project || project.archived;
     get('edit-project').disabled = !ready;
     get('edit-project-chat-folders').hidden = !chat || chat.archived || project.archived;
-    get('edit-project-chat-folders').disabled = !ready;
+    get('edit-project-chat-folders').disabled = !ready || taskPending;
     const archiveProject = get('archive-project');
     archiveProject.textContent = project?.archived ? 'Восстановить проект' : 'Архивировать проект';
-    archiveProject.disabled = !ready;
+    archiveProject.disabled = !ready || Boolean(project?.sessions.some(pendingTask));
     const archiveChat = get('archive-project-chat');
     archiveChat.hidden = !chat || project.archived;
     archiveChat.textContent = chat?.archived ? 'Восстановить чат' : 'Архивировать чат';
-    archiveChat.disabled = !ready;
+    archiveChat.disabled = !ready || taskPending;
     pickFolder.disabled = !ready;
     pickFolder.textContent = picking ? 'Выбор папки…' : 'Выбрать папку';
     get('cancel-project').disabled = saving || picking;
     get('cancel-project-chat').disabled = saving;
+    get('cancel-project-task-form').disabled = saving;
+    taskForm.querySelector('[type="submit"]').disabled = !ready;
     for (const button of folderList.querySelectorAll('button')) button.disabled = !ready;
     projectForm.querySelector('[type="submit"]').disabled = !ready || !folders.length;
     chatForm.querySelector('[type="submit"]').disabled = !ready;
@@ -125,8 +148,8 @@ export function createProjects() {
     thinking.update(online && run && !composer.hidden ? model : undefined, run);
     sendButton.disabled = !online || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
     sendButton.hidden = Boolean(active);
-    stopButton.disabled = !delegation || Boolean(stopping);
-    stopButton.textContent = stopping ? 'Останавливаем…' : 'Остановить';
+    stopButton.disabled = (!delegation && !queued) || Boolean(stopping) || !online || saving;
+    stopButton.textContent = stopping ? 'Останавливаем…' : queued && !delegation ? 'Отменить задачу' : 'Остановить';
   }
 
   function refreshModels() {
@@ -134,7 +157,7 @@ export function createProjects() {
     const defaultModel = installedModels.length && !installedModels.includes(dashboardModel)
       ? installedModels[0] : dashboardModel;
     const models = [...new Set([defaultModel, ...installedModels].filter(Boolean))];
-    const preferred = chatModels.get(chatId);
+    const preferred = chatModels.get(chatId) ?? selectedChat()?.job?.model;
     const selected = models.includes(preferred) ? preferred : '';
     const key = JSON.stringify([defaultModel, models, selected]);
     if (key !== modelOptionsKey) {
@@ -153,11 +176,19 @@ export function createProjects() {
       heading.classList.add('project-tree-heading');
       item.append(heading);
       const chats = visibleChats(project);
-      if (chats.length) {
+      const ordinary = chats.filter(chat => !chat.job);
+      const tasks = chats.filter(chat => chat.job);
+      for (const group of [ordinary, tasks]) {
+        if (!group.length) continue;
+        if (group === tasks) {
+          const label = element('p', 'Задачи');
+          label.className = 'secondary project-task-group';
+          item.append(label);
+        }
         const list = element('ul', '');
-        list.append(...chats.map(chat => {
+        list.append(...group.map(chat => {
           const entry = element('li', '');
-          entry.append(treeButton(chat.name, project.id, chat.id));
+          entry.append(treeButton(chatLabel(chat), project.id, chat.id, chat.job));
           return entry;
         }));
         item.append(list);
@@ -171,14 +202,18 @@ export function createProjects() {
       : archiveView ? 'Архив пуст.' : 'Рабочих проектов пока нет.';
   }
 
-  function treeButton(label, id, session) {
+  function treeButton(label, id, session, job) {
     const button = element('button', '');
     button.type = 'button';
     button.title = label;
     button.dataset.projectEntry = `${id}/${session ?? ''}`;
     button.setAttribute('aria-current', String(id === projectId && session === chatId));
     button.append(element('span', label));
-    if (session != null) {
+    if (job) {
+      const status = element('span', taskStatus(job));
+      status.className = 'project-task-state';
+      button.append(status);
+    } else if (session != null) {
       const spinner = element('span', '');
       spinner.className = 'project-spinner';
       spinner.dataset.chatProgress = session;
@@ -215,7 +250,14 @@ export function createProjects() {
     const breadcrumb = get('project-breadcrumb');
     breadcrumb.hidden = !chat;
     breadcrumb.textContent = chat ? project.name : '';
-    get('current-project-title').textContent = chat?.name ?? project?.name ?? '';
+    get('current-project-title').textContent = chat ? chatLabel(chat) : project?.name ?? '';
+    const jobStatus = get('project-job-status');
+    jobStatus.hidden = !chat?.job;
+    const sourceTask = chat?.job?.workflow?.root_id;
+    const chain = sourceTask && sourceTask !== chat.id ? ` · Цепочка #${sourceTask}` : '';
+    const dependencies = chat?.job?.after?.map(id => `#${id}`).join(', ');
+    jobStatus.textContent = chat?.job
+      ? [taskStatus(chat.job), chat.job.model, dependencies && `После ${dependencies}`].filter(Boolean).join(' · ') + chain : '';
     const workspace = get('project-chat-workspace');
     workspace.hidden = !chat;
     const workingFolders = chat ? chatFolders(project, chat) : [];
@@ -247,7 +289,7 @@ export function createProjects() {
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
       const label = message.role === 'assistant' ? (message.model || 'Lyra')
-        : message.origin === 'orchestrator' ? 'Оркестратор' : '';
+        : { orchestrator: 'Оркестратор', lyra: 'Lyra · Следующий шаг' }[message.origin] ?? '';
       if (label) item.append(element('strong', label));
       item.append(element('p', message.text));
       return item;
@@ -457,6 +499,38 @@ export function createProjects() {
 
   get('new-project-chat').onclick = () => openChatForm();
   get('edit-project-chat-folders').onclick = () => openChatForm(selectedChat());
+  let taskProject;
+  let taskBatch;
+  get('new-project-task').onclick = () => {
+    taskProject = selectedProject();
+    taskBatch = crypto.randomUUID();
+    taskForm.reset();
+    const models = [...new Set([run?.model, ...installedModels].filter(Boolean))];
+    setOptions(taskModel, models.map(model => [model, model]), refreshModels());
+    taskDialog.showModal();
+    report();
+  };
+  get('cancel-project-task-form').onclick = () => taskDialog.close();
+  taskDialog.oncancel = event => {
+    if (saving) event.preventDefault();
+  };
+  taskForm.onsubmit = event => {
+    event.preventDefault();
+    const project = taskProject;
+    save('/projects/tasks', {
+      project_id: project.id,
+      batch_id: taskBatch,
+      tasks: [{
+        name: get('project-task-name').value,
+        prompt: get('project-task-prompt').value,
+        model: taskModel.value,
+        parallel: taskParallel.checked,
+      }],
+    }, async ([task]) => {
+      taskDialog.close();
+      await refresh({ project: project.id, chat: task.project_session_id });
+    });
+  };
   chatFolderSelect.onchange = renderChatFolders;
   chatForm.onsubmit = event => {
     event.preventDefault();
@@ -488,8 +562,17 @@ export function createProjects() {
     updateControls();
   };
   stopButton.onclick = async () => {
+    if (stopButton.disabled) return;
+    const chat = selectedChat();
     const delegation = chatRun(chatId);
-    if (!delegation || stopButton.disabled) return;
+    if (!delegation && chat?.job?.status === 'queued') {
+      await save('/projects/tasks/cancel', {
+        project_id: selectedProject().id,
+        project_session_id: chat.id,
+      }, () => refresh());
+      return;
+    }
+    if (!delegation) return;
     const [id, task] = delegation;
     stopRequests.add(id);
     updateControls();

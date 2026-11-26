@@ -45,9 +45,11 @@
               <p id="project-breadcrumb" class="secondary" hidden></p>
               <h3 id="current-project-title"></h3>
               <p id="project-chat-workspace" class="secondary" hidden></p>
+              <p id="project-job-status" class="secondary" role="status" hidden></p>
             </div>
             <div class="project-controls">
               <button id="new-project-chat" class="unload" type="button" hidden>＋ Новый чат</button>
+              <button id="new-project-task" class="unload" type="button" hidden>＋ Задача</button>
               <details id="project-actions" class="project-actions">
                 <summary>Действия</summary>
                 <div class="project-action-menu">
@@ -100,6 +102,23 @@
           <div class="project-controls project-dialog-actions">
             <button id="cancel-chat-thinking" class="unload" type="button">Отмена</button>
             <button id="save-chat-thinking" type="submit">Сохранить</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="project-task-dialog" class="project-dialog" aria-labelledby="project-task-title">
+        <form id="project-task-form" class="project-form">
+          <h3 id="project-task-title">Новая задача</h3>
+          <label for="project-task-name">Название</label>
+          <input id="project-task-name" type="text" maxlength="120" required autofocus>
+          <label for="project-task-model">Модель</label>
+          <select id="project-task-model" required></select>
+          <label for="project-task-prompt">Что нужно сделать</label>
+          <textarea id="project-task-prompt" rows="5" maxlength="8000" required></textarea>
+          <label class="pin"><input id="project-task-parallel" type="checkbox"> Можно выполнять параллельно</label>
+          <p id="project-task-form-message" class="project-feedback" role="status"></p>
+          <div class="project-controls project-dialog-actions">
+            <button id="cancel-project-task-form" class="unload" type="button">Отмена</button>
+            <button type="submit">В очередь</button>
           </div>
         </form>
       </dialog>
@@ -156,6 +175,7 @@
           </div>
           <div id="gpus" class="gpus"></div>
           <p id="no-gpu" class="secondary gpu-empty">Ожидаем данные GPU…</p>
+          <p id="ollama-memory-warning" class="memory-warning system-memory-warning" role="status" hidden></p>
         </div>
       </section>
 

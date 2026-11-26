@@ -80,6 +80,8 @@ h2 { font-size: .96rem; font-weight: 650; }
 #project-tree button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 9px; background: transparent; color: var(--muted); text-align: left; font-size: .83rem; font-weight: 450; }
 #project-tree button > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #project-tree button.project-tree-heading { color: #e5ecdf; font-weight: 650; }
+#project-tree .project-task-group { margin: 6px 0 0 10px; font-size: .73rem; }
+.project-task-state { flex: none; color: var(--muted); font-size: .69rem; }
 #project-tree button:is([aria-current="true"], :hover) { background: #27362b; color: var(--accent); }
 #project-tree-empty { padding: 4px 6px; }
 #project-tree-empty:empty { display: none; }
@@ -138,11 +140,11 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-dialog::backdrop { background: #060b09b8; }
 .project-form { display: grid; gap: 9px; padding: 20px; font-size: .85rem; }
 .project-form h3 { margin-bottom: 5px; }
-.project-form :is(input[type="text"], select) { min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: #141b17; color: inherit; font: inherit; }
+.project-form :is(input[type="text"], select, textarea) { min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: #141b17; color: inherit; font: inherit; }
 .project-chat-folders { min-width: 0; margin: 4px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: 7px; }
 #project-chat-folder-list { display: grid; gap: 7px; }
 #project-chat-folder-list label { min-width: 0; overflow-wrap: anywhere; }
-.project-form :is(input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.project-form :is(input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .project-dialog-actions { justify-content: flex-end; margin-top: 8px; }
 .project-dialog .project-feedback { margin: 3px 0 0; }
 .chat-thinking-dialog { width: min(360px, calc(100% - 26px)); }
@@ -234,6 +236,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .system { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); align-items: start; gap: 18px; padding-block: 12px 14px; }
 .system-host, .gpus { display: grid; gap: 10px; min-width: 0; }
 .system > :is(.gpus, .gpu-empty) { border-inline-start: 1px solid var(--line); padding-inline-start: 18px; }
+.system-memory-warning { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .gpus:empty { display: none; }
 .metric { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; font-size: .84rem; }
 .metric output { color: #d2dacd; font-size: .78rem; }

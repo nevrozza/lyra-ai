@@ -21,6 +21,37 @@ use super::{
 const ANSWER_LIMIT: usize = 8_000;
 const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
+mod review_diff;
+
+#[derive(Clone, Copy)]
+pub(super) enum Role {
+    Implement,
+    Fix,
+    Review,
+}
+
+impl Role {
+    fn instructions(self) -> &'static str {
+        let manifest = match self {
+            Self::Implement => super::skills::IMPLEMENT,
+            Self::Fix => super::skills::FIX,
+            Self::Review => super::skills::REVIEW,
+        };
+        manifest
+            .split_once("\n---\n")
+            .expect("role skill frontmatter")
+            .1
+    }
+}
+
+struct BackgroundCommand(tokio::task::JoinHandle<commands::ResultBody>);
+
+impl Drop for BackgroundCommand {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(super) struct Task<'a> {
     pub(super) trace: &'a Call,
     pub(super) skills: &'a [PathBuf],
@@ -34,6 +65,7 @@ pub(super) struct Task<'a> {
     pub(super) delegation: u64,
     pub(super) context_window: Option<u32>,
     pub(super) think: Option<&'a ollama::Think>,
+    pub(super) role: Option<Role>,
 }
 
 pub(super) struct Reply {
@@ -168,6 +200,9 @@ pub(super) async fn run(
     let trace = task.as_ref().map(|task| task.trace);
     let commands = trace;
     let text_only = task.as_ref().is_some_and(|task| task.text_only);
+    let reviewing = task
+        .as_ref()
+        .is_some_and(|task| matches!(task.role, Some(Role::Review)));
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let project_instructions;
     let agents_file = if let (Some(project), Some(directory), Some(task)) =
@@ -249,6 +284,7 @@ pub(super) async fn run(
     let mut successful_file_tools = [false; 3];
     let mut ready = commands.is_none();
     let mut legacy_rpc = false;
+    let mut background = None::<BackgroundCommand>;
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
     loop {
@@ -306,16 +342,68 @@ pub(super) async fn run(
                             .as_str()
                             .ok_or("Missing Pi command request ID")?;
                         let command = event["placeholder"].as_str().ok_or("Missing Pi command")?;
-                        let result =
-                            commands::run(commands.expect("command trace"), workspace, command)
-                                .await;
-                        let value =
-                            serde_json::to_string(&result).map_err(|error| error.to_string())?;
+                        let result = if background.is_some() {
+                            json!({"status": "busy", "message": "Collect the background command first, or use read_review_diff."})
+                        } else {
+                            serde_json::to_value(
+                                commands::run(commands.expect("command trace"), workspace, command)
+                                    .await,
+                            )
+                            .map_err(|error| error.to_string())?
+                        };
                         rpc_send(
                             stdin,
-                            json!({"type": "extension_ui_response", "id": id, "value": value}),
+                            json!({"type": "extension_ui_response", "id": id, "value": result.to_string()}),
                         )
                         .await?;
+                    }
+                    Some("input") if ready && reviewing => {
+                        let id = event["id"]
+                            .as_str()
+                            .ok_or("Missing Pi review tool request ID")?;
+                        let argument = event["placeholder"].as_str().unwrap_or_default();
+                        let result = match event["title"].as_str() {
+                            Some("lyra:review-resources") => {
+                                let app = commands.expect("command trace").app();
+                                let mut cache = app.metrics.lock().await;
+                                cache.invalidate();
+                                let metrics = cache.sample().await;
+                                json!({
+                                    "cpu_percent": metrics.cpu_percent, "ram": metrics.ram,
+                                    "gpus": metrics.gpus, "loaded_models": metrics.models,
+                                })
+                            }
+                            Some("lyra:start-background-command") if background.is_none() => {
+                                let trace =
+                                    Call::untracked(commands.expect("command trace").app_handle());
+                                let workspace = workspace.to_path_buf();
+                                let command = argument.to_owned();
+                                background = Some(BackgroundCommand(tokio::spawn(async move {
+                                    commands::run(&trace, &workspace, &command).await
+                                })));
+                                json!({"status": "pending", "message": "Command submitted through Lyra. Collect the result with wait_background_command."})
+                            }
+                            Some("lyra:start-background-command") => {
+                                json!({"status": "busy", "message": "Collect the previous background result first."})
+                            }
+                            Some("lyra:wait-background-command") => {
+                                if let Some(command) = &mut background {
+                                    let result = (&mut command.0)
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                    background = None;
+                                    serde_json::to_value(result)
+                                        .map_err(|error| error.to_string())?
+                                } else {
+                                    json!({"status": "error", "message": "No background command to collect."})
+                                }
+                            }
+                            Some("lyra:read-review-diff") => {
+                                review_diff::read(workspace, argument).await
+                            }
+                            _ => continue,
+                        };
+                        rpc_send(stdin, json!({"type": "extension_ui_response", "id": id, "value": result.to_string()})).await?;
                     }
                     _ => {}
                 }
@@ -428,6 +516,9 @@ pub(super) async fn run(
         }
     }
 
+    if background.is_some() {
+        return Err("Проверка закончилась до получения результата фоновой команды.".into());
+    }
     let status = child.wait().await.map_err(|error| error.to_string())?;
     let diagnostics = diagnostics.await.unwrap_or_default();
     if !ready {
@@ -568,6 +659,10 @@ async fn write_project_instructions(
     if task.text_only {
         text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
     }
+    if let Some(role) = task.role {
+        text.push_str("\n\n");
+        text.push_str(role.instructions());
+    }
     if project.session_file.is_some() {
         text.push_str("\nEarlier turns and saved summaries, when present, belong to this same local Lyra chat even if the user switched models. Use the conversation you actually received to answer questions about earlier turns. Say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");
     }
@@ -676,10 +771,17 @@ fn spawn_pi(
             "--no-context-files",
         ]);
         command.env_remove("LYRA_PI_TEXT_ONLY");
+        command.env_remove("LYRA_PI_REVIEW");
+        let reviewing = task.is_some_and(|task| matches!(task.role, Some(Role::Review)));
+        if reviewing {
+            command.env("LYRA_PI_REVIEW", "1");
+        }
         if text_only {
             command.env("LYRA_PI_TEXT_ONLY", "1").arg("--no-tools");
         } else {
-            let tools = if extension.is_some() {
+            let tools = if reviewing {
+                "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
+            } else if extension.is_some() {
                 "read,grep,find,ls,write,edit,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
