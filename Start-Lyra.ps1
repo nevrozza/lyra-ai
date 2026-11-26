@@ -77,13 +77,15 @@ function Write-UpdateResult($Status, $Message = '') {
     [IO.File]::Move($pending, $UpdateResult)
 }
 
-function Find-Application($Names, $Fallbacks) {
+function Find-Application($Names, $Fallbacks, [switch]$Optional) {
     $command = Get-Command -Name $Names -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command) { return $command.Source }
     foreach ($path in $Fallbacks) {
         if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
     }
-    throw "Cannot find $($Names -join ' or '). Install it and reopen Windows Terminal or sign in again to refresh PATH."
+    if (-not $Optional) {
+        throw "Cannot find $($Names -join ' or '). Install it and reopen Windows Terminal or sign in again to refresh PATH."
+    }
 }
 
 try {
@@ -157,7 +159,7 @@ try {
     Add-Type -AssemblyName System.Drawing
     [Console]::WriteLine('Checking Cargo, Ollama and Pi...')
     $cargo = Find-Application @('cargo.exe') @("$env:USERPROFILE\.cargo\bin\cargo.exe")
-    $ollama = Find-Application @('ollama.exe') @("$env:LOCALAPPDATA\Programs\Ollama\ollama.exe")
+    $ollama = Find-Application @('ollama.exe') @("$env:LOCALAPPDATA\Programs\Ollama\ollama.exe") -Optional
     $pi = Find-Application @('pi.exe', 'pi.cmd') @("$env:USERPROFILE\.pi\agent\bin\pi.cmd", "$env:LOCALAPPDATA\pi-node\current\pi.cmd", "$env:APPDATA\npm\pi.cmd")
     $env:PATH = "$(Split-Path -Parent $pi);$(Split-Path -Parent $cargo);$env:PATH"
     if (-not ('LyraTray.Session' -as [type])) {

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -19,6 +20,7 @@ namespace LyraTray
     {
         private const string OllamaUrl = "http://127.0.0.1:11434";
         private const int OllamaPort = 11434;
+        private const string SharedOllamaWarning = "Ollama is already running in the background. Lyra is using it, and Ollama will stay running when Lyra exits.";
         private const string AgentBinary = "lyra-agent";
         private static readonly Regex ValidModel = new Regex(@"\A[A-Za-z0-9][A-Za-z0-9._:/-]*\z");
 
@@ -47,7 +49,7 @@ namespace LyraTray
         private long lastDashboardLaunch;
         private string waitingFor;
 
-        private enum Stage { Building, WaitingForPorts, StartingOllama, StartingLyra, Ready }
+        private enum Stage { Building, WaitingForPorts, WaitingForOllama, StartingLyra, Ready }
 
         public static void Run(string root, string cargo, string ollama, string model, int port, string startupDirectory, string target, string revision)
         {
@@ -202,29 +204,35 @@ namespace LyraTray
                 if (stage == Stage.WaitingForPorts)
                 {
                     var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
-                    string blocked = listeners.Any(endpoint => endpoint.Port == OllamaPort)
-                        ? "Quit the existing Ollama from its own tray icon. Lyra will then start an Ollama it can shut down."
-                        : listeners.Any(endpoint => endpoint.Port == port)
-                            ? "Dashboard port " + port + " is in use. Stop the other server or relaunch with -Port."
-                            : null;
-                    if (blocked != null)
+                    if (listeners.Any(endpoint => endpoint.Port == port))
                     {
+                        string blocked = "Dashboard port " + port + " is in use. Stop the other server or relaunch with -Port.";
                         if (waitingFor != blocked) Console.WriteLine(blocked);
                         waitingFor = blocked;
                         timer.Interval = 1000;
                         return;
                     }
                     waitingFor = null;
-                    Console.WriteLine("Starting Ollama at " + OllamaUrl + "...");
-                    ollama = StartWithEnvironment(ollamaExecutable, "serve", "ollama", "OLLAMA_HOST", "127.0.0.1:11434");
-                    FollowLog("ollama");
-                    BeginProbe(Stage.StartingOllama);
+                    if (listeners.Any(endpoint => endpoint.Port == OllamaPort))
+                    {
+                        Console.WriteLine("Checking for Ollama at " + OllamaUrl + "...");
+                    }
+                    else
+                    {
+                        if (string.IsNullOrEmpty(ollamaExecutable))
+                            throw new InvalidOperationException("Cannot find ollama.exe. Install Ollama and reopen Windows Terminal or sign in again to refresh PATH.");
+                        Console.WriteLine("Starting Ollama at " + OllamaUrl + "...");
+                        ollama = StartWithEnvironment(ollamaExecutable, "serve", "ollama", "OLLAMA_HOST", "127.0.0.1:11434");
+                        FollowLog("ollama");
+                    }
+                    BeginProbe(Stage.WaitingForOllama);
                 }
 
-                CheckAlive(ollama, "Ollama", Log("ollama"));
-                if (stage == Stage.StartingOllama)
+                if (ollama != null) CheckAlive(ollama, "Ollama", Log("ollama"));
+                if (stage == Stage.WaitingForOllama)
                 {
-                    if (ReadWhenReady(OllamaUrl + "/api/tags") == null) return;
+                    if (!OllamaIsReady()) return;
+                    if (ollama == null) Console.WriteLine("WARNING: " + SharedOllamaWarning);
                     string model = PreferredModel();
                     Console.WriteLine("Ollama is ready. Starting Lyra...");
                     string executable = Path.Combine(target, "release", AgentBinary + ".exe");
@@ -244,6 +252,7 @@ namespace LyraTray
                     PrintLogs(drain: true);
                     StopFollowingLogs();
                     ShowTray();
+                    if (ollama == null) icon.ShowBalloonTip(6000, "Lyra AI", SharedOllamaWarning, ToolTipIcon.Warning);
                     Console.WriteLine("Ready: " + dashboard);
                     File.WriteAllText(Path.Combine(startupDirectory, "ready"), "");
                     stage = Stage.Ready;
@@ -257,6 +266,22 @@ namespace LyraTray
                 ExitThread();
                 if (startupError == null) MessageBox.Show(error.Message, "Lyra AI", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private bool OllamaIsReady()
+        {
+            string response = ReadWhenReady(OllamaUrl + "/api/tags");
+            if (response == null) return false;
+            if (ollama != null) return true;
+
+            try
+            {
+                var catalog = json.DeserializeObject(response) as Dictionary<string, object>;
+                object models;
+                return catalog != null && catalog.TryGetValue("models", out models) && models is IList;
+            }
+            catch (ArgumentException) { return false; }
+            catch (InvalidOperationException) { return false; }
         }
 
         private string PreferredModel()
