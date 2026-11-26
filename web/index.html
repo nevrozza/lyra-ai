@@ -66,7 +66,6 @@
               <div class="model-actions">
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>
-                <label class="pin"><input id="pi-support" type="checkbox" disabled> Поддерживает Pi</label>
               </div>
             </div>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
@@ -82,6 +81,11 @@
             <button id="benchmark-run" class="unload" type="button" disabled>Запустить бенчмарк</button>
             <p id="benchmark-summary" class="secondary"></p>
             <dl id="benchmark-results" class="facts" hidden></dl>
+            <div class="model-actions">
+              <label class="pin"><input id="pi-support" type="checkbox" aria-describedby="pi-check-status" disabled> Поддерживает Pi</label>
+              <button id="pi-benchmark-run" class="unload" type="button" disabled>Проверить Pi</button>
+            </div>
+            <p id="pi-check-status" class="secondary" role="status"></p>
           </div>
         </section>
       </div>

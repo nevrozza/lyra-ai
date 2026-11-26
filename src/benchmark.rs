@@ -20,6 +20,7 @@ const SEED: u32 = 42;
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Preparing,
+    CheckingPi,
     LoadingAndPrefill,
     Prefill,
     Generating,
@@ -31,7 +32,7 @@ pub enum Stage {
 #[serde(default)]
 pub struct Record {
     description: String,
-    pi_supported: bool,
+    pi_check: Option<bool>,
     pub context_tokens: Option<u32>,
     pub latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
@@ -192,12 +193,10 @@ impl Store {
         })
     }
 
-    pub fn set_pi_supported(&self, model: String, supported: bool) -> io::Result<()> {
+    pub fn save_pi_check(&self, model: String, passed: bool) -> io::Result<()> {
         self.update(|records| {
-            let record = records.entry(model).or_default();
-            let changed = record.pi_supported != supported;
-            record.pi_supported = supported;
-            changed
+            records.entry(model).or_default().pi_check = Some(passed);
+            true
         })
     }
 

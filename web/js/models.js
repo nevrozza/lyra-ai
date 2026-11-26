@@ -9,6 +9,8 @@ const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 export function createModels(session, { refreshControls, requestMetrics }) {
   const pinModel = get('pin-model');
   const piSupport = get('pi-support');
+  const piBenchmarkRun = get('pi-benchmark-run');
+  const piCheckStatus = get('pi-check-status');
   const unloadModel = get('unload-model');
   const benchmarkRun = get('benchmark-run');
   const description = get('model-description');
@@ -20,7 +22,6 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
-  let piSupportSaving;
 
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
@@ -42,12 +43,15 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const blocked = isBlocked();
     const installed = session.metrics?.installed_models?.includes(observedModel);
     pinModel.disabled = blocked || !installed || session.metrics?.models == null;
-    piSupport.disabled = session.closed || !session.online || !installed || !benchmarkRecord ||
-      Boolean(piSupportSaving);
-    piSupport.checked = piSupportSaving && piSupportSaving.model === observedModel
-      ? piSupportSaving.checked : Boolean(benchmarkRecord?.pi_supported);
     unloadModel.disabled = blocked || !installed || !loadedModel(session.metrics?.models, observedModel);
     benchmarkRun.disabled = blocked || !installed || session.metrics?.models == null;
+    piBenchmarkRun.disabled = benchmarkRun.disabled;
+    const piCheck = benchmarkRecord?.pi_check;
+    piSupport.checked = piCheck === true;
+    const checkingPi = (modelSubmitting?.model === observedModel && modelSubmitting?.action === 'benchmark-pi') ||
+      (session.run?.operation_model === observedModel && session.run?.benchmark_stage === 'checking_pi');
+    piCheckStatus.textContent = checkingPi ? 'Проверяем Pi…' : piCheck === true ? 'Проверка пройдена.' :
+      piCheck === false ? 'Проверка не пройдена.' : 'Пока не проверено.';
     description.readOnly = session.closed;
     description.disabled = !installed || !benchmarkRecord || descriptionSaving;
     const descriptionChanged = benchmarkRecord && description.value !== benchmarkRecord.description;
@@ -69,30 +73,9 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     changeModel(pinned ? 'pin' : 'unpin', '/model/pin', { pinned });
   });
 
-  piSupport.addEventListener('change', async () => {
-    const model = displayedModel();
-    if (piSupport.disabled || !model) return;
-    const checked = piSupport.checked;
-    piSupportSaving = { model, checked };
-    modelRequestError = '';
-    renderModel(session.metrics?.models);
-    try {
-      const response = await postModel('/model/pi-support', session.run?.model, { pi_supported: checked }, model);
-      if (!response.ok) throw new Error(modelResponseError(response));
-      if (displayedModel() === model && benchmarkRecord) {
-        benchmarkRecord.pi_supported = checked;
-        readBenchmark(model, false);
-      }
-    } catch (error) {
-      if (displayedModel() === model) modelRequestError = `Отметка Pi не сохранена. ${error.message}`;
-    } finally {
-      piSupportSaving = undefined;
-      renderModel(session.metrics?.models);
-    }
-  });
-
   unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
   benchmarkRun.addEventListener('click', () => changeModel('benchmark', '/model/benchmark'));
+  piBenchmarkRun.addEventListener('click', () => changeModel('benchmark-pi', '/model/benchmark/pi'));
 
   description.addEventListener('input', refreshControls);
   get('model-description-form').addEventListener('submit', async (event) => {
@@ -179,7 +162,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const isOperationModel = name === session.run?.operation_model;
     const action = modelSubmitting?.model === name ? modelSubmitting.action :
       isOperationModel ? session.run?.model_action : undefined;
-    const benchmarking = action === 'benchmark' || (isOperationModel && session.run?.benchmark_running);
+    const benchmarking = action === 'benchmark' || action === 'benchmark-pi' ||
+      (isOperationModel && session.run?.benchmark_running);
     const delegated = name != null && name === session.run?.delegated_model;
     const aiAction = delegated && !session.closed ? 'request' : session.run?.ai_model_actions?.[name];
     const expiry = Date.parse(loaded?.expires_at);
@@ -233,7 +217,9 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     get('benchmark-model').textContent = model ?? '';
     settings.render();
     const { loaded, action, benchmarking, pinned } = modelStatus(model, models);
-    benchmarkRun.textContent = benchmarking ? 'Бенчмарк выполняется…' : 'Запустить бенчмарк';
+    const checkingPi = action === 'benchmark-pi' ||
+      (model === session.run?.operation_model && session.run?.benchmark_stage === 'checking_pi');
+    benchmarkRun.textContent = benchmarking && !checkingPi ? 'Бенчмарк выполняется…' : 'Запустить бенчмарк';
     get('ollama').textContent = models === null ? 'Ollama недоступна' : 'Ollama';
     pinModel.checked = action === 'pin' || (action !== 'unpin' && pinned);
     const modelError = modelRequestError || (model === session.run?.operation_model ? session.run?.model_error : '');

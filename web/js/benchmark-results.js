@@ -4,6 +4,7 @@ import { element, get, memoryAmount, oneDecimal } from './ui.js';
 const benchmarkDate = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 export const benchmarkStages = {
   preparing: 'Подготовка',
+  checking_pi: 'Проверка Pi',
   loading_and_prefill: 'Загрузка и промпт',
   prefill: 'Обработка промпта',
   generating: 'Генерация',

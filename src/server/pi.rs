@@ -1,4 +1,9 @@
-use std::{io, path::Path, process::Stdio};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use serde_json::Value;
 use tokio::{
@@ -17,6 +22,63 @@ pub(super) struct Reply {
     pub(super) stop_reason: Option<String>,
     pub(super) truncated: bool,
     pub(super) error: Option<String>,
+    successful_file_tools: [bool; 3],
+}
+
+pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bool, String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("lyra-pi-check-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&path)
+        .map_err(|error| format!("Не удалось создать папку проверки Pi: {error}"))?;
+    let directory = CheckDirectory(path);
+    let workspace = directory.0.join("workspace");
+    tokio::fs::create_dir(&workspace)
+        .await
+        .map_err(|error| format!("Не удалось подготовить папку проверки Pi: {error}"))?;
+    tokio::fs::write(workspace.join("input.txt"), format!("id={nonce}\nstatus=pending"))
+        .await
+        .map_err(|error| format!("Не удалось создать тестовый файл Pi: {error}"))?;
+    let config = directory.0.join("config");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(120),
+        run(
+            &workspace,
+            model,
+            "Use the read tool to read input.txt. Use the write tool to copy its contents exactly into result.txt. Then use the edit tool on result.txt to replace status=pending with status=passed. Reply Done when finished.",
+            &config,
+            context_tokens,
+            2048,
+            None,
+        ),
+    )
+    .await
+    .map_err(|_| "Проверка Pi превысила 120 секунд".to_owned())??;
+    if matches!(reply.stop_reason.as_deref(), Some("error" | "aborted")) {
+        return Err(reply.error.unwrap_or_else(|| "Pi прервал проверку".into()));
+    }
+    if reply.error.is_some() || reply.truncated || reply.successful_file_tools != [true; 3] {
+        return Ok(false);
+    }
+    let result = match tokio::fs::read_to_string(workspace.join("result.txt")).await {
+        Ok(result) => result,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Не удалось прочитать результат проверки Pi: {error}")),
+    };
+    Ok(result
+        .trim_end_matches(['\r', '\n'])
+        .replace("\r\n", "\n")
+        == format!("id={nonce}\nstatus=passed"))
+}
+
+struct CheckDirectory(PathBuf);
+
+impl Drop for CheckDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 pub(super) async fn run(
@@ -26,7 +88,7 @@ pub(super) async fn run(
     config: &Path,
     context_tokens: Option<u32>,
     limit: u32,
-    trace: &Call,
+    trace: Option<&Call>,
 ) -> Result<Reply, String> {
     let source = model.to_owned();
     let backend =
@@ -38,7 +100,12 @@ pub(super) async fn run(
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
     let mut child = spawn_pi(workspace, &backend, config)
         .map_err(|error| format!("Could not start Pi: {error}"))?;
-    trace.event(
+    let log = |kind, title: &str, text: &str, status| {
+        if let Some(trace) = trace {
+            trace.event(kind, title, text, status);
+        }
+    };
+    log(
         Kind::Pi,
         "Pi",
         &workspace.display().to_string(),
@@ -56,6 +123,7 @@ pub(super) async fn run(
     let mut last_error = None;
     let mut stop_reason = None;
     let mut text_clipped = false;
+    let mut successful_file_tools = [false; 3];
 
     while let Some(line) = lines
         .next_line()
@@ -74,7 +142,7 @@ pub(super) async fn run(
                 let update = &event["assistantMessageEvent"];
                 if let Some(delta) = update["delta"].as_str() {
                     match update["type"].as_str() {
-                        Some("thinking_delta") => trace.event(Kind::Thinking, "Pi", delta, None),
+                        Some("thinking_delta") => log(Kind::Thinking, "Pi", delta, None),
                         Some("text_delta") => {
                             delta_bytes = delta_bytes.saturating_add(delta.len());
                             append_tail(&mut text_deltas, delta, ANSWER_LIMIT);
@@ -86,16 +154,20 @@ pub(super) async fn run(
             Some("tool_execution_start") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
                 let path = event["args"]["path"].as_str().unwrap_or_default();
-                trace.event(Kind::Tool, name, path, Some("running"));
+                log(Kind::Tool, name, path, Some("running"));
             }
             Some("tool_execution_end") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
                 let status = if event["isError"] == true {
                     "error"
                 } else {
+                    if let Some(index) = ["read", "write", "edit"].iter().position(|tool| *tool == name)
+                    {
+                        successful_file_tools[index] = true;
+                    }
                     "ok"
                 };
-                trace.event(Kind::Tool, name, "", Some(status));
+                log(Kind::Tool, name, "", Some(status));
             }
             Some("message_end") if event["message"]["role"] == "assistant" => {
                 let message = &event["message"];
@@ -124,7 +196,7 @@ pub(super) async fn run(
                 text_clipped = text_bytes > ANSWER_LIMIT;
                 answer = text[..text.floor_char_boundary(ANSWER_LIMIT)].to_owned();
                 if !answer.trim().is_empty() {
-                    trace.event(
+                    log(
                         Kind::Answer,
                         "Pi",
                         &answer,
@@ -174,7 +246,7 @@ pub(super) async fn run(
             } else {
                 ""
             };
-            trace.event(Kind::Pi, "Pi", detail, Some("ok"));
+            log(Kind::Pi, "Pi", detail, Some("ok"));
         }
     }
     Ok(Reply {
@@ -182,6 +254,7 @@ pub(super) async fn run(
         stop_reason,
         truncated,
         error: last_error,
+        successful_file_tools,
     })
 }
 

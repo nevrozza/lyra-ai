@@ -9,7 +9,7 @@ use axum::{
 
 use crate::{benchmark, context, model_name, ollama, run};
 
-use super::App;
+use super::{App, pi};
 
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
@@ -18,7 +18,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/select", post(select_model))
         .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
         .route("/model/description", post(describe_model))
-        .route("/model/pi-support", post(set_pi_support))
+        .route("/model/benchmark/pi", post(start_pi_benchmark))
         .route("/model/context", post(set_model_context))
         .route("/model/context/estimate", get(context_estimate))
 }
@@ -66,32 +66,49 @@ struct DescriptionRequest {
     description: String,
 }
 
-#[derive(serde::Deserialize)]
-struct PiSupportRequest {
-    pi_supported: bool,
-}
-
-async fn set_pi_support(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    Json(request): Json<PiSupportRequest>,
-) -> StatusCode {
+async fn start_pi_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
     let model = match control_model(&app, &headers).await {
         Ok(model) => model,
         Err(status) => return status,
     };
+    if !app.task.send_if_modified(|snapshot| {
+        if !matches_selection(snapshot, &headers) || !snapshot.begin_benchmark(model.clone()) {
+            return false;
+        }
+        snapshot.set_benchmark_stage(benchmark::Stage::CheckingPi);
+        true
+    }) {
+        return StatusCode::CONFLICT;
+    }
+    tokio::spawn(async move {
+        let result = run_pi_benchmark(&app, model).await;
+        app.metrics.lock().await.invalidate();
+        app.task.send_modify(|snapshot| snapshot.finish_benchmark(result));
+    });
+    StatusCode::ACCEPTED
+}
+
+async fn run_pi_benchmark(app: &Arc<App>, model: String) -> Result<(), String> {
     let store = app.clone();
-    match tokio::task::spawn_blocking(move || {
-        store.benchmarks.set_pi_supported(model, request.pi_supported)
+    let source = model.clone();
+    let (tokens, advertised) = tokio::task::spawn_blocking(move || {
+        let tokens = model_context(&store, &source)?;
+        let advertised =
+            context::estimate(&source).and_then(|details| details.supports_agent_tools());
+        Ok::<_, String>((tokens, advertised))
     })
     .await
-    {
-        Ok(Ok(())) => {
-            app.task.send_modify(|snapshot| snapshot.model_record_changed());
-            StatusCode::NO_CONTENT
-        }
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
+    .map_err(|error| error.to_string())??;
+    let passed = if advertised == Some(false) {
+        false
+    } else {
+        pi::check(&model, tokens).await?
+    };
+    let store = app.clone();
+    tokio::task::spawn_blocking(move || store.benchmarks.save_pi_check(model, passed))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("Не удалось сохранить результат проверки Pi: {error}"))
 }
 
 async fn describe_model(
