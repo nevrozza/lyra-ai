@@ -5,6 +5,7 @@ mod models;
 mod pi;
 mod runtime;
 mod sessions;
+mod skills;
 
 use std::{net::Ipv4Addr, path::PathBuf, sync::Arc};
 
@@ -32,6 +33,7 @@ struct App {
     benchmarks: benchmark::Store,
     sessions: std::sync::Mutex<sessions::History>,
     commands: std::sync::Mutex<commands::State>,
+    skills: skills::Store,
 }
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
@@ -65,6 +67,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         benchmarks: benchmark::Store::new(options.benchmark_file),
         sessions: std::sync::Mutex::default(),
         commands: std::sync::Mutex::default(),
+        skills: skills::Store::new(crate::data_directory().join("skills")),
     });
     if let Some(names) = catalog {
         runtime::register_benchmarks(app.clone(), names).await;
@@ -75,6 +78,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .merge(mcp::routes())
         .merge(sessions::routes())
         .merge(commands::routes())
+        .merge(skills::routes())
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 

@@ -82,6 +82,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../web/js/telemetry.js"),
     ),
     ("/js/ui.js", JAVASCRIPT, include_str!("../../web/js/ui.js")),
+    (
+        "/js/skills.js",
+        JAVASCRIPT,
+        include_str!("../../web/js/skills.js"),
+    ),
 ];
 
 static UI_REVISION: LazyLock<String> = LazyLock::new(|| {

@@ -90,29 +90,47 @@
         </section>
       </div>
 
-      <section class="panel activity" aria-labelledby="sessions-title">
-        <header class="panel-header"><h2 id="sessions-title">MCP-вызовы</h2></header>
-        <div class="panel-body sessions-body">
-          <section id="command-panel" class="command-panel" aria-labelledby="command-title" hidden>
-            <h3 id="command-title" role="status"></h3>
-            <p id="command-workspace" class="secondary"></p>
-            <pre id="command-script" dir="ltr"></pre>
-            <div id="command-actions">
-              <button type="button" class="unload" data-action="allow">Запустить</button>
-              <button type="button" class="unload" data-action="allow_repeat" title="Разрешить повторы точно такой же команды до конца задачи Pi">Разрешить повторы в этой задаче</button>
-              <button type="button" class="unload" data-action="deny">Отклонить</button>
-              <button type="button" class="unload" data-action="stop" hidden>Остановить</button>
+      <div class="activity">
+        <section class="panel" aria-labelledby="sessions-title">
+          <header class="panel-header"><h2 id="sessions-title">MCP-вызовы</h2></header>
+          <div class="panel-body sessions-body">
+            <section id="command-panel" class="command-panel" aria-labelledby="command-title" hidden>
+              <h3 id="command-title" role="status"></h3>
+              <p id="command-workspace" class="secondary"></p>
+              <pre id="command-script" dir="ltr"></pre>
+              <div id="command-actions">
+                <button type="button" class="unload" data-action="allow">Запустить</button>
+                <button type="button" class="unload" data-action="allow_repeat" title="Разрешить повторы точно такой же команды до конца задачи Pi">Разрешить повторы в этой задаче</button>
+                <button type="button" class="unload" data-action="deny">Отклонить</button>
+                <button type="button" class="unload" data-action="stop" hidden>Остановить</button>
+              </div>
+              <p id="command-error" class="secondary" role="alert" hidden></p>
+            </section>
+            <p id="session-message" class="secondary">Пока нет вызовов Lyra MCP.</p>
+            <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов"></ul>
+            <div id="session-detail" hidden>
+              <p id="session-omitted" class="secondary" hidden>Показаны последние события.</p>
+              <ol id="session-events" class="session-events" aria-label="Хронология MCP-вызовов"></ol>
             </div>
-            <p id="command-error" class="secondary" role="alert" hidden></p>
-          </section>
-          <p id="session-message" class="secondary">Пока нет вызовов Lyra MCP.</p>
-          <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов"></ul>
-          <div id="session-detail" hidden>
-            <p id="session-omitted" class="secondary" hidden>Показаны последние события.</p>
-            <ol id="session-events" class="session-events" aria-label="Хронология MCP-вызовов"></ol>
           </div>
-        </div>
-      </section>
+        </section>
+        <section class="panel" aria-labelledby="skills-title">
+          <header class="panel-header"><h2 id="skills-title">Скиллы Pi</h2></header>
+          <div class="panel-body skills-body">
+            <form id="skill-import">
+              <label for="skill-path">Папка с SKILL.md</label>
+              <div class="skill-import-controls">
+                <input id="skill-path" aria-describedby="skill-path-help" type="text" spellcheck="false" required disabled>
+                <button id="install-skill" class="unload" type="submit" disabled>Установить</button>
+              </div>
+              <p id="skill-path-help" class="secondary">Абсолютный путь на компьютере, где запущена Lyra.</p>
+            </form>
+            <p id="skill-result" class="secondary" role="status"></p>
+            <p id="skill-catalog-message" class="secondary"></p>
+            <ul id="skill-catalog" aria-label="Установленные скиллы"></ul>
+          </div>
+        </section>
+      </div>
     </div>
   </main>
   <dialog id="ram-dialog" class="ram-dialog" aria-labelledby="ram-title">

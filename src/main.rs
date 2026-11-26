@@ -44,6 +44,24 @@ fn model_name(name: &str) -> Result<String, String> {
     Err("use the name from `ollama list`, for example qwen3:8b".into())
 }
 
+fn data_directory() -> PathBuf {
+    use std::env;
+
+    if cfg!(windows) {
+        env::var_os("LOCALAPPDATA")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir)
+            .join("LyraAI")
+    } else {
+        env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .unwrap_or_else(env::temp_dir)
+            .join("lyra-ai")
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let options = Options::parse();
     let runtime = tokio::runtime::Builder::new_current_thread()

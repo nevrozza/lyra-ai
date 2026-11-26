@@ -160,7 +160,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const loaded = loadedModel(models, name);
     const isTaskModel = name === session.run?.model;
     const isOperationModel = name === session.run?.operation_model;
-    const action = modelSubmitting?.model === name ? modelSubmitting.action :
+    const action = modelSubmitting && modelSubmitting.model === name ? modelSubmitting.action :
       isOperationModel ? session.run?.model_action : undefined;
     const benchmarking = action === 'benchmark' || action === 'benchmark-pi' ||
       (isOperationModel && session.run?.benchmark_running);

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    fs,
     io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     sync::Mutex,
@@ -267,20 +267,7 @@ impl Store {
 }
 
 fn default_path() -> PathBuf {
-    let directory = if cfg!(windows) {
-        env::var_os("LOCALAPPDATA")
-            .or_else(|| env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(env::temp_dir)
-            .join("LyraAI")
-    } else {
-        env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-            .unwrap_or_else(env::temp_dir)
-            .join("lyra-ai")
-    };
-    directory.join("model-benchmarks.json")
+    crate::data_directory().join("model-benchmarks.json")
 }
 
 #[derive(Deserialize)]

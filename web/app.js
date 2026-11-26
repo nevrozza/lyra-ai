@@ -1,5 +1,6 @@
 import { createSessions } from './js/sessions.js';
 import { createCommands } from './js/commands.js';
+import { createSkills } from './js/skills.js';
 import { initLayout } from './js/layout.js';
 import { createModels } from './js/models.js';
 import { createTelemetry } from './js/telemetry.js';
@@ -18,6 +19,7 @@ const models = createModels(session, {
 });
 const sessions = createSessions();
 const commands = createCommands();
+const skills = createSkills();
 const telemetry = createTelemetry(session, {
   beginSample: models.beginMemorySample,
   onSample(sample) {
@@ -29,6 +31,7 @@ const telemetry = createTelemetry(session, {
 function updateControls() {
   models.updateControls();
   telemetry.updateControls();
+  skills.setOnline(session.online && !session.closed);
 }
 
 function connectionState(value, label) {
@@ -73,6 +76,7 @@ function connect() {
     if (!session.closed) {
       connectionState('online', 'Подключено');
       commands.refresh();
+      skills.refresh();
     }
   };
   stream.onerror = () => {
@@ -93,7 +97,10 @@ function connect() {
     session.closed = false;
     if (restarted) connectionState('online', 'Подключено');
     receiveRun(next);
-    if (restarted) telemetry.resume();
+    if (restarted) {
+      telemetry.resume();
+      skills.refresh();
+    }
   };
 }
 

@@ -22,9 +22,10 @@ use super::{
 const ANSWER_LIMIT: usize = 8_000;
 const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
-pub(super) enum Mode<'a> {
-    Files(Option<&'a Call>),
-    Commands(&'a Call),
+pub(super) struct Task<'a> {
+    pub(super) trace: &'a Call,
+    pub(super) allow_commands: bool,
+    pub(super) skills: &'a [PathBuf],
 }
 
 pub(super) struct Reply {
@@ -59,7 +60,7 @@ pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bo
             &config,
             context_tokens,
             2048,
-            Mode::Files(None),
+            None,
         ),
     )
     .await
@@ -114,7 +115,7 @@ pub(super) async fn run(
     config: &Path,
     context_tokens: Option<u32>,
     limit: u32,
-    mode: Mode<'_>,
+    task: Option<Task<'_>>,
 ) -> Result<Reply, String> {
     let source = model.to_owned();
     let backend =
@@ -124,10 +125,12 @@ pub(super) async fn run(
     configure_pi(config, &backend, model, context_tokens, limit)
         .await
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
-    let (trace, commands) = match mode {
-        Mode::Files(trace) => (trace, None),
-        Mode::Commands(trace) => (Some(trace), Some(trace)),
-    };
+    let trace = task.as_ref().map(|task| task.trace);
+    let commands = task
+        .as_ref()
+        .filter(|task| task.allow_commands)
+        .map(|task| task.trace);
+    let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let command_directory = commands
         .map(|_| TemporaryDirectory::new("commands", nonce()))
         .transpose()
@@ -140,7 +143,7 @@ pub(super) async fn run(
             .await
             .map_err(|error| format!("Could not prepare Pi command extension: {error}"))?;
     }
-    let mut child = spawn_pi(workspace, &backend, config, extension.as_deref())
+    let mut child = spawn_pi(workspace, &backend, config, extension.as_deref(), skills)
         .map_err(|error| format!("Could not start Pi: {error}"))?;
     let log = |kind, title: &str, text: &str, status| {
         if let Some(trace) = trace {
@@ -431,6 +434,7 @@ fn spawn_pi(
     model: &str,
     pi_agent_dir: &Path,
     extension: Option<&Path>,
+    skills: &[PathBuf],
 ) -> io::Result<tokio::process::Child> {
     let spawn = |program: &str| {
         let mut command = Command::new(program);
@@ -458,6 +462,9 @@ fn spawn_pi(
                 .arg("--no-prompt-templates")
                 .arg("--extension")
                 .arg(path);
+        }
+        for skill in skills {
+            command.arg("--skill").arg(skill);
         }
         command
             .current_dir(workspace)
