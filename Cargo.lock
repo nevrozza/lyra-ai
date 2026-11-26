@@ -609,6 +609,7 @@ dependencies = [
  "clap",
  "embed-resource",
  "futures-util",
+ "icu_normalizer",
  "libc",
  "serde",
  "serde-saphyr",

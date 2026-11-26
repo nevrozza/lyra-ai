@@ -1,8 +1,17 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
-use super::{App, Job, JobResult, MessageOrigin, Prompt, Result, Status, invalid, mcp};
+use super::{
+    App, Job, JobResult, MessageOrigin, Prompt, Result, Status, invalid, mcp, write_scope,
+};
+use crate::{
+    run::{path_key, paths_overlap},
+    server::{ai_settings::AI_SETTINGS, pi::Role},
+};
 
 const MAX_REVIEWS: u8 = 3;
 
@@ -60,6 +69,15 @@ pub(super) struct Candidate {
     model: String,
     pi_checked: bool,
     memory: serde_json::Value,
+}
+
+#[cfg(test)]
+pub(super) fn test_candidate(model: &str) -> Candidate {
+    Candidate {
+        model: model.into(),
+        pi_checked: true,
+        memory: serde_json::Value::Null,
+    }
 }
 
 pub(super) fn candidates(
@@ -152,6 +170,17 @@ pub(super) fn add_candidates(
 ) {
     use std::fmt::Write;
     let models = serde_json::to_string(candidates).expect("serialize model shortlist");
+    if let Some(preferred) = AI_SETTINGS
+        .project_models
+        .fix
+        .as_ref()
+        .filter(|name| candidates.iter().any(|candidate| candidate.model == **name))
+    {
+        let _ = write!(
+            prompt,
+            "\nConfigured fix model preference: {preferred}. Use it when it fits the finding, memory and review scope.\n"
+        );
+    }
     let system = serde_json::json!({
         "cpu_percent": metrics.cpu_percent,
         "ram": metrics.ram,
@@ -161,7 +190,8 @@ pub(super) fn add_candidates(
     });
     let _ = write!(
         prompt,
-        "\n\nLocal hardware snapshot before starting this review (bytes, null means unknown): {system}\nUse inspect_review_resources for current headroom before deciding to overlap a build with diff review. Treat unknown estimates conservatively. Lyra may unload this reviewer before loading a different successor.\nInstalled models eligible for a fix (weights are estimates):\n{models}"
+        "\n\nLyra can run up to {} scoped fixes with up to {} distinct models at once. Reuse one model for independent fixes when equally suitable.\nLocal hardware snapshot before starting this review (bytes, null means unknown): {system}\nUse inspect_review_resources for current headroom before deciding to overlap a build with diff review. Treat unknown estimates conservatively. Lyra may unload this reviewer before loading a different successor.\nInstalled models eligible for a fix (weights are estimates):\n{models}",
+        AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models,
     );
 }
 
@@ -171,6 +201,7 @@ enum Stage {
     Implementation,
     Review,
     Fix,
+    BatchFix,
     Launch,
 }
 
@@ -198,6 +229,17 @@ struct Finding {
     issue: String,
     check: String,
     model: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    write_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after: Vec<usize>,
+}
+
+pub(super) struct NextStep {
+    pub(super) name: String,
+    pub(super) job: Job,
+    // Zero-based indices of previous steps in this group. The store assigns session IDs.
+    pub(super) after: Vec<usize>,
 }
 
 #[derive(Deserialize)]
@@ -230,15 +272,15 @@ impl Workflow {
 
     pub(super) fn reviewer_to_release(&self, successor: &str) -> Option<&str> {
         let reviewer = self.config.as_ref()?.review.model.as_str();
-        (matches!(self.stage, Stage::Fix | Stage::Launch) && reviewer != successor)
+        (matches!(self.stage, Stage::Fix | Stage::BatchFix | Stage::Launch)
+            && reviewer != successor)
             .then_some(reviewer)
     }
 
-    pub(super) fn role(&self) -> Option<crate::server::pi::Role> {
-        use crate::server::pi::Role;
+    pub(super) fn role(&self, requested: Role) -> Option<Role> {
         match self.stage {
-            Stage::Implementation => Some(Role::Implement),
-            Stage::Fix => Some(Role::Fix),
+            Stage::Implementation => Some(requested),
+            Stage::Fix | Stage::BatchFix => Some(Role::Fix),
             Stage::Review => Some(Role::Review),
             Stage::Launch => None,
         }
@@ -253,7 +295,8 @@ impl Workflow {
         &self,
         result: &JobResult,
         candidates: &[Candidate],
-    ) -> std::result::Result<Option<(String, Job)>, String> {
+        workspace: &Path,
+    ) -> std::result::Result<Vec<NextStep>, String> {
         let config = self
             .config
             .as_ref()
@@ -266,18 +309,27 @@ impl Workflow {
             Stage::Implementation => follow_up.review_step(&config.review),
             Stage::Fix => {
                 if let Some(fix) = follow_up.next_fix() {
-                    return Ok(Some(fix));
+                    return Ok(vec![fix]);
                 }
                 follow_up.round += 1;
                 follow_up.review_step(&config.review)
             }
+            Stage::BatchFix => {
+                return match read_result(&result.text)? {
+                    Review::Pass { summary } if short(&summary, 360) => Ok(Vec::new()),
+                    Review::Blocked { reason } if short(&reason, 360) => {
+                        Err(format!("Локальный фикс заблокирован: {reason}"))
+                    }
+                    _ => Err("Локальная модель вернула результат вне формата фикса.".into()),
+                };
+            }
             Stage::Review | Stage::Launch => match read_result(&result.text)? {
                 Review::Pass { summary } if short(&summary, 360) => {
                     if self.stage == Stage::Launch {
-                        return Ok(None);
+                        return Ok(Vec::new());
                     }
                     let Some(launch) = &config.launch else {
-                        return Ok(None);
+                        return Ok(Vec::new());
                     };
                     self.step(
                         Stage::Launch,
@@ -292,9 +344,10 @@ impl Workflow {
                     if self.round >= MAX_REVIEWS {
                         return Err("После третьей проверки остались замечания. Они сохранены в чате проверки.".into());
                     }
-                    if config
-                        .max_fixes
-                        .is_some_and(|limit| self.fixes + findings.len() > limit)
+                    if findings.len() > 16
+                        || config
+                            .max_fixes
+                            .is_some_and(|limit| self.fixes + findings.len() > limit)
                     {
                         return Err(
                             "Список замечаний превышает оставшийся лимит локальных фиксов.".into(),
@@ -317,8 +370,7 @@ impl Workflow {
                             ));
                         }
                     }
-                    follow_up.pending_fixes = findings;
-                    return Ok(follow_up.next_fix());
+                    return follow_up.fix_batch(&config.review, workspace, findings);
                 }
                 Review::Blocked { reason } if short(&reason, 360) => {
                     return Err(format!("Локальный этап заблокирован: {reason}"));
@@ -326,10 +378,63 @@ impl Workflow {
                 _ => return Err("Локальная модель вернула результат вне формата проверки.".into()),
             },
         };
-        Ok(Some(next))
+        Ok(vec![next])
     }
 
-    fn review_step(&self, review: &Step) -> (String, Job) {
+    fn fix_batch(
+        &mut self,
+        review: &Step,
+        workspace: &Path,
+        findings: VecDeque<Finding>,
+    ) -> std::result::Result<Vec<NextStep>, String> {
+        let mut steps = Vec::with_capacity(findings.len() + 1);
+        let mut scopes: Vec<Vec<PathBuf>> = Vec::with_capacity(findings.len());
+        for (index, finding) in findings.into_iter().enumerate() {
+            let mut after = Vec::new();
+            for position in &finding.after {
+                if !(1..=index).contains(position) {
+                    return Err(
+                        "Зависимость фикса должна ссылаться на более раннее замечание.".into(),
+                    );
+                }
+                after.push(position - 1);
+            }
+            let scope = if finding.write_paths.is_empty() {
+                Vec::new()
+            } else {
+                write_scope::resolve_paths(workspace, &finding.write_paths)
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .map(|path| path_key(path))
+                    .collect()
+            };
+            for (other_index, other) in scopes.iter().enumerate() {
+                if scope.is_empty()
+                    || other.is_empty()
+                    || scope
+                        .iter()
+                        .any(|left| other.iter().any(|right| paths_overlap(left, right)))
+                {
+                    after.push(other_index);
+                }
+            }
+            after.sort_unstable();
+            after.dedup();
+            let mut step = self.fix_step(&finding, Stage::BatchFix);
+            step.job.parallel = !scope.is_empty();
+            step.job.write_paths = finding.write_paths;
+            step.after = after;
+            scopes.push(scope);
+            steps.push(step);
+        }
+        self.round += 1;
+        let mut review = self.review_step(review);
+        review.after = (0..steps.len()).collect();
+        steps.push(review);
+        Ok(steps)
+    }
+
+    fn review_step(&self, review: &Step) -> NextStep {
         let name = if self.round == 1 {
             "Локальная проверка 1".into()
         } else {
@@ -343,27 +448,38 @@ impl Workflow {
         )
     }
 
-    fn next_fix(&mut self) -> Option<(String, Job)> {
+    fn next_fix(&mut self) -> Option<NextStep> {
         let finding = self.pending_fixes.pop_front()?;
+        Some(self.fix_step(&finding, Stage::Fix))
+    }
+
+    fn fix_step(&mut self, finding: &Finding, stage: Stage) -> NextStep {
         self.fixes += 1;
-        let report = serde_json::to_string(&finding).expect("serialize fix report");
-        let prompt = format!(
-            "Apply exactly one small local fix for the finding below. Verify that it still applies to the current project files. Read only the smallest relevant section and its immediate callers or tests. Keep other behavior and files intact wherever possible. If the issue cannot be fixed within this scope, explain the blocker. Run the focused check if available and give a short result.\nFinding: {report}"
+        let report = serde_json::to_string(finding).expect("serialize fix report");
+        let mut prompt = format!(
+            "Apply exactly one small local fix for the finding below. Verify that it still applies to the current project files. Read only the smallest relevant section and its immediate callers or tests. Keep other behavior and files intact wherever possible. Run a focused check if the shell is available.\nFinding: {report}"
         );
-        Some(self.step(
-            Stage::Fix,
+        if stage == Stage::BatchFix {
+            prompt.push_str(r#"
+
+Return one JSON verdict. Use {"status":"pass","summary":"change made or confirmed already fixed"} or {"status":"blocked","reason":"why the fix could not be completed"}. Keep the summary or reason on one line, up to 360 characters."#);
+        }
+        self.step(
+            stage,
             format!("Локальный фикс {}", self.fixes),
             &finding.model,
             prompt,
-        ))
+        )
     }
 
-    fn step(&self, stage: Stage, name: String, model: &str, prompt: String) -> (String, Job) {
-        (
+    fn step(&self, stage: Stage, name: String, model: &str, prompt: String) -> NextStep {
+        NextStep {
             name,
-            Job {
+            job: Job {
                 model: model.to_owned(),
                 parallel: false,
+                write_paths: Vec::new(),
+                role: None,
                 origin: MessageOrigin::Lyra,
                 status: Status::Queued,
                 batch_id: None,
@@ -371,8 +487,8 @@ impl Workflow {
                     prompt,
                     max_output_tokens: Some(
                         (if stage == Stage::Review { 2048 } else { 1024 })
-                            .min(crate::server::ai_settings::AI_SETTINGS.maximum_output_tokens)
-                            .max(crate::server::ai_settings::AI_SETTINGS.minimum_output_tokens),
+                            .min(AI_SETTINGS.maximum_output_tokens)
+                            .max(AI_SETTINGS.minimum_output_tokens),
                     ),
                     skills: None,
                 }),
@@ -386,7 +502,8 @@ impl Workflow {
                 external: false,
                 artifacts: Vec::new(),
             },
-        )
+            after: Vec::new(),
+        }
     }
 }
 
@@ -415,8 +532,9 @@ fn review_prompt(scope: &str, round: u8) -> String {
 
 Return only one JSON object as the final answer:
 {{"status":"pass","summary":"checks passed, at most 360 characters"}}
-{{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"one concrete problem, at most 360 characters","check":"one focused acceptance check, at most 240 characters","model":"exact installed model tag"}}]}}
+{{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"one concrete problem, at most 360 characters","check":"one focused acceptance check, at most 240 characters","model":"exact installed model tag","write_paths":["src/file.ext"],"after":[]}}]}}
 {{"status":"blocked","reason":"why the check cannot be completed, at most 360 characters"}}
+For each finding, list every file it may edit in write_paths, using forward-slash paths relative to the primary working folder. Lyra can run fixes with independent files in parallel and reviews the combined result only after all fixes succeed. Use after for findings whose results are prerequisites, referring to earlier findings by one-based position. When the scope is unknown or the fix requires shell writes, omit write_paths so that fix runs exclusively. Scoped fix steps use write and edit and leave command checks to the next review.
 Use pass only after covering the full task diff and confirming the acceptance criteria. For each fix, choose from the provided list and honor any model restrictions in the review scope. Prefer a medium model for fixes that require reasoning about behavior. Use a light model for mechanical fixes when permitted. Prefer a model with a passed Pi check when available. Use blocked if you cannot cover the full change or complete a necessary check. Keep the whole report compact, without source excerpts.
 
 Review scope and acceptance criteria:

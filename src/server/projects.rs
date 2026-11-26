@@ -21,6 +21,7 @@ use super::App;
 
 mod folder_picker;
 pub(super) mod queue;
+pub(super) mod write_scope;
 
 type HttpError = (StatusCode, String);
 type Result<T> = std::result::Result<T, HttpError>;
@@ -89,8 +90,8 @@ pub(super) struct SessionFolders {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SessionKey {
-    project_id: u64,
-    project_session_id: u64,
+    pub(super) project_id: u64,
+    pub(super) project_session_id: u64,
 }
 
 #[derive(Deserialize)]

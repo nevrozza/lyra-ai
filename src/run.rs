@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 
@@ -51,6 +54,8 @@ struct Delegation {
     project: bool,
     #[serde(skip)]
     exclusive: bool,
+    #[serde(skip)]
+    writes: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize)]
@@ -63,10 +68,33 @@ pub enum ContextNotice {
 }
 
 #[derive(Clone, Copy)]
-pub enum DelegationScope {
+pub enum DelegationScope<'a> {
     Standalone,
-    Project { session_id: Option<u64> },
-    Queued { session_id: u64, parallel: bool },
+    Project {
+        session_id: Option<u64>,
+        work: bool,
+    },
+    Queued {
+        session_id: u64,
+        parallel: bool,
+        writes: &'a [PathBuf],
+        max_tasks: usize,
+        max_models: usize,
+    },
+}
+
+pub fn path_key(path: &Path) -> PathBuf {
+    // Be conservative on case- and normalization-insensitive volumes.
+    let folded = path.to_string_lossy().to_uppercase();
+    PathBuf::from(
+        icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+            .normalize(&folded)
+            .as_ref(),
+    )
+}
+
+pub fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
 }
 
 impl Snapshot {
@@ -122,19 +150,43 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope) -> Option<u64> {
+    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope<'_>) -> Option<u64> {
         if self.closed || self.model_action.is_some() || self.benchmark_running {
             return None;
         }
-        let (project, project_session_id, exclusive) = match scope {
-            DelegationScope::Standalone if self.delegations.is_empty() => (false, None, false),
+        let (project, project_session_id, exclusive, writes) = match scope {
+            DelegationScope::Standalone if self.delegations.is_empty() => {
+                (false, None, false, &[][..])
+            }
             DelegationScope::Standalone => return None,
-            DelegationScope::Project { session_id } => (true, session_id, false),
+            DelegationScope::Project { session_id, work } => (true, session_id, work, &[][..]),
             DelegationScope::Queued {
                 session_id,
                 parallel,
-            } => (true, Some(session_id), !parallel),
+                writes,
+                max_tasks,
+                max_models,
+            } => {
+                let exclusive = !parallel || writes.is_empty();
+                if !exclusive {
+                    let mut models = BTreeSet::from([model]);
+                    let mut active_tasks = 0;
+                    for active in self
+                        .delegations
+                        .values()
+                        .filter(|active| !active.writes.is_empty())
+                    {
+                        active_tasks += 1;
+                        models.insert(active.model.as_str());
+                    }
+                    if active_tasks >= max_tasks || models.len() > max_models {
+                        return None;
+                    }
+                }
+                (true, Some(session_id), exclusive, writes)
+            }
         };
+        let writes: Vec<_> = writes.iter().map(|path| path_key(path)).collect();
         if project
             && self.delegations.values().any(|active| {
                 exclusive
@@ -142,6 +194,10 @@ impl Snapshot {
                     || !active.project
                     || project_session_id.is_some()
                         && active.project_session_id == project_session_id
+                    || active
+                        .writes
+                        .iter()
+                        .any(|left| writes.iter().any(|right| paths_overlap(left, right)))
             })
         {
             return None;
@@ -161,6 +217,7 @@ impl Snapshot {
                 thinking: String::new(),
                 project,
                 exclusive,
+                writes,
             },
         );
         Some(self.next_delegation)
@@ -336,10 +393,67 @@ mod tests {
     use super::{DelegationScope, Snapshot};
 
     #[test]
+    fn scoped_jobs_reserve_all_files_and_obey_task_and_model_limits() {
+        let mut snapshot = Snapshot::new(None);
+        let first = [super::PathBuf::from("src/café.rs")];
+        let conflict = [
+            super::PathBuf::from("src/CAFE\u{301}.rs"),
+            super::PathBuf::from("unused.rs"),
+        ];
+        let second = [super::PathBuf::from("src/other.rs")];
+        let third = [super::PathBuf::from("web/app.js")];
+        let scoped = |session_id, writes| DelegationScope::Queued {
+            session_id,
+            parallel: true,
+            writes,
+            max_tasks: 2,
+            max_models: 1,
+        };
+        let a = snapshot.begin_delegation("one", scoped(1, &first)).unwrap();
+        assert!(
+            snapshot
+                .begin_delegation("one", scoped(2, &conflict))
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .begin_delegation("two", scoped(3, &second))
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .begin_delegation(
+                    "one",
+                    DelegationScope::Project {
+                        session_id: Some(10),
+                        work: true,
+                    }
+                )
+                .is_none()
+        );
+        let b = snapshot
+            .begin_delegation("one", scoped(3, &second))
+            .unwrap();
+        assert!(
+            snapshot
+                .begin_delegation("one", scoped(4, &third))
+                .is_none()
+        );
+        snapshot.finish_delegation(a, true);
+        assert!(
+            snapshot
+                .begin_delegation("one", scoped(2, &conflict))
+                .is_some()
+        );
+        snapshot.finish_delegation(b, true);
+    }
+
+    #[test]
     fn independent_project_chats_run_in_parallel_without_overlapping_one_session() {
         let mut snapshot = Snapshot::new(None);
         let chat = |id| DelegationScope::Project {
             session_id: Some(id),
+            work: false,
         };
         let first = snapshot.begin_delegation("one", chat(10)).unwrap();
         assert!(snapshot.begin_delegation("two", chat(10)).is_none());

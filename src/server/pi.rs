@@ -23,7 +23,8 @@ const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
 mod review_diff;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum Role {
     Implement,
     Fix,
@@ -66,6 +67,7 @@ pub(super) struct Task<'a> {
     pub(super) context_window: Option<u32>,
     pub(super) think: Option<&'a ollama::Think>,
     pub(super) role: Option<Role>,
+    pub(super) writes: &'a [PathBuf],
 }
 
 pub(super) struct Reply {
@@ -200,6 +202,7 @@ pub(super) async fn run(
     let trace = task.as_ref().map(|task| task.trace);
     let commands = trace;
     let text_only = task.as_ref().is_some_and(|task| task.text_only);
+    let writes = task.as_ref().map_or(&[][..], |task| task.writes);
     let reviewing = task
         .as_ref()
         .is_some_and(|task| matches!(task.role, Some(Role::Review)));
@@ -337,7 +340,29 @@ pub(super) async fn run(
                         ready = true;
                     }
                     Some("input")
-                        if ready && !text_only && event["title"] == "lyra:run-command" =>
+                        if ready
+                            && !writes.is_empty()
+                            && event["title"] == "lyra:write-scoped-file" =>
+                    {
+                        let id = event["id"].as_str().ok_or("Missing Pi file request ID")?;
+                        let request = event["placeholder"]
+                            .as_str()
+                            .ok_or("Missing Pi file request")?;
+                        // Finish the filesystem mutation before yielding to cancellation.
+                        let result = projects::write_scope::mutate(workspace, writes, request);
+                        let result = match result {
+                            Ok(()) => json!({"ok": true}),
+                            Err(error) => json!({"ok": false, "message": error.to_string()}),
+                        };
+                        rpc_send(stdin, json!({
+                            "type": "extension_ui_response", "id": id, "value": result.to_string()
+                        })).await?;
+                    }
+                    Some("input")
+                        if ready
+                            && !text_only
+                            && writes.is_empty()
+                            && event["title"] == "lyra:run-command" =>
                     {
                         let id = event["id"]
                             .as_str()
@@ -670,6 +695,28 @@ async fn write_project_instructions(
             directory.display()
         );
     }
+    if !task.writes.is_empty() {
+        let root = tokio::fs::canonicalize(&project.workspace).await?;
+        let paths: Vec<_> = task
+            .writes
+            .iter()
+            .filter_map(|path| path.strip_prefix(&root).ok())
+            .map(|path| {
+                path.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/")
+            })
+            .collect();
+        if paths.len() != task.writes.len() {
+            return Err(io::Error::other(
+                "The primary working directory changed after reservation",
+            ));
+        }
+        let _ = writeln!(
+            text,
+            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are unavailable. If a change outside the reserved files is required, report the blocker.",
+            json!(paths),
+        );
+    }
     if task.text_only {
         text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
     }
@@ -786,6 +833,11 @@ fn spawn_pi(
         ]);
         command.env_remove("LYRA_PI_TEXT_ONLY");
         command.env_remove("LYRA_PI_REVIEW");
+        command.env_remove("LYRA_PI_SCOPED_WRITE");
+        let scoped_write = task.is_some_and(|task| !task.writes.is_empty());
+        if scoped_write {
+            command.env("LYRA_PI_SCOPED_WRITE", "1");
+        }
         let reviewing = task.is_some_and(|task| matches!(task.role, Some(Role::Review)));
         if reviewing {
             command.env("LYRA_PI_REVIEW", "1");
@@ -795,6 +847,8 @@ fn spawn_pi(
         } else {
             let tools = if reviewing {
                 "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
+            } else if scoped_write {
+                "read,grep,find,ls"
             } else if extension.is_some() {
                 "read,grep,find,ls,write,edit,run_command"
             } else {

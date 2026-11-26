@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 export default function (pi) {
     const textOnly = process.env.LYRA_PI_TEXT_ONLY === "1";
     const review = process.env.LYRA_PI_REVIEW === "1" && !textOnly;
+    const scopedWrite = process.env.LYRA_PI_SCOPED_WRITE === "1" && !textOnly && !review;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
     if (effort) {
@@ -15,7 +16,29 @@ export default function (pi) {
     }
     let earlierMessages = [];
     let promptTimestamp;
-    if (!textOnly) {
+    if (scopedWrite) {
+        const path = Type.String({ description: "Reserved file path relative to the primary working folder" });
+        for (const [name, description, parameters] of [
+            ["write", "Create or replace one reserved file.", Type.Object({ path, content: Type.String() })],
+            ["edit", "Replace exact, unique, non-overlapping text in one reserved file.", Type.Object({
+                path,
+                edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
+            })],
+        ]) {
+            pi.registerTool({
+                name, label: name, description, parameters, executionMode: "sequential",
+                async execute(_id, args, signal, _onUpdate, ctx) {
+                    const request = JSON.stringify({ ...args, tool: name });
+                    const value = await ctx.ui.input("lyra:write-scoped-file", request, { signal });
+                    if (value === undefined) throw new Error("Lyra did not return a file result");
+                    const result = JSON.parse(value);
+                    if (!result.ok) throw new Error(result.message);
+                    return { content: [{ type: "text", text: `Updated ${args.path}` }], details: result };
+                },
+            });
+        }
+    }
+    if (!textOnly && !scopedWrite) {
         const shell = process.platform === "win32" ? "Windows PowerShell" : "/bin/sh";
         pi.registerTool({
             name: "run_command",
@@ -65,7 +88,8 @@ export default function (pi) {
         }
     }
     pi.on("session_start", (_event, ctx) => {
-        const tools = ["read", "grep", "find", "ls", "run_command"];
+        const tools = ["read", "grep", "find", "ls"];
+        if (!scopedWrite) tools.push("run_command");
         pi.setActiveTools(textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit"]);
         if (origin) earlierMessages = savedMessages(ctx.sessionManager);
         ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");

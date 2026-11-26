@@ -21,6 +21,12 @@ export function createProjects() {
   const taskForm = get('project-task-form');
   const taskModel = get('project-task-model');
   const taskParallel = get('project-task-parallel');
+  const taskWritePaths = get('project-task-write-paths');
+  function updateTaskWriteScope() {
+    get('project-task-write-scope').hidden = !taskParallel.checked;
+    taskWritePaths.required = taskParallel.checked;
+  }
+  taskParallel.onchange = updateTaskWriteScope;
   const folderList = get('project-folders');
   const pickFolder = get('pick-project-folder');
   const skill = get('project-skill');
@@ -530,6 +536,7 @@ export function createProjects() {
     taskProject = selectedProject();
     taskBatch = crypto.randomUUID();
     taskForm.reset();
+    updateTaskWriteScope();
     const models = [...new Set([run?.model, ...installedModels].filter(Boolean))];
     setOptions(taskModel, models.map(model => [model, model]), refreshModels());
     taskDialog.showModal();
@@ -550,6 +557,7 @@ export function createProjects() {
         prompt: get('project-task-prompt').value,
         model: taskModel.value,
         parallel: taskParallel.checked,
+        ...(taskParallel.checked ? { write_paths: taskWritePaths.value.split(/\r?\n/).map(path => path.trim()).filter(Boolean) } : {}),
       }],
     }, async ([task]) => {
       taskDialog.close();

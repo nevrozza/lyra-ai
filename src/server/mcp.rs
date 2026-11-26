@@ -175,7 +175,7 @@ fn tools() -> Value {
     });
     let follow_up = json!({
         "type": "object",
-        "description": "Pick a review model once. It reviews the full task diff, plans small fixes with a model for each, and reviews the full diff again after each batch. Up to three reviews. Follow-up stages run sequentially.",
+        "description": "Pick a review model once. It reviews the full task diff, plans small fixes with a model for each, and reviews the full diff again after each batch. Up to three reviews. Independent fixes can run in parallel, and the next review waits for the entire batch.",
         "properties": {
             "review": stage,
             "launch": stage,
@@ -184,10 +184,23 @@ fn tools() -> Value {
         "required": ["review"],
         "additionalProperties": false
     });
+    let queue_task = json!({"type": "object", "properties": {
+        "name": {"type": "string"}, "prompt": {"type": "string", "description": "Task text. Thinking for local tasks follows the model configuration. Do not insert Thinking directives into the prompt."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
+        "key": {"type": "string", "description": "Unique key for this task within the batch."},
+        "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
+        "external": {"type": "boolean", "default": false, "description": "Codex or a connected specialist tool executes this step and reports completion."},
+        "parallel": {"type": "boolean", "default": false, "description": "Allow overlapping Work with independent tasks. Requires write_paths and disables shell commands."},
+        "write_paths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Complete set of allowed file paths for write and edit, relative to the first working folder. Use forward slashes."},
+        "role": {"enum": ["implement", "fix", "review"], "default": "implement", "description": "Local task role. A standalone review uses read-only file tools and may run checks through the command approval flow."},
+        "folders": {"type": "array", "items": {"type": "string"}, "description": "Optional registered project folders, primary first. Defaults to the project's folders."},
+        "skills": {"type": "array", "items": {"type": "string"}},
+        "follow_up": follow_up,
+        "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens}
+    }, "required": ["name", "prompt"], "additionalProperties": false});
     let mut tools = json!([
         {
             "name": "inspect",
-            "description": "System load and local model shortlist. Pass model for benchmark, memory, thinking controls, the Pi benchmark result (benchmark_and_settings.pi_check), and Ollama tool capabilities (ollama_agent_tools). Pass system=true for detailed system and RAM usage.",
+            "description": "System load, queue limits, project model preferences, and local model shortlist. Pass model for benchmark, memory, thinking controls, the Pi benchmark result (benchmark_and_settings.pi_check), and Ollama tool capabilities (ollama_agent_tools). Pass system=true for detailed system and RAM usage.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Estimate memory for this context size. Requires model."},
@@ -273,21 +286,11 @@ fn tools() -> Value {
         },
         {
             "name": "enqueue_project_tasks",
-            "description": "Queue tasks or build a project pipeline. Each gets a numbered saved chat. Dependencies must finish successfully before their consumers run. External steps wait for complete_project_step. Ready local tasks run in order unless they explicitly allow parallel execution.",
+            "description": "Queue tasks or build a project pipeline. Each gets a numbered saved chat. Dependencies must finish successfully before their consumers run. External steps wait for complete_project_step. Ready local tasks with disjoint write scopes can overlap within the configured limits.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
-                "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object", "properties": {
-                    "name": {"type": "string"}, "prompt": {"type": "string", "description": "Task text. Thinking for local tasks follows the model configuration. Do not insert Thinking directives into the prompt."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
-                    "key": {"type": "string", "description": "Unique key for this task within the batch."},
-                    "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
-                    "external": {"type": "boolean", "default": false, "description": "Codex or a connected specialist tool executes this step and reports completion."},
-                    "parallel": {"type": "boolean", "default": false, "description": "Allow overlapping work. Choose this for independent tasks when there is enough memory."},
-                    "folders": {"type": "array", "items": {"type": "string"}, "description": "Optional registered project folders, primary first. Defaults to the project's folders."},
-                    "skills": {"type": "array", "items": {"type": "string"}},
-                    "follow_up": follow_up,
-                    "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens}
-                }, "required": ["name", "prompt"], "additionalProperties": false}}
+                "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": queue_task}
             }, "required": ["project_id", "tasks"], "additionalProperties": false}
         },
         {
@@ -415,6 +418,8 @@ pub(super) struct RunPi {
     _allow_commands: Option<bool>,
     #[serde(skip)]
     role: Option<pi::Role>,
+    #[serde(skip)]
+    writes: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq)]
@@ -833,7 +838,10 @@ async fn run_pi(
         })
         .transpose()?;
     let scope = if project.is_some() {
-        DelegationScope::Project { session_id }
+        DelegationScope::Project {
+            session_id,
+            work: !text_only,
+        }
     } else {
         DelegationScope::Standalone
     };
@@ -860,6 +868,7 @@ async fn run_pi(
             context_window,
             think: think.as_ref(),
             role: request.role,
+            writes: &request.writes,
             request_id: (dashboard || reserved.is_some())
                 .then_some(request.request_id.as_deref())
                 .flatten(),
@@ -936,13 +945,13 @@ async fn run_pi(
 }
 
 pub(super) fn queued_request(
-    project_id: u64,
-    project_session_id: u64,
+    key: &projects::SessionKey,
     model: String,
     prompt: String,
     max_output_tokens: Option<u32>,
     skills: Option<Vec<String>>,
     role: Option<pi::Role>,
+    writes: Vec<PathBuf>,
 ) -> RunPi {
     RunPi {
         model,
@@ -950,12 +959,13 @@ pub(super) fn queued_request(
         max_output_tokens,
         skills,
         workspace: None,
-        project_id: Some(project_id),
-        project_session_id: Some(project_session_id),
-        request_id: Some(format!("queue-{project_session_id}")),
+        project_id: Some(key.project_id),
+        project_session_id: Some(key.project_session_id),
+        request_id: Some(format!("queue-{}", key.project_session_id)),
         mode: Some(ChatMode::Work),
         _allow_commands: None,
         role,
+        writes,
     }
 }
 
@@ -1067,7 +1077,7 @@ pub(super) async fn stop_project_chat(
     }
 }
 
-fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u64, String> {
+fn begin_delegation(app: &App, model: &str, scope: DelegationScope<'_>) -> Result<u64, String> {
     let mut id = None;
     app.task.send_if_modified(|snapshot| {
         id = snapshot.begin_delegation(model, scope);
@@ -1097,6 +1107,18 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
     }
     let metrics = app.metrics.lock().await.sample().await;
     let mut output = format!("busy={}", app.task.borrow().busy());
+    if request.model.is_none() {
+        write!(
+            output,
+            "\n{}",
+            json!({
+                "project_models": AI_SETTINGS.project_models,
+                "parallel_project_tasks": AI_SETTINGS.parallel_project_tasks,
+                "parallel_project_models": AI_SETTINGS.parallel_project_models,
+            })
+        )
+        .expect("writing to String");
+    }
     if let Some(requested) = request.model {
         let model = resolve_model(
             metrics.installed_models().ok_or("Ollama unavailable")?,
