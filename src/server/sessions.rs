@@ -221,14 +221,14 @@ impl Call {
         self.update(|session| session.push(self.id, kind, title, text, status));
     }
 
-    pub(super) fn finish(self, result: &Result<String, String>) {
+    pub(super) fn finish(self, error: Option<&str>) {
         self.update(|session| {
             session.summary.active -= 1;
-            let (status, detail) = match result {
-                Ok(_) => ("ok", format!("{} мс", self.started.elapsed().as_millis())),
-                Err(error) => {
+            let (status, detail) = match error {
+                None => ("ok", format!("{} мс", self.started.elapsed().as_millis())),
+                Some(error) => {
                     session.summary.errors += 1;
-                    ("error", error.clone())
+                    ("error", error.to_owned())
                 }
             };
             session.push(self.id, Kind::Mcp, &self.tool, &detail, Some(status))

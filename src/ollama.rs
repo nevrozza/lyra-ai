@@ -69,6 +69,10 @@ impl ChatReply {
         self.done
     }
 
+    pub(crate) fn stop_reason(&self) -> Option<&str> {
+        self.done_reason.as_deref()
+    }
+
     pub(crate) fn thinking(&self) -> Option<&str> {
         self.message
             .thinking
