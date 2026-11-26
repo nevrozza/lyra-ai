@@ -43,6 +43,12 @@ struct Delegation {
     project: bool,
 }
 
+#[derive(Clone, Copy)]
+pub enum DelegationScope {
+    Standalone,
+    Project { session_id: Option<u64> },
+}
+
 impl Snapshot {
     pub fn new(model: Option<String>) -> Self {
         Self {
@@ -95,28 +101,23 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_delegation(
-        &mut self,
-        model: &str,
-        project: Option<(u8, Option<u64>)>,
-    ) -> Option<u64> {
-        let project_session_id = project.and_then(|(_, session)| session);
+    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope) -> Option<u64> {
         if self.closed || self.model_action.is_some() || self.benchmark_running {
             return None;
         }
-        if let Some((limit, _)) = project {
-            if self.delegations.len() >= usize::from(limit)
-                || self.delegations.values().any(|active| {
+        let (project, project_session_id) = match scope {
+            DelegationScope::Standalone if self.delegations.is_empty() => (false, None),
+            DelegationScope::Standalone => return None,
+            DelegationScope::Project { session_id } => {
+                if self.delegations.values().any(|active| {
                     !active.project
-                        || project_session_id.is_some()
-                            && active.project_session_id == project_session_id
-                })
-            {
-                return None;
+                        || session_id.is_some() && active.project_session_id == session_id
+                }) {
+                    return None;
+                }
+                (true, session_id)
             }
-        } else if !self.delegations.is_empty() {
-            return None;
-        }
+        };
         self.next_delegation += 1;
         self.delegated_model.get_or_insert_with(|| model.to_owned());
         self.delegations.insert(
@@ -124,7 +125,7 @@ impl Snapshot {
             Delegation {
                 model: model.to_owned(),
                 project_session_id,
-                project: project.is_some(),
+                project,
             },
         );
         Some(self.next_delegation)
@@ -236,41 +237,32 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::Snapshot;
+    use super::{DelegationScope, Snapshot};
 
     #[test]
-    fn project_chats_can_use_separate_agent_slots_without_overlapping_one_session() {
+    fn independent_project_chats_run_in_parallel_without_overlapping_one_session() {
         let mut snapshot = Snapshot::new(None);
-        let first = snapshot
-            .begin_delegation("one", Some((2, Some(10))))
-            .unwrap();
+        let chat = |id| DelegationScope::Project {
+            session_id: Some(id),
+        };
+        let first = snapshot.begin_delegation("one", chat(10)).unwrap();
+        assert!(snapshot.begin_delegation("two", chat(10)).is_none());
         assert!(
             snapshot
-                .begin_delegation("two", Some((2, Some(10))))
+                .begin_delegation("two", DelegationScope::Standalone)
                 .is_none()
         );
-        assert!(
-            snapshot
-                .begin_delegation("two", Some((1, Some(20))))
-                .is_none()
-        );
-        assert!(snapshot.begin_delegation("two", None).is_none());
-        let second = snapshot
-            .begin_delegation("two", Some((2, Some(20))))
-            .unwrap();
-        assert!(
-            snapshot
-                .begin_delegation("three", Some((2, Some(30))))
-                .is_none()
-        );
+        let others: Vec<_> = (20..25)
+            .map(|id| snapshot.begin_delegation("two", chat(id)).unwrap())
+            .collect();
 
         snapshot.finish_delegation(first, true);
         assert!(snapshot.busy());
         assert_eq!(snapshot.delegated_model.as_deref(), Some("two"));
-        let resumed = snapshot
-            .begin_delegation("one", Some((2, Some(10))))
-            .unwrap();
-        snapshot.finish_delegation(second, false);
+        let resumed = snapshot.begin_delegation("one", chat(10)).unwrap();
+        for id in others {
+            snapshot.finish_delegation(id, false);
+        }
         snapshot.finish_delegation(resumed, true);
         assert!(!snapshot.busy());
     }

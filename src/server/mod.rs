@@ -39,6 +39,7 @@ struct App {
     skills: skills::Store,
     agents_file: PathBuf,
     projects: projects::Store,
+    folder_picker: Mutex<()>,
     command_slot: Mutex<()>,
 }
 
@@ -81,6 +82,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         projects: projects::Store::new(std::path::absolute(
             crate::data_directory().join("projects"),
         )?),
+        folder_picker: Mutex::default(),
         command_slot: Mutex::default(),
     });
     if let Some(names) = catalog {

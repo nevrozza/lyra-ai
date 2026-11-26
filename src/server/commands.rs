@@ -431,6 +431,7 @@ mod tests {
             skills: super::super::skills::Store::new(workspace.path().join("skills")),
             agents_file: workspace.path().join("AGENTS.md"),
             projects: super::super::projects::Store::new(workspace.path().join("projects")),
+            folder_picker: Default::default(),
             command_slot: Default::default(),
         });
         let trace = Call::start(app.clone(), "run_pi", None, "", None);

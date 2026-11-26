@@ -17,6 +17,8 @@ use serde_json::Value;
 
 use super::App;
 
+mod folder_picker;
+
 type HttpError = (StatusCode, String);
 type Result<T> = std::result::Result<T, HttpError>;
 
@@ -29,18 +31,6 @@ pub(super) struct Store {
 pub(super) struct Catalog {
     next_id: u64,
     pub(super) projects: Vec<Project>,
-    #[serde(default)]
-    parallel_agents: ParallelAgents,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(transparent)]
-struct ParallelAgents(u8);
-
-impl Default for ParallelAgents {
-    fn default() -> Self {
-        Self(1)
-    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -93,15 +83,14 @@ pub(super) struct Task {
     pub(super) project: Project,
     pub(super) workspace: PathBuf,
     pub(super) session_file: Option<PathBuf>,
-    pub(super) parallel_agents: u8,
 }
 
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/projects", get(list).post(save))
+        .route("/projects/pick-folder", post(folder_picker::pick))
         .route("/projects/sessions", post(create_session))
         .route("/projects/{project_id}/sessions/{session_id}", get(history))
-        .route("/projects/parallel", post(set_parallel))
         .route("/projects/run", post(super::mcp::run_project_chat))
 }
 
@@ -135,21 +124,6 @@ async fn history(
     })
     .await
     .map(Json)
-}
-
-async fn set_parallel(State(app): State<Arc<App>>, Json(limit): Json<u8>) -> Result<StatusCode> {
-    if !(1..=4).contains(&limit) {
-        return Err(invalid("Choose between 1 and 4 parallel agents"));
-    }
-    work(app, move |app| {
-        app.projects.change(|catalog| {
-            catalog.parallel_agents = ParallelAgents(limit);
-            Ok(())
-        })?;
-        app.task.send_modify(crate::run::Snapshot::projects_changed);
-        Ok(StatusCode::NO_CONTENT)
-    })
-    .await
 }
 
 pub(super) async fn work<T: Send + 'static>(
@@ -295,7 +269,6 @@ impl Store {
             project,
             workspace,
             session_file,
-            parallel_agents: catalog.parallel_agents.0,
         })
     }
 

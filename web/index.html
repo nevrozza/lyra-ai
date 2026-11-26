@@ -103,8 +103,10 @@
             <form id="project-form" class="project-form" hidden>
               <label for="project-name">Название</label>
               <input id="project-name" type="text" maxlength="120" required>
-              <label for="project-folders">Абсолютные пути к папкам, по одному на строку</label>
-              <textarea id="project-folders" rows="3" required></textarea>
+              <ul id="project-folders" aria-label="Рабочие папки"></ul>
+              <div class="project-controls">
+                <button id="pick-project-folder" class="unload" type="button">Добавить папку</button>
+              </div>
               <label for="project-skill">Скилл для поиска</label>
               <select id="project-skill"></select>
               <div class="project-controls">
@@ -141,12 +143,7 @@
                 </form>
               </div>
             </div>
-            <div class="project-controls project-parallel">
-              <label for="project-parallel">Одновременных агентов</label>
-              <select id="project-parallel" disabled>
-                <option>1</option><option>2</option><option>3</option><option>4</option>
-              </select>
-            </div>
+            <p id="project-active-agents" class="secondary" role="status" hidden></p>
             <p id="project-message" class="secondary" role="status"></p>
           </div>
         </section>

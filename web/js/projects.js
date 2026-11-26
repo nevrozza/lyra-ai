@@ -3,8 +3,10 @@ import { element, get } from './ui.js';
 export function createProjects() {
   const projectSelect = get('project-select');
   const chatSelect = get('project-chat-select');
-  const parallel = get('project-parallel');
+  const activeAgents = get('project-active-agents');
   const projectForm = get('project-form');
+  const folderList = get('project-folders');
+  const pickFolder = get('pick-project-folder');
   const chatForm = get('project-chat-form');
   const prompt = get('project-prompt');
   const messages = get('project-messages');
@@ -14,10 +16,12 @@ export function createProjects() {
   const sending = new Set();
   let catalog;
   let installedSkills = [];
+  let folders = [];
   let editing;
   let online = false;
   let run;
   let saving = false;
+  let picking = false;
   let catalogRequest = 0;
   let historyRequest = 0;
   let preferredSelection;
@@ -31,14 +35,24 @@ export function createProjects() {
   }
 
   function updateControls() {
-    const available = online && catalog != null && !saving;
+    const available = online && catalog != null && !saving && !picking;
+    const agents = online ? Object.values(run?.delegations ?? {}) : [];
     const chat = selectedChat();
     const active = chat && (sending.has(chat.id) ||
-      Object.values(run?.delegations ?? {}).some(task => task.project_session_id === chat.id));
-    get('new-project').disabled = parallel.disabled = projectSelect.disabled = !available;
+      agents.some(task => task.project_session_id === chat.id));
+    const agentStatus = agents.length > 2
+      ? `Активные агенты · ${agents.length} · ${agents.map(agent => agent.model).join(', ')}`
+      : '';
+    activeAgents.hidden = !agentStatus;
+    if (activeAgents.textContent !== agentStatus) activeAgents.textContent = agentStatus;
+    get('new-project').disabled = projectSelect.disabled = !available;
     get('edit-project').disabled = !available || !selectedProject();
     get('new-project-chat').disabled = !available;
-    projectForm.querySelector('[type="submit"]').disabled = !available;
+    pickFolder.disabled = !available;
+    pickFolder.textContent = picking ? 'Выбор папки…' : 'Добавить папку';
+    get('cancel-project').disabled = picking;
+    for (const button of folderList.querySelectorAll('button')) button.disabled = !available;
+    projectForm.querySelector('[type="submit"]').disabled = !available || !folders.length;
     chatForm.querySelector('[type="submit"]').disabled = !available;
     get('send-project-prompt').disabled = !online || !run?.model || !chat || Boolean(active);
     get('send-project-prompt').textContent = active ? 'Агент работает…' : 'Отправить';
@@ -94,7 +108,6 @@ export function createProjects() {
       const previousProject = selectedProject()?.id;
       const previousChat = selectedChat()?.id;
       catalog = next;
-      parallel.value = catalog.parallel_agents;
       setOptions(projectSelect, catalog.projects.map(project => [project.id, project.name]), projectId, 'Нет проектов');
       const project = selectedProject();
       get('project-chats').hidden = !project;
@@ -110,7 +123,8 @@ export function createProjects() {
   function openProjectForm(project) {
     editing = project?.id;
     get('project-name').value = project?.name ?? '';
-    get('project-folders').value = project?.folders.join('\n') ?? '';
+    folders = [...(project?.folders ?? [])];
+    renderFolders();
     const selectedSkill = project?.search_skill ?? '';
     renderSkills(selectedSkill);
     projectForm.hidden = false;
@@ -119,6 +133,24 @@ export function createProjects() {
       installedSkills = skills.map(skill => skill.name);
       renderSkills(skill.value);
     }).catch(error => report(error.message, true));
+  }
+
+  function renderFolders() {
+    folderList.replaceChildren(...folders.map(folder => {
+      const row = element('li', '');
+      const remove = element('button', 'Убрать');
+      remove.type = 'button';
+      remove.className = 'unload';
+      remove.setAttribute('aria-label', `Убрать папку ${folder}`);
+      remove.onclick = () => {
+        folders = folders.filter(path => path !== folder);
+        renderFolders();
+        pickFolder.focus();
+      };
+      row.append(element('code', folder), remove);
+      return row;
+    }));
+    updateControls();
   }
 
   function renderSkills(selected) {
@@ -136,7 +168,6 @@ export function createProjects() {
       report(error.message, true);
     } finally {
       saving = false;
-      if (catalog) parallel.value = catalog.parallel_agents;
       updateControls();
     }
   }
@@ -144,6 +175,25 @@ export function createProjects() {
   get('new-project').onclick = () => openProjectForm();
   get('edit-project').onclick = () => openProjectForm(selectedProject());
   get('cancel-project').onclick = () => { projectForm.hidden = true; };
+  pickFolder.onclick = async () => {
+    if (pickFolder.disabled) return;
+    picking = true;
+    report();
+    updateControls();
+    try {
+      const folder = await request('/projects/pick-folder', null);
+      if (folder && !folders.includes(folder)) {
+        folders.push(folder);
+        renderFolders();
+      }
+    } catch (error) {
+      report(error.message, true);
+    } finally {
+      picking = false;
+      updateControls();
+      if (!pickFolder.disabled) pickFolder.focus();
+    }
+  };
   projectSelect.onchange = () => {
     preferredSelection = undefined;
     projectForm.hidden = chatForm.hidden = true;
@@ -159,11 +209,11 @@ export function createProjects() {
 
   projectForm.onsubmit = event => {
     event.preventDefault();
-    if (saving || !online) return;
+    if (saving || picking || !online || !folders.length) return;
     save('/projects', {
       id: editing,
       name: get('project-name').value,
-      folders: get('project-folders').value.split('\n').map(folder => folder.trim()).filter(Boolean),
+      folders,
       search_skill: skill.value || null,
     }, async project => {
       projectForm.hidden = chatForm.hidden = true;
@@ -193,7 +243,6 @@ export function createProjects() {
     });
   };
 
-  parallel.onchange = () => save('/projects/parallel', Number(parallel.value), () => refresh());
   prompt.oninput = () => drafts.set(selectedChat()?.id, prompt.value);
   get('project-prompt-form').onsubmit = async event => {
     event.preventDefault();

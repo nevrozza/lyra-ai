@@ -10,7 +10,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{benchmark, context, model_name, ollama, run::AiAction, telemetry};
+use crate::{
+    benchmark, context, model_name, ollama,
+    run::{AiAction, DelegationScope},
+    telemetry,
+};
 
 use super::{
     App,
@@ -482,7 +486,7 @@ async fn run_model(
         return Err("think must be a boolean or a non-empty supported level".into());
     }
     let model = installed_model(&request.model).await?;
-    let delegation = begin_delegation(&app, &model, None)?;
+    let delegation = begin_delegation(&app, &model, DelegationScope::Standalone)?;
     trace.record_token_usage(limit, None, None, None);
     let store = app.clone();
     let source = model.clone();
@@ -632,13 +636,12 @@ async fn run_pi(app: Arc<App>, request: RunPi, trace: &Call) -> Result<ToolOutpu
             "{model} lacks Ollama text generation or tool calling support required for agentic Pi tasks. Inspect another model."
         ));
     }
-    let delegation = begin_delegation(
-        &app,
-        &model,
-        project
-            .as_ref()
-            .map(|project| (project.parallel_agents, session_id)),
-    )?;
+    let scope = if project.is_some() {
+        DelegationScope::Project { session_id }
+    } else {
+        DelegationScope::Standalone
+    };
+    let delegation = begin_delegation(&app, &model, scope)?;
     let store = app.clone();
     let source = model.clone();
     let tokens = tokio::task::spawn_blocking(move || {
@@ -745,23 +748,17 @@ pub(super) async fn run_project_chat(
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
 }
 
-fn begin_delegation(
-    app: &App,
-    model: &str,
-    project: Option<(u8, Option<u64>)>,
-) -> Result<u64, String> {
+fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u64, String> {
     let mut id = None;
     app.task.send_if_modified(|snapshot| {
-        id = snapshot.begin_delegation(model, project);
+        id = snapshot.begin_delegation(model, scope);
         id.is_some()
     });
-    id.ok_or_else(|| {
-        if project.is_some() {
-            "Lyra is busy, the project chat is active, or the parallel agent limit was reached"
-                .into()
-        } else {
-            "Lyra is busy or stopped".into()
+    id.ok_or_else(|| match scope {
+        DelegationScope::Project { .. } => {
+            "Lyra is busy, stopped, or the project chat is already active".into()
         }
+        DelegationScope::Standalone => "Lyra is busy or stopped".into(),
     })
 }
 
