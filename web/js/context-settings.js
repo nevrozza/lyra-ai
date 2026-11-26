@@ -13,6 +13,7 @@ export function createContextSettings(session, {
 }) {
   const contextSize = get('context-size');
   const saveContext = get('save-context');
+  let contextOptions = contextPresets;
   let contextSaving = false;
   let contextEstimateRequest = 0;
   let contextBytesPerToken;
@@ -29,7 +30,7 @@ export function createContextSettings(session, {
     event.preventDefault();
     const model = displayedModel();
     if (saveContext.disabled || !model) return;
-    const tokens = contextPresets[contextSize.value];
+    const tokens = contextOptions[contextSize.value];
     const feedback = get('context-feedback');
     contextSaving = true;
     feedback.textContent = '';
@@ -40,8 +41,7 @@ export function createContextSettings(session, {
       if (displayedModel() === model) {
         const record = getRecord();
         if (record) record.context_tokens = tokens;
-        contextSize.value = String(contextPresets.indexOf(tokens));
-        renderContextChoice();
+        setContextChoice(tokens);
         feedback.textContent = 'Сохранено';
       }
     } catch (error) {
@@ -52,8 +52,17 @@ export function createContextSettings(session, {
     }
   });
 
+  function setContextChoice(tokens) {
+    const selected = tokens ?? null;
+    contextOptions = contextPresets.includes(selected) ? contextPresets :
+      [null, ...[...contextPresets.slice(1), selected].sort((left, right) => left - right)];
+    contextSize.max = String(contextOptions.length - 1);
+    contextSize.value = String(contextOptions.indexOf(selected));
+    renderContextChoice();
+  }
+
   function renderContextChoice() {
-    const tokens = contextPresets[contextSize.value];
+    const tokens = contextOptions[contextSize.value];
     const estimated = tokens && contextBytesPerToken ? tokens * contextBytesPerToken : null;
     const label = contextLabel(tokens) + (estimated ? ` ≈ ${memoryAmount(estimated)}` : '');
     get('context-choice').textContent = label;
@@ -119,17 +128,15 @@ export function createContextSettings(session, {
     updateControls(blocked, installed) {
       const record = getRecord();
       contextSize.disabled = blocked || !installed || !record;
-      saveContext.disabled = contextSize.disabled || contextPresets[contextSize.value] === record?.context_tokens;
+      saveContext.disabled = contextSize.disabled || contextOptions[contextSize.value] === record?.context_tokens;
     },
-    reset(tokens = null) {
-      contextSize.value = String(Math.max(0, contextPresets.indexOf(tokens)));
+    reset() {
       get('context-feedback').textContent = '';
-      renderContextChoice();
+      setContextChoice(null);
     },
     syncTokens(previous, next) {
-      if (contextPresets[contextSize.value] !== (previous ?? null)) return;
-      contextSize.value = String(Math.max(0, contextPresets.indexOf(next)));
-      renderContextChoice();
+      if (contextOptions[contextSize.value] !== (previous ?? null)) return;
+      setContextChoice(next);
     },
     beginSample() {
       return isMemoryChanging() ? undefined : memorySampleEpoch;

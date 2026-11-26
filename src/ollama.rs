@@ -57,7 +57,18 @@ struct ChatMessage {
     thinking: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+pub(crate) enum Think {
+    Enabled(bool),
+    Level(String),
+}
+
 impl ChatReply {
+    pub(crate) fn completed(&self) -> bool {
+        self.done
+    }
+
     pub(crate) fn thinking(&self) -> Option<&str> {
         self.message
             .thinking
@@ -65,12 +76,17 @@ impl ChatReply {
             .filter(|text| !text.is_empty())
     }
 
-    pub(crate) fn into_text(self) -> Result<(String, bool), String> {
+    pub(crate) fn into_text(self, limit: u32) -> Result<(String, bool), String> {
         if !self.done {
             return Err("Ollama returned an incomplete reply".into());
         }
         let truncated = self.done_reason.as_deref() == Some("length");
         if self.message.content.trim().is_empty() {
+            if truncated && self.thinking().is_some() {
+                return Err(format!(
+                    "Thinking used the {limit}-token max_output_tokens budget before the model answered. Increase the budget or pass think=false if the model supports disabling thinking."
+                ));
+            }
             return Err(if truncated {
                 "The model reached its output limit before returning text"
             } else {
@@ -89,22 +105,24 @@ pub(crate) fn chat(
     saved_context: Option<u32>,
     requested_context: Option<u32>,
     require_loaded: bool,
+    think: Option<Think>,
 ) -> Result<ChatReply, String> {
     let running = running_models();
     let override_context = requested_context.filter(|requested| Some(*requested) != saved_context);
     let context_tokens = override_context.or(saved_context);
-    let resident = running
-        .as_deref()
-        .and_then(|entries| match override_context {
-            Some(tokens) => {
-                let alias = context::alias(model);
-                entries.iter().find(|entry| {
-                    entry.context_length == Some(u64::from(tokens))
-                        && (same_model(&entry.name, model) || entry.name == alias)
-                })
-            }
-            None => loaded_backend(entries, model, saved_context),
-        });
+    let resident = running.as_deref().and_then(|entries| {
+        if override_context.is_none()
+            && let Some(entry) = loaded_backend(entries, model, saved_context)
+        {
+            return Some(entry);
+        }
+        let tokens = u64::from(context_tokens?);
+        let alias = context::alias(model);
+        entries.iter().find(|entry| {
+            entry.context_length == Some(tokens)
+                && (same_model(&entry.name, model) || entry.name == alias)
+        })
+    });
     let backend = match resident {
         Some(entry) => entry.name.clone(),
         None if require_loaded => {
@@ -117,7 +135,7 @@ pub(crate) fn chat(
                 "Could not check loaded models in Ollama".into()
             });
         }
-        // A one-off context uses request options, so the saved Modelfile is left alone.
+        // Set the new context through request options without rewriting a loaded profile.
         None if override_context.is_some() => model.to_owned(),
         None => context::backend_model(model, saved_context)?,
     };
@@ -129,6 +147,9 @@ pub(crate) fn chat(
     });
     if let Some(tokens) = context_tokens {
         request["options"]["num_ctx"] = json!(tokens);
+    }
+    if let Some(think) = think {
+        request["think"] = json!(think);
     }
     let current_runner = resident.or_else(|| {
         running

@@ -148,6 +148,8 @@ pub fn cache_bytes_per_token(model: &str) -> Option<u64> {
 pub(crate) struct Estimate {
     pub bytes_per_token_f16: Option<u64>,
     pub configured_context_tokens: Option<u64>,
+    pub thinking: Value,
+    pub capabilities: Option<Vec<String>>,
 }
 
 pub(crate) fn estimate(model: &str) -> Option<Estimate> {
@@ -156,6 +158,9 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
         #[serde(default)]
         model_info: Value,
         parameters: Option<String>,
+        #[serde(default)]
+        thinking: Value,
+        capabilities: Option<Vec<String>>,
     }
     let info = ollama::agent(Duration::from_secs(2))
         .post("http://127.0.0.1:11434/api/show")
@@ -179,6 +184,8 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
     Some(Estimate {
         bytes_per_token_f16: estimate_f16(&info.model_info),
         configured_context_tokens,
+        thinking: info.thinking,
+        capabilities: info.capabilities,
     })
 }
 
