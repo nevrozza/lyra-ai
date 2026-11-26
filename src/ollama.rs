@@ -59,7 +59,10 @@ struct ChatMessage {
 
 impl ChatReply {
     pub(crate) fn thinking(&self) -> Option<&str> {
-        self.message.thinking.as_deref().filter(|text| !text.is_empty())
+        self.message
+            .thinking
+            .as_deref()
+            .filter(|text| !text.is_empty())
     }
 
     pub(crate) fn into_text(self) -> Result<(String, bool), String> {
@@ -83,23 +86,40 @@ pub(crate) fn chat(
     model: &str,
     prompt: &str,
     max_output_tokens: u32,
-    context_tokens: Option<u32>,
+    saved_context: Option<u32>,
+    requested_context: Option<u32>,
     require_loaded: bool,
 ) -> Result<ChatReply, String> {
     let running = running_models();
+    let override_context = requested_context.filter(|requested| Some(*requested) != saved_context);
+    let context_tokens = override_context.or(saved_context);
     let resident = running
         .as_deref()
-        .and_then(|entries| loaded_backend(entries, model, context_tokens));
+        .and_then(|entries| match override_context {
+            Some(tokens) => {
+                let alias = context::alias(model);
+                entries.iter().find(|entry| {
+                    entry.context_length == Some(u64::from(tokens))
+                        && (same_model(&entry.name, model) || entry.name == alias)
+                })
+            }
+            None => loaded_backend(entries, model, saved_context),
+        });
     let backend = match resident {
         Some(entry) => entry.name.clone(),
         None if require_loaded => {
             return Err(if running.is_some() {
-                format!("{model} is not loaded with its configured context")
+                match context_tokens {
+                    Some(tokens) => format!("{model} is not loaded with a {tokens}-token context"),
+                    None => format!("{model} is not loaded with its configured context"),
+                }
             } else {
                 "Could not check loaded models in Ollama".into()
             });
         }
-        None => context::backend_model(model, context_tokens)?,
+        // A one-off context uses request options, so the saved Modelfile is left alone.
+        None if override_context.is_some() => model.to_owned(),
+        None => context::backend_model(model, saved_context)?,
     };
     let mut request = json!({
         "model": backend,
@@ -110,7 +130,13 @@ pub(crate) fn chat(
     if let Some(tokens) = context_tokens {
         request["options"]["num_ctx"] = json!(tokens);
     }
-    if let Some(keep_alive) = resident.and_then(|entry| entry.remaining_keep_alive()) {
+    let current_runner = resident.or_else(|| {
+        running
+            .as_ref()?
+            .iter()
+            .find(|entry| same_model(&entry.name, &backend))
+    });
+    if let Some(keep_alive) = current_runner.and_then(Model::remaining_keep_alive) {
         request["keep_alive"] = keep_alive;
     }
     agent(Duration::from_secs(120))
