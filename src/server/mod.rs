@@ -1,3 +1,4 @@
+mod ai_settings;
 mod assets;
 mod commands;
 mod mcp;
@@ -37,6 +38,7 @@ struct App {
 }
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
+    std::sync::LazyLock::force(&ai_settings::AI_SETTINGS);
     let catalog = tokio::task::spawn_blocking(ollama::installed_models)
         .await
         .ok()
