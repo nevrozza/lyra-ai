@@ -16,7 +16,16 @@ use serde::{Deserialize, Serialize};
 use super::App;
 
 const MANIFEST: &str = "SKILL.md";
-const AST_INDEX: &str = include_str!("../../defaults/skills/ast-index/SKILL.md");
+const BUILT_IN_SKILLS: &[(&str, &str)] = &[
+    (
+        "ast-index",
+        include_str!("../../defaults/skills/ast-index/SKILL.md"),
+    ),
+    (
+        "post-code-review",
+        include_str!("../../defaults/skills/post-code-review/SKILL.md"),
+    ),
+];
 const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Store {
@@ -90,18 +99,21 @@ impl Store {
     }
 
     pub(super) fn install_defaults(&self) -> io::Result<()> {
-        match fs::symlink_metadata(self.directory.join("ast-index")) {
-            Ok(_) => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        for &(name, manifest) in BUILT_IN_SKILLS {
+            match fs::symlink_metadata(self.directory.join(name)) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            match self.upload(vec![UploadedFile {
+                path: MANIFEST.into(),
+                data: STANDARD.encode(manifest),
+            }]) {
+                Ok(_) | Err((StatusCode::CONFLICT, _)) => {}
+                Err((_, message)) => return Err(io::Error::other(message)),
+            }
         }
-        match self.upload(vec![UploadedFile {
-            path: MANIFEST.into(),
-            data: STANDARD.encode(AST_INDEX),
-        }]) {
-            Ok(_) | Err((StatusCode::CONFLICT, _)) => Ok(()),
-            Err((_, message)) => Err(io::Error::other(message)),
-        }
+        Ok(())
     }
 
     fn install(&self, path: &Path) -> Result<Skill, HttpError> {
@@ -409,6 +421,32 @@ fn storage_error(error: impl std::fmt::Display) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_new_built_in_skills_with_existing_local_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("installed"));
+        let ast_index = store.directory.join("ast-index");
+        fs::create_dir_all(&ast_index).unwrap();
+        let custom = "---\nname: ast-index\ndescription: Local version\n---\n";
+        fs::write(ast_index.join(MANIFEST), custom).unwrap();
+
+        store.install_defaults().unwrap();
+        store.install_defaults().unwrap();
+
+        let skills = store.list().unwrap();
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, "ast-index");
+        assert_eq!(skills[0].description, "Local version");
+        assert_eq!(skills[1].name, "post-code-review");
+        assert_eq!(
+            store.paths(Some(&["post-code-review".into()])).unwrap(),
+            [fs::canonicalize(&store.directory)
+                .unwrap()
+                .join("post-code-review")
+                .join(MANIFEST)]
+        );
+    }
 
     #[test]
     fn uploads_nested_binary_files_and_rejects_paths_outside_the_package() {
