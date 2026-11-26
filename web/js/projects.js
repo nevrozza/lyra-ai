@@ -19,6 +19,8 @@ export function createProjects() {
   const chatFolderSelect = get('project-chat-folder');
   const drafts = new Map();
   const chatModels = new Map();
+  const chatModes = new Map();
+  const chatMode = () => chatModes.get(chatId) ?? 'chat';
   const sending = new Map();
   const stopRequests = new Set();
   let catalog;
@@ -68,7 +70,7 @@ export function createProjects() {
       spinner.hidden = !activeChats.has(Number(spinner.dataset.chatProgress));
     }
     get('project-progress').hidden = !active;
-    const progressText = stopping ? 'Останавливаем…' : delegation ? 'Pi работает…' : 'Отправляем…';
+    const progressText = stopping ? 'Останавливаем…' : delegation ? 'Модель отвечает…' : 'Отправляем…';
     const progress = get('project-progress-text');
     if (progress.textContent !== progressText) progress.textContent = progressText;
     get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));
@@ -100,6 +102,11 @@ export function createProjects() {
     projectForm.querySelector('[type="submit"]').disabled = !ready || !folders.length;
     chatForm.querySelector('[type="submit"]').disabled = !ready;
     composer.hidden = !chat || chat.archived || project.archived;
+    const working = chatMode() === 'work';
+    get('project-mode-chat').setAttribute('aria-pressed', String(!working));
+    get('project-mode-work').setAttribute('aria-pressed', String(working));
+    get('project-command-link').hidden = !working;
+    prompt.placeholder = working ? 'Задача для Lyra…' : 'Спроси модель…';
     const model = refreshModels();
     modelSelect.disabled = !online || !model;
     sendButton.disabled = !online || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
@@ -162,7 +169,7 @@ export function createProjects() {
       spinner.className = 'project-spinner';
       spinner.dataset.chatProgress = session;
       spinner.setAttribute('role', 'img');
-      spinner.setAttribute('aria-label', 'Pi работает');
+      spinner.setAttribute('aria-label', 'Модель отвечает');
       spinner.hidden = true;
       button.append(spinner);
     }
@@ -225,7 +232,7 @@ export function createProjects() {
       const item = element('li', '');
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
-      const label = message.role === 'assistant' ? message.model
+      const label = message.role === 'assistant' ? (message.model || 'Lyra')
         : message.origin === 'orchestrator' ? 'Оркестратор' : '';
       if (label) item.append(element('strong', label));
       item.append(element('p', message.text));
@@ -456,6 +463,12 @@ export function createProjects() {
     chatModels.set(chatId, modelSelect.value);
     updateControls();
   };
+  for (const mode of ['chat', 'work']) {
+    get(`project-mode-${mode}`).onclick = () => {
+      chatModes.set(chatId, mode);
+      updateControls();
+    };
+  }
   prompt.oninput = () => {
     drafts.set(chatId, prompt.value);
     updateControls();
@@ -499,6 +512,7 @@ export function createProjects() {
         project_id: project.id,
         project_session_id: chat.id,
         model,
+        mode: chatMode(),
         prompt: text,
         request_id: requestId,
       });
@@ -506,7 +520,6 @@ export function createProjects() {
       if (chatId === chat.id) {
         if (restoreDraft) report('Генерация остановлена.');
         else if (reply.structuredContent?.truncated) report('Ответ достиг лимита генерации.');
-        else if (reply.structuredContent?.text_only) report('Модель ответила в режиме разговора без инструментов Pi.');
       }
     } catch (error) {
       restoreDraft = true;

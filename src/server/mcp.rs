@@ -334,11 +334,19 @@ pub(super) struct RunPi {
     project_id: Option<u64>,
     project_session_id: Option<u64>,
     request_id: Option<String>,
+    mode: Option<ChatMode>,
     prompt: String,
     max_output_tokens: Option<u32>,
     skills: Option<Vec<String>>,
     #[serde(rename = "allow_commands")]
     _allow_commands: Option<bool>,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ChatMode {
+    Chat,
+    Work,
 }
 
 #[derive(Serialize)]
@@ -646,30 +654,40 @@ async fn run_pi(
     };
     let model = installed_model(&request.model).await?;
     let dashboard = matches!(origin, projects::MessageOrigin::Dashboard);
+    let mode = if dashboard {
+        request.mode.unwrap_or(ChatMode::Chat)
+    } else {
+        ChatMode::Work
+    };
     let store = app.clone();
     let source = model.clone();
-    let (tokens, text_only) = tokio::task::spawn_blocking(move || {
+    let text_only = mode == ChatMode::Chat;
+    let tokens = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
-        if dashboard && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
+        if text_only && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
             .is_some_and(|capabilities| !capabilities.iter().any(|item| item == "completion"))
         {
             return Err(format!("Модель {source} не поддерживает текстовые ответы."));
         }
         let unsupported = estimate.and_then(|info| info.supports_agent_tools()) == Some(false);
-        if unsupported && !dashboard {
-            return Err(format!(
-                "{source} lacks Ollama text generation or tool calling support required for agentic Pi tasks. Inspect another model."
-            ));
+        if unsupported && !text_only {
+            return Err(if dashboard {
+                format!("Модель {source} не поддерживает инструменты Pi для режима Work. Выберите другую модель или переключитесь на Chat.")
+            } else {
+                format!("{source} lacks Ollama text generation or tool calling support required for agentic Pi tasks. Inspect another model.")
+            });
         }
         let record = store.benchmarks.get(&source)
             .map_err(|error| format!("Не удалось прочитать настройки модели: {error}"))?;
         let failed = record.pi_check == Some(false);
-        if failed && !dashboard {
-            return Err(format!(
-                "{source} failed Lyra's Pi benchmark. Choose another model or rerun the Pi benchmark in Lyra."
-            ));
+        if failed && !text_only {
+            return Err(if dashboard {
+                format!("Модель {source} не прошла проверку Pi для режима Work. Выберите другую модель, повторите проверку или переключитесь на Chat.")
+            } else {
+                format!("{source} failed Lyra's Pi benchmark. Choose another model or rerun the Pi benchmark in Lyra.")
+            });
         }
-        Ok((record.context_tokens, unsupported || failed))
+        Ok(record.context_tokens)
     })
     .await
     .map_err(|error| error.to_string())??;

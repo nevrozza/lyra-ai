@@ -72,13 +72,17 @@
           <p id="project-message" class="secondary project-feedback" role="status"></p>
           <p id="project-archive-notice" class="secondary project-feedback" hidden></p>
           <form id="project-prompt-form" class="project-composer" hidden>
-            <label for="project-prompt" class="visually-hidden">Сообщение для Pi</label>
-            <textarea id="project-prompt" rows="2" placeholder="Сообщение для Pi…" required></textarea>
+            <label for="project-prompt" class="visually-hidden">Сообщение для Lyra</label>
+            <textarea id="project-prompt" rows="2" placeholder="Спроси модель…" required></textarea>
             <div class="project-controls project-composer-controls">
+              <div class="project-filters project-mode" role="group" aria-label="Режим чата">
+                <button id="project-mode-chat" type="button" aria-pressed="true" title="Разговор без инструментов">Chat</button>
+                <button id="project-mode-work" type="button" aria-pressed="false" title="Работа с папками проекта и командами">Work</button>
+              </div>
               <label class="project-model-label" for="project-chat-model">Модель
                 <select id="project-chat-model"></select>
               </label>
-              <a class="project-command-link" href="#command-mode">Команды Pi</a>
+              <a id="project-command-link" class="project-command-link" href="#command-mode" hidden>Команды Pi</a>
               <button id="send-project-prompt" type="submit">Отправить</button>
             </div>
           </form>

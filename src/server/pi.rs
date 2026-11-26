@@ -498,6 +498,9 @@ async fn write_project_instructions(
     if task.text_only {
         text.push_str("\nThis turn is text-only. Answer from the available conversation and instructions. File and shell tools are unavailable. If the task needs them, say so.\n");
     }
+    if project.session_file.is_some() {
+        text.push_str("\nThis is a continuing local Lyra conversation. Previous user messages and model replies in the conversation are available as context even when the user switches models. When asked about earlier messages, use the turns and summaries you actually received and say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");
+    }
     tokio::fs::write(path, text).await
 }
 
