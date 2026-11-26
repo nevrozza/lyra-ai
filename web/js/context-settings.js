@@ -16,7 +16,6 @@ export function createContextSettings(session, {
   let contextOptions = contextPresets;
   let contextSaving = false;
   let contextEstimateRequest = 0;
-  let modelEstimate;
   let contextBytesPerToken;
   let configuredAutoContext;
   let waitingForMemorySample = false;
@@ -104,7 +103,6 @@ export function createContextSettings(session, {
 
   async function readContextEstimate(model) {
     const request = ++contextEstimateRequest;
-    modelEstimate = undefined;
     contextBytesPerToken = undefined;
     configuredAutoContext = undefined;
     renderContextChoice();
@@ -117,18 +115,15 @@ export function createContextSettings(session, {
       // The slider still works if Ollama can't provide model metadata.
     }
     if (request !== contextEstimateRequest) return;
-    modelEstimate = estimate;
     contextBytesPerToken = estimate?.bytes_per_token_f16 ?? null;
     configuredAutoContext = estimate?.configured_context_tokens;
     renderContextChoice();
-    refreshControls();
   }
 
   return {
     render: renderContextChoice,
     readEstimate: readContextEstimate,
     refreshMemoryWarning,
-    get estimate() { return modelEstimate; },
     get saving() { return contextSaving; },
     updateControls(blocked, installed) {
       const record = getRecord();

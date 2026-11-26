@@ -45,6 +45,11 @@ struct App {
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     std::sync::LazyLock::force(&ai_settings::AI_SETTINGS);
+    let data = std::path::absolute(crate::data_directory())?;
+    let skills = skills::Store::new(data.join("skills"));
+    let agents_file = data.join("AGENTS.md");
+    agents::install_default(&agents_file)?;
+    skills.install_defaults()?;
     let catalog = tokio::task::spawn_blocking(ollama::installed_models)
         .await
         .ok()
@@ -77,11 +82,9 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         commands: std::sync::Mutex::new(commands::State::new(
             crate::data_directory().join("command-mode.json"),
         )),
-        skills: skills::Store::new(crate::data_directory().join("skills")),
-        agents_file: std::path::absolute(crate::data_directory().join("AGENTS.md"))?,
-        projects: projects::Store::new(std::path::absolute(
-            crate::data_directory().join("projects"),
-        )?),
+        skills,
+        agents_file,
+        projects: projects::Store::new(data.join("projects")),
         folder_picker: Mutex::default(),
         command_slot: Mutex::default(),
     });

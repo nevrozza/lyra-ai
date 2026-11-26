@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
+    path::Path,
     sync::Arc,
 };
 
@@ -9,6 +10,24 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use super::App;
 
 type HttpError = (StatusCode, String);
+const DEFAULT_AGENTS: &str = include_str!("../../defaults/AGENTS.md");
+
+pub(super) fn install_default(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let directory = path.parent().expect("AGENTS.md parent");
+    fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(DEFAULT_AGENTS.as_bytes())?;
+    match file.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.error),
+    }
+}
 
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new().route("/skills/agents", get(load).post(save))

@@ -21,7 +21,10 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/benchmark/pi", post(start_pi_benchmark))
         .route("/model/context", post(set_model_context))
         .route("/model/context/estimate", get(context_estimate))
-        .route("/model/thinking", post(set_model_thinking))
+        .route(
+            "/model/thinking",
+            get(model_thinking).post(set_model_thinking),
+        )
 }
 
 #[derive(serde::Deserialize)]
@@ -214,6 +217,40 @@ pub(super) fn model_settings(app: &App, model: &str) -> Result<benchmark::Record
 #[derive(serde::Deserialize)]
 struct ThinkingRequest {
     think: Option<ollama::Think>,
+}
+
+#[derive(serde::Serialize)]
+struct ThinkingSettings {
+    options: Vec<ollama::Think>,
+    think: Option<ollama::Think>,
+    default: serde_json::Value,
+    off_uses_lowest: bool,
+}
+
+async fn model_thinking(
+    State(app): State<Arc<App>>,
+    Query(request): Query<SelectRequest>,
+) -> Result<Json<ThinkingSettings>, StatusCode> {
+    model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
+    tokio::task::spawn_blocking(move || {
+        let estimate = context::estimate(&request.model).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let think = app
+            .benchmarks
+            .get(&request.model)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .think;
+        let off_uses_lowest = estimate.thinking["values"]
+            .as_array()
+            .is_some_and(|values| !values.iter().any(|value| value == &false));
+        Ok(Json(ThinkingSettings {
+            options: estimate.thinking_options,
+            think,
+            default: estimate.thinking["default"].clone(),
+            off_uses_lowest,
+        }))
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
 async fn set_model_thinking(

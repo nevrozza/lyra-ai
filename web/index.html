@@ -83,12 +83,26 @@
               <label class="project-model-label" for="project-chat-model">Модель
                 <select id="project-chat-model"></select>
               </label>
+              <button id="chat-thinking" class="unload" type="button" aria-haspopup="dialog" aria-controls="chat-thinking-dialog" hidden>Thinking</button>
               <a id="project-command-link" class="project-command-link" href="#command-mode" hidden>Команды Pi</a>
               <button id="send-project-prompt" type="submit">Отправить</button>
             </div>
           </form>
         </div>
       </div>
+      <dialog id="chat-thinking-dialog" class="project-dialog chat-thinking-dialog" aria-labelledby="chat-thinking-title">
+        <form id="chat-thinking-form" class="project-form">
+          <h3 id="chat-thinking-title">Thinking</h3>
+          <p id="chat-thinking-name" class="secondary"></p>
+          <div id="chat-thinking-options" role="radiogroup" aria-label="Уровень thinking"></div>
+          <p id="chat-thinking-note" class="secondary" hidden>Для этой модели Off использует минимальный уровень thinking.</p>
+          <p id="chat-thinking-feedback" class="project-feedback" data-error="true" role="status"></p>
+          <div class="project-controls project-dialog-actions">
+            <button id="cancel-chat-thinking" class="unload" type="button">Отмена</button>
+            <button id="save-chat-thinking" type="submit">Сохранить</button>
+          </div>
+        </form>
+      </dialog>
       <dialog id="project-dialog" class="project-dialog" aria-labelledby="project-dialog-title">
         <form id="project-form" class="project-form">
           <h3 id="project-dialog-title">Новый проект</h3>
@@ -172,26 +186,12 @@
                 <p id="context-memory-warning" class="memory-warning" role="status" hidden></p>
               </form>
               <div class="model-actions">
-                <button id="model-thinking" class="unload" type="button" aria-haspopup="dialog" aria-controls="model-thinking-dialog" hidden>Thinking</button>
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>
               </div>
             </div>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
           </div>
-          <dialog id="model-thinking-dialog" class="project-dialog model-thinking-dialog" aria-labelledby="model-thinking-title">
-            <form id="model-thinking-form" class="project-form">
-              <h3 id="model-thinking-title">Thinking</h3>
-              <p id="model-thinking-name" class="secondary"></p>
-              <div id="model-thinking-options" role="radiogroup" aria-label="Уровень thinking"></div>
-              <p id="model-thinking-note" class="secondary" hidden>Для этой модели Off использует минимальный уровень thinking.</p>
-              <p id="model-thinking-feedback" class="project-feedback" data-error="true" role="status"></p>
-              <div class="project-controls project-dialog-actions">
-                <button id="cancel-model-thinking" class="unload" type="button">Отмена</button>
-                <button id="save-model-thinking" type="submit">Сохранить</button>
-              </div>
-            </form>
-          </dialog>
         </section>
         <section id="benchmark-panel" class="panel model-benchmark" aria-labelledby="benchmark-title" hidden>
           <div id="benchmark-resizer" class="column-resizer" role="separator" aria-orientation="vertical" aria-labelledby="benchmark-title" aria-controls="benchmark-panel" title="Потяните, чтобы изменить ширину" tabindex="0"></div>

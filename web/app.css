@@ -145,10 +145,10 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-form :is(input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .project-dialog-actions { justify-content: flex-end; margin-top: 8px; }
 .project-dialog .project-feedback { margin: 3px 0 0; }
-.model-thinking-dialog { width: min(360px, calc(100% - 26px)); }
-#model-thinking-name, #model-thinking-note { margin: 0; overflow-wrap: anywhere; }
-#model-thinking-options { display: grid; gap: 9px; margin-block: 4px; }
-#model-thinking-options label { overflow-wrap: anywhere; }
+.chat-thinking-dialog { width: min(360px, calc(100% - 26px)); }
+#chat-thinking-name, #chat-thinking-note { margin: 0; overflow-wrap: anywhere; }
+#chat-thinking-options { display: grid; gap: 9px; margin-block: 4px; }
+#chat-thinking-options label { overflow-wrap: anywhere; }
 .project-folder-settings, #project-folders li { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #project-folders { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
 #project-folders:empty { display: none; }

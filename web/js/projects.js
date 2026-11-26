@@ -1,4 +1,5 @@
 import { element, get } from './ui.js';
+import { createThinkingControl } from './chat-thinking.js';
 
 export function createProjects() {
   const tree = get('project-tree');
@@ -16,6 +17,7 @@ export function createProjects() {
   const sendButton = get('send-project-prompt');
   const stopButton = get('stop-project-prompt');
   const modelSelect = get('project-chat-model');
+  const thinking = createThinkingControl();
   const chatFolderSelect = get('project-chat-folder');
   const drafts = new Map();
   const chatModels = new Map();
@@ -120,6 +122,7 @@ export function createProjects() {
     prompt.placeholder = working ? 'Задача для Lyra…' : 'Спроси модель…';
     const model = refreshModels();
     modelSelect.disabled = !online || !model;
+    thinking.update(online && run && !composer.hidden ? model : undefined, run);
     sendButton.disabled = !online || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
     sendButton.hidden = Boolean(active);
     stopButton.disabled = !delegation || Boolean(stopping);
@@ -328,7 +331,7 @@ export function createProjects() {
 
   function renderSkills(selected) {
     const names = [...new Set([...installedSkills, ...(selected ? [selected] : [])])];
-    setOptions(skill, [['', 'Встроенный поиск'], ...names.map(name => [name, name])], selected);
+    setOptions(skill, [['', 'По умолчанию'], ...names.map(name => [name, name])], selected);
   }
 
   async function save(path, data, success) {

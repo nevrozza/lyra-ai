@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::App;
 
 const MANIFEST: &str = "SKILL.md";
+const AST_INDEX: &str = include_str!("../../defaults/skills/ast-index/SKILL.md");
 const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Store {
@@ -86,6 +87,21 @@ async fn upload(
 impl Store {
     pub(super) fn new(directory: PathBuf) -> Self {
         Self { directory }
+    }
+
+    pub(super) fn install_defaults(&self) -> io::Result<()> {
+        match fs::symlink_metadata(self.directory.join("ast-index")) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        match self.upload(vec![UploadedFile {
+            path: MANIFEST.into(),
+            data: STANDARD.encode(AST_INDEX),
+        }]) {
+            Ok(_) | Err((StatusCode::CONFLICT, _)) => Ok(()),
+            Err((_, message)) => Err(io::Error::other(message)),
+        }
     }
 
     fn install(&self, path: &Path) -> Result<Skill, HttpError> {
