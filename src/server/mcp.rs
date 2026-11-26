@@ -129,11 +129,11 @@ async fn handle(
                 }
                 let _ = write!(detail, "контекст {tokens} токенов");
             }
-            let trace = Call::start(app.clone(), name, model, &detail, group);
+            let mut trace = Call::start(app.clone(), name, model, &detail, group);
             let name = name.to_owned();
             // Keep the operation and its timeline going if its MCP connection closes.
             let result = tokio::spawn(async move {
-                let result = call(app, &name, args, &trace).await;
+                let result = call(app, &name, args, &mut trace).await;
                 trace.finish(match &result {
                     Ok(output) if output.is_error => Some(&output.text),
                     Err(error) => Some(error),
@@ -310,7 +310,12 @@ impl ToolOutput {
     }
 }
 
-async fn call(app: Arc<App>, name: &str, args: Value, trace: &Call) -> Result<ToolOutput, String> {
+async fn call(
+    app: Arc<App>,
+    name: &str,
+    args: Value,
+    trace: &mut Call,
+) -> Result<ToolOutput, String> {
     let text = match name {
         "inspect" => {
             let request: Inspect = arguments(args)?;
@@ -412,7 +417,11 @@ fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
     Ok(limit)
 }
 
-async fn run_model(app: Arc<App>, request: RunModel, trace: &Call) -> Result<ToolOutput, String> {
+async fn run_model(
+    app: Arc<App>,
+    request: RunModel,
+    trace: &mut Call,
+) -> Result<ToolOutput, String> {
     let limit = output_limit(&request.prompt, request.max_output_tokens)?;
     if matches!(&request.think, Some(ollama::Think::Level(level)) if level.trim().is_empty()) {
         return Err("think must be a boolean or a non-empty supported level".into());
@@ -424,6 +433,7 @@ async fn run_model(app: Arc<App>, request: RunModel, trace: &Call) -> Result<Too
     {
         return Err("Lyra is busy or stopped".into());
     }
+    trace.record_token_usage(limit, None, None, None);
     let store = app.clone();
     let source = model.clone();
     let execution = tokio::task::spawn_blocking(move || {
@@ -456,6 +466,12 @@ async fn run_model(app: Arc<App>, request: RunModel, trace: &Call) -> Result<Too
         .is_ok_and(|(_, saved)| matches!(saved, Ok(true)));
     finish_delegation(&app, execution.is_ok(), context_changed).await;
     let (reply, saved) = execution?;
+    trace.record_token_usage(
+        limit,
+        reply.prompt_eval_count,
+        reply.eval_count,
+        reply.stop_reason(),
+    );
     let save_warning = saved.err().map_or_else(String::new, |error| {
         format!("\nLyra could not save the context setting: {error}")
     });

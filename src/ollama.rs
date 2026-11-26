@@ -49,6 +49,8 @@ pub(crate) struct ChatReply {
     message: ChatMessage,
     done: bool,
     done_reason: Option<String>,
+    pub(crate) prompt_eval_count: Option<u64>,
+    pub(crate) eval_count: Option<u64>,
 }
 
 #[derive(Deserialize)]

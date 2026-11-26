@@ -153,6 +153,8 @@ pub(super) struct Call {
     id: u64,
     tool: String,
     started: Instant,
+    // The counters belong to this call, even when it shares a session with a retry.
+    token_usage: Option<String>,
 }
 
 impl Call {
@@ -214,7 +216,27 @@ impl Call {
             id,
             tool: tool.into(),
             started: Instant::now(),
+            token_usage: None,
         }
+    }
+
+    pub(super) fn record_token_usage(
+        &mut self,
+        budget: u32,
+        prompt: Option<u64>,
+        generated: Option<u64>,
+        stop_reason: Option<&str>,
+    ) {
+        let count =
+            |count: Option<u64>| count.map_or_else(|| "—".into(), |count| count.to_string());
+        self.token_usage = Some(format!(
+            "Токены · вход {} · генерация {} / {budget} · остановка {}",
+            count(prompt),
+            count(generated),
+            stop_reason
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("—"),
+        ));
     }
 
     pub(super) fn event(&self, kind: Kind, title: &str, text: &str, status: Option<&'static str>) {
@@ -224,13 +246,17 @@ impl Call {
     pub(super) fn finish(self, error: Option<&str>) {
         self.update(|session| {
             session.summary.active -= 1;
-            let (status, detail) = match error {
+            let (status, mut detail) = match error {
                 None => ("ok", format!("{} мс", self.started.elapsed().as_millis())),
                 Some(error) => {
                     session.summary.errors += 1;
                     ("error", error.to_owned())
                 }
             };
+            if let Some(usage) = &self.token_usage {
+                detail.insert(0, '\n');
+                detail.insert_str(0, usage);
+            }
             session.push(self.id, Kind::Mcp, &self.tool, &detail, Some(status))
         });
     }
