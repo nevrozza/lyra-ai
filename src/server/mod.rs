@@ -66,7 +66,9 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         pi_agent_dir: options.pi_agent_dir,
         benchmarks: benchmark::Store::new(options.benchmark_file),
         sessions: std::sync::Mutex::default(),
-        commands: std::sync::Mutex::default(),
+        commands: std::sync::Mutex::new(commands::State::new(
+            crate::data_directory().join("command-mode.json"),
+        )),
         skills: skills::Store::new(crate::data_directory().join("skills")),
     });
     if let Some(names) = catalog {

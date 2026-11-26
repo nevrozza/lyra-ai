@@ -4,12 +4,19 @@ use std::{
     sync::Arc,
 };
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
+    routing::{get, post},
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
 use super::App;
 
 const MANIFEST: &str = "SKILL.md";
+const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Store {
     directory: PathBuf,
@@ -26,10 +33,21 @@ struct Import {
     path: PathBuf,
 }
 
+#[derive(Deserialize)]
+struct UploadedFile {
+    path: String,
+    data: String,
+}
+
 type HttpError = (StatusCode, String);
 
 pub(super) fn routes() -> Router<Arc<App>> {
-    Router::new().route("/skills", get(list).post(install))
+    Router::new()
+        .route("/skills", get(list).post(install))
+        .route(
+            "/skills/upload",
+            post(upload).layer(DefaultBodyLimit::max(24 * 1024 * 1024)),
+        )
 }
 
 async fn list(State(app): State<Arc<App>>) -> Result<Json<Vec<Skill>>, HttpError> {
@@ -52,6 +70,19 @@ async fn install(
     .map_err(storage_error)?
 }
 
+async fn upload(
+    State(app): State<Arc<App>>,
+    Json(files): Json<Vec<UploadedFile>>,
+) -> Result<(StatusCode, Json<Skill>), HttpError> {
+    tokio::task::spawn_blocking(move || {
+        app.skills
+            .upload(files)
+            .map(|skill| (StatusCode::CREATED, Json(skill)))
+    })
+    .await
+    .map_err(storage_error)?
+}
+
 impl Store {
     pub(super) fn new(directory: PathBuf) -> Self {
         Self { directory }
@@ -66,31 +97,16 @@ impl Store {
         }
         let source = fs::canonicalize(path).map_err(source_error)?;
         let skill = manifest(&source).map_err(source_error)?;
-        fs::create_dir_all(&self.directory).map_err(storage_error)?;
-        let root = fs::canonicalize(&self.directory).map_err(storage_error)?;
+        let root = self.root()?;
         if root.starts_with(&source) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "Папка скилла содержит хранилище Lyra.".into(),
             ));
         }
-        let target = root.join(&skill.name);
-        let duplicate = || {
-            (
-                StatusCode::CONFLICT,
-                format!("Скилл «{}» уже установлен.", skill.name),
-            )
-        };
-        match fs::symlink_metadata(&target) {
-            Ok(_) => return Err(duplicate()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(storage_error(error)),
-        }
-        let staging = tempfile::Builder::new()
-            .prefix(".install-")
-            .tempdir_in(&root)
-            .map_err(storage_error)?;
-        let package = staging.path().join(&skill.name);
+        Self::install_target(&root, &skill)?;
+        let staging = staging(&root)?;
+        let package = staging.path().join("package");
         copy_directory(&source, &package).map_err(source_error)?;
         let copied_skill = manifest(&package).map_err(source_error)?;
         if copied_skill.name != skill.name {
@@ -99,14 +115,61 @@ impl Store {
                 "Имя скилла изменилось во время установки.".into(),
             ));
         }
+        Self::publish(&root, &package, copied_skill)
+    }
+
+    fn upload(&self, files: Vec<UploadedFile>) -> Result<Skill, HttpError> {
+        if files.is_empty() || files.len() > 2048 {
+            return Err(source_error(invalid("Выберите от 1 до 2048 файлов.")));
+        }
+        let root = self.root()?;
+        let staging = staging(&root)?;
+        let package = staging.path().join("package");
+        fs::create_dir(&package).map_err(storage_error)?;
+        let mut remaining = UPLOAD_LIMIT;
+        for file in files {
+            let path = package.join(upload_path(&file.path).map_err(source_error)?);
+            let data = STANDARD
+                .decode(file.data)
+                .map_err(|_| source_error(invalid("Повреждены данные файла.")))?;
+            remaining = remaining.checked_sub(data.len()).ok_or_else(|| {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Скилл превышает 16 МБ.".into(),
+                )
+            })?;
+            fs::create_dir_all(path.parent().expect("upload parent")).map_err(source_error)?;
+            let mut target = fs::File::create_new(path).map_err(source_error)?;
+            io::Write::write_all(&mut target, &data).map_err(storage_error)?;
+        }
+        let skill = manifest(&package).map_err(source_error)?;
+        Self::publish(&root, &package, skill)
+    }
+
+    fn root(&self) -> Result<PathBuf, HttpError> {
+        fs::create_dir_all(&self.directory).map_err(storage_error)?;
+        fs::canonicalize(&self.directory).map_err(storage_error)
+    }
+
+    fn install_target(root: &Path, skill: &Skill) -> Result<PathBuf, HttpError> {
+        let target = root.join(&skill.name);
+        match fs::symlink_metadata(&target) {
+            Ok(_) => Err(duplicate(skill)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(target),
+            Err(error) => Err(storage_error(error)),
+        }
+    }
+
+    fn publish(root: &Path, package: &Path, skill: Skill) -> Result<Skill, HttpError> {
+        let target = Self::install_target(root, &skill)?;
         if let Err(error) = fs::rename(package, &target) {
             return Err(if fs::symlink_metadata(&target).is_ok() {
-                duplicate()
+                duplicate(&skill)
             } else {
                 storage_error(error)
             });
         }
-        Ok(copied_skill)
+        Ok(skill)
     }
 
     fn list(&self) -> io::Result<Vec<Skill>> {
@@ -163,6 +226,58 @@ impl Store {
             .map(|skill| directory.join(skill.name).join(MANIFEST))
             .collect())
     }
+}
+
+fn staging(root: &Path) -> Result<tempfile::TempDir, HttpError> {
+    tempfile::Builder::new()
+        .prefix(".install-")
+        .tempdir_in(root)
+        .map_err(storage_error)
+}
+
+fn duplicate(skill: &Skill) -> HttpError {
+    (
+        StatusCode::CONFLICT,
+        format!("Скилл «{}» уже установлен.", skill.name),
+    )
+}
+
+fn upload_path(path: &str) -> io::Result<PathBuf> {
+    let mut relative = PathBuf::new();
+    let mut parts = path.split('/');
+    if path.len() > 4096 || parts.clone().count() > 64 {
+        return Err(invalid("Слишком длинный путь внутри скилла."));
+    }
+    for part in &mut parts {
+        let stem = part
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_ascii_uppercase();
+        let device = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        });
+        if part.is_empty()
+            || part.ends_with(['.', ' '])
+            || device
+            || part
+                .chars()
+                .any(|ch| ch.is_control() || "\\:\"<>|?*".contains(ch))
+        {
+            return Err(invalid(format!("Недопустимый путь внутри скилла: {path}")));
+        }
+        relative.push(part);
+    }
+    Ok(relative)
 }
 
 fn manifest(directory: &Path) -> io::Result<Skill> {
@@ -278,6 +393,42 @@ fn storage_error(error: impl std::fmt::Display) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uploads_nested_binary_files_and_rejects_paths_outside_the_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::new(temp.path().join("installed"));
+        let file = |path: &str, bytes: &[u8]| UploadedFile {
+            path: path.into(),
+            data: STANDARD.encode(bytes),
+        };
+        let manifest = || file(MANIFEST, b"---\nname: uploaded\ndescription: Test\n---\n");
+        for path in [
+            "../escape",
+            "assets/../../escape",
+            "/absolute",
+            "C:/absolute",
+            "assets\\escape",
+            "NUL.txt",
+        ] {
+            assert!(store.upload(vec![manifest(), file(path, b"data")]).is_err());
+            assert_eq!(fs::read_dir(&store.directory).unwrap().count(), 0);
+        }
+        let bytes = [0, 1, 128, 255];
+        let skill = store
+            .upload(vec![manifest(), file("assets/nested/data.bin", &bytes)])
+            .unwrap();
+        assert_eq!(skill.name, "uploaded");
+        let paths = store.paths(None).unwrap();
+        assert_eq!(
+            fs::read(paths[0].parent().unwrap().join("assets/nested/data.bin")).unwrap(),
+            bytes,
+        );
+        assert!(matches!(
+            store.upload(vec![manifest()]),
+            Err((StatusCode::CONFLICT, _))
+        ));
+    }
 
     #[test]
     fn installs_a_snapshot_with_supporting_files_and_rejects_duplicates() {

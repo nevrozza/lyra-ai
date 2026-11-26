@@ -94,13 +94,22 @@
         <section class="panel" aria-labelledby="sessions-title">
           <header class="panel-header"><h2 id="sessions-title">MCP-вызовы</h2></header>
           <div class="panel-body sessions-body">
+            <div class="command-settings">
+              <label for="command-mode">Команды Pi</label>
+              <select id="command-mode" disabled>
+                <option value="ask">Спрашивать</option>
+                <option value="allow_all">Всё разрешать</option>
+              </select>
+              <button id="command-notifications" class="unload" type="button" hidden>Включить уведомления</button>
+              <p id="command-settings-error" class="secondary" role="status" hidden></p>
+              <p id="command-notification-status" class="secondary" role="status" hidden></p>
+            </div>
             <section id="command-panel" class="command-panel" aria-labelledby="command-title" hidden>
               <h3 id="command-title" role="status"></h3>
               <p id="command-workspace" class="secondary"></p>
               <pre id="command-script" dir="ltr"></pre>
               <div id="command-actions">
                 <button type="button" class="unload" data-action="allow">Запустить</button>
-                <button type="button" class="unload" data-action="allow_repeat" title="Разрешить повторы точно такой же команды до конца задачи Pi">Разрешить повторы в этой задаче</button>
                 <button type="button" class="unload" data-action="deny">Отклонить</button>
                 <button type="button" class="unload" data-action="stop" hidden>Остановить</button>
               </div>
@@ -118,12 +127,14 @@
           <header class="panel-header"><h2 id="skills-title">Скиллы Pi</h2></header>
           <div class="panel-body skills-body">
             <form id="skill-import">
-              <label for="skill-path">Папка с SKILL.md</label>
               <div class="skill-import-controls">
-                <input id="skill-path" aria-describedby="skill-path-help" type="text" spellcheck="false" required disabled>
-                <button id="install-skill" class="unload" type="submit" disabled>Установить</button>
+                <input id="skill-folder" type="file" webkitdirectory hidden>
+                <input id="skill-file" type="file" accept=".md" hidden>
+                <button id="pick-skill-folder" class="unload" type="button" disabled>Выбрать папку</button>
+                <button id="pick-skill-file" class="unload" type="button" disabled>Выбрать SKILL.md</button>
+                <button id="install-skill" class="unload" type="submit" disabled>Загрузить</button>
               </div>
-              <p id="skill-path-help" class="secondary">Абсолютный путь на компьютере, где запущена Lyra.</p>
+              <p id="skill-selection" class="secondary" role="status">Выберите папку с SKILL.md или отдельный файл SKILL.md.</p>
             </form>
             <p id="skill-result" class="secondary" role="status"></p>
             <p id="skill-catalog-message" class="secondary"></p>

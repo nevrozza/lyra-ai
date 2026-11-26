@@ -52,16 +52,19 @@ h2 { font-size: .96rem; font-weight: 650; }
 .panel-body { padding: 17px 19px 20px; }
 .service, .secondary { color: var(--muted); font-size: .83rem; }
 .skills-body, #skill-import { display: grid; gap: 8px; }
-#skill-import label { font-size: .85rem; }
 .skill-import-controls { display: flex; flex-wrap: wrap; gap: 7px; }
-#skill-path { flex: 1 1 180px; min-width: 0; padding: 8px; color: inherit; background: #111613; border: 1px solid var(--line); border-radius: 7px; font: .82rem var(--mono); }
-#skill-path:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#skill-selection { overflow-wrap: anywhere; }
 #skill-result:empty, #skill-catalog-message:empty, #skill-catalog:empty { display: none; }
 #skill-result[data-error="true"] { color: #f0ac9c; }
 #skill-catalog { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 #skill-catalog li { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 #skill-catalog code { font-size: .83rem; }
 .command-panel { display: grid; gap: 8px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.command-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; font-size: .85rem; }
+.command-settings select { padding: 6px 8px; color: inherit; background: #111613; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
+.command-settings select:disabled { color: var(--muted); }
+.command-settings select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.command-settings p { flex-basis: 100%; }
 .command-panel h3 { margin: 0; font-size: .9rem; }
 .command-panel p { overflow-wrap: anywhere; }
 .command-panel pre { margin: 0; max-height: 14rem; overflow: auto; padding: 9px; background: #111613; border-radius: 6px; font: .8rem/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }

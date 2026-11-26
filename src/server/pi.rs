@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -176,7 +175,6 @@ pub(super) async fn run(
     let mut stop_reason = None;
     let mut text_clipped = false;
     let mut successful_file_tools = [false; 3];
-    let mut repeat = HashSet::new();
     let mut ready = commands.is_none();
     let mut legacy_rpc = false;
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -218,13 +216,9 @@ pub(super) async fn run(
                             .as_str()
                             .ok_or("Missing Pi command request ID")?;
                         let command = event["placeholder"].as_str().ok_or("Missing Pi command")?;
-                        let result = commands::run(
-                            commands.expect("command trace"),
-                            workspace,
-                            command,
-                            &mut repeat,
-                        )
-                        .await;
+                        let result =
+                            commands::run(commands.expect("command trace"), workspace, command)
+                                .await;
                         let value =
                             serde_json::to_string(&result).map_err(|error| error.to_string())?;
                         rpc_send(

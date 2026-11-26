@@ -31,6 +31,7 @@ const telemetry = createTelemetry(session, {
 function updateControls() {
   models.updateControls();
   telemetry.updateControls();
+  commands.setOnline(session.online && !session.closed);
   skills.setOnline(session.online && !session.closed);
 }
 
@@ -116,6 +117,7 @@ document.addEventListener('visibilitychange', () => {
     telemetry.pause();
   } else {
     if (!stream) connect();
+    if (!session.closed) commands.refresh();
     telemetry.resume();
   }
 });

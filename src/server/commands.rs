@@ -1,4 +1,10 @@
-use std::{collections::HashSet, io, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
@@ -24,10 +30,54 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const OUTPUT_LIMIT: usize = 3500;
 
-#[derive(Default)]
 pub(super) struct State {
     next_id: u64,
     active: Option<Active>,
+    mode: Mode,
+    mode_path: PathBuf,
+}
+
+impl State {
+    pub(super) fn new(mode_path: PathBuf) -> Self {
+        let mode = match fs::read(&mode_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Mode::default(),
+        };
+        Self {
+            next_id: 0,
+            active: None,
+            mode,
+            mode_path,
+        }
+    }
+
+    fn set_mode(&mut self, mode: Mode) -> io::Result<()> {
+        if self.mode == mode {
+            return Ok(());
+        }
+        let directory = self.mode_path.parent().expect("command mode directory");
+        fs::create_dir_all(directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer(&mut file, &mode)?;
+        file.as_file().sync_all()?;
+        file.persist(&self.mode_path)?;
+        self.mode = mode;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Mode {
+    #[default]
+    Ask,
+    AllowAll,
+}
+
+#[derive(Serialize)]
+struct SettingsView {
+    mode: Mode,
+    command: Option<View>,
 }
 
 struct Active {
@@ -49,7 +99,6 @@ struct View {
 #[serde(rename_all = "snake_case")]
 enum Action {
     Allow,
-    AllowRepeat,
     Deny,
     Stop,
 }
@@ -57,12 +106,32 @@ enum Action {
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/commands", get(view))
+        .route("/commands/mode", post(set_mode))
         .route("/commands/{id}", post(decide))
 }
 
-async fn view(AppState(app): AppState<Arc<App>>) -> Json<Option<View>> {
+async fn view(AppState(app): AppState<Arc<App>>) -> Json<SettingsView> {
     let state = app.commands.lock().expect("command state lock");
-    Json(state.active.as_ref().map(|active| active.view.clone()))
+    Json(SettingsView {
+        mode: state.mode,
+        command: state.active.as_ref().map(|active| active.view.clone()),
+    })
+}
+
+async fn set_mode(AppState(app): AppState<Arc<App>>, Json(mode): Json<Mode>) -> StatusCode {
+    match tokio::task::spawn_blocking(move || {
+        app.commands
+            .lock()
+            .expect("command state lock")
+            .set_mode(mode)?;
+        app.task.send_modify(crate::run::Snapshot::commands_changed);
+        Ok::<_, io::Error>(())
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn decide(
@@ -131,12 +200,7 @@ impl ResultBody {
     }
 }
 
-pub(super) async fn run(
-    trace: &Call,
-    workspace: &Path,
-    command: &str,
-    repeat: &mut HashSet<String>,
-) -> ResultBody {
+pub(super) async fn run(trace: &Call, workspace: &Path, command: &str) -> ResultBody {
     if command.trim().is_empty() || command.len() > 4000 || command.contains('\0') {
         return ResultBody::error(
             "invalid",
@@ -144,12 +208,12 @@ pub(super) async fn run(
         );
     }
     let app = trace.app();
-    let preapproved = repeat.contains(command);
-    let mut actions = {
+    let (preapproved, mut actions) = {
         let mut state = app.commands.lock().expect("command state lock");
         if state.active.is_some() {
             return ResultBody::error("busy", "Another command is active");
         }
+        let preapproved = state.mode == Mode::AllowAll;
         state.next_id += 1;
         let (actions, receiver) = watch::channel(None);
         state.active = Some(Active {
@@ -163,7 +227,7 @@ pub(super) async fn run(
             },
             actions,
         });
-        receiver
+        (preapproved, receiver)
     };
     let mut request = Request {
         trace,
@@ -184,21 +248,11 @@ pub(super) async fn run(
         Some(if preapproved { "running" } else { "waiting" }),
     );
 
-    let permitted = if preapproved {
-        true
-    } else {
-        match timeout(APPROVAL_TIMEOUT, actions.wait_for(Option::is_some)).await {
-            Ok(Ok(action)) => match *action {
-                Some(Action::AllowRepeat) => {
-                    repeat.insert(command.to_owned());
-                    true
-                }
-                Some(Action::Allow) => true,
-                _ => false,
-            },
-            _ => false,
-        }
-    };
+    let permitted = preapproved
+        || matches!(
+            timeout(APPROVAL_TIMEOUT, actions.wait_for(Option::is_some)).await,
+            Ok(Ok(action)) if matches!(*action, Some(Action::Allow))
+        );
     let result = if permitted {
         if !preapproved {
             let mut state = app.commands.lock().expect("command state lock");
@@ -221,9 +275,6 @@ pub(super) async fn run(
     } else {
         ResultBody::error("denied", "Command approval was declined or expired")
     };
-    if matches!(result.status, "stopped" | "timeout") {
-        repeat.remove(command);
-    }
     for (label, text) in [("stdout", &result.stdout), ("stderr", &result.stderr)] {
         if !text.is_empty() {
             trace.event(Kind::Tool, label, text, None);
@@ -358,6 +409,59 @@ impl Tail {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn asks_for_each_command_and_persists_automatic_approval() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mode_path = workspace.path().join("command-mode.json");
+        let app = Arc::new(App {
+            host: String::new(),
+            origin: String::new(),
+            task: watch::channel(crate::run::Snapshot::new(None)).0,
+            metrics: Default::default(),
+            ram: Default::default(),
+            startup_log: None,
+            pi_agent_dir: None,
+            benchmarks: crate::benchmark::Store::new(Some(
+                workspace.path().join("benchmarks.json"),
+            )),
+            sessions: Default::default(),
+            commands: std::sync::Mutex::new(State::new(mode_path.clone())),
+            skills: super::super::skills::Store::new(workspace.path().join("skills")),
+        });
+        let trace = Call::start(app.clone(), "run_pi", None, "", None);
+        let shell = "printf approved";
+        for action in [Action::Allow, Action::Deny] {
+            let check = async {
+                let command = view(AppState(app.clone())).await.0.command.unwrap();
+                assert!(!command.running);
+                assert_eq!(
+                    decide(AppState(app.clone()), RoutePath(command.id), Json(action)).await,
+                    StatusCode::NO_CONTENT,
+                );
+            };
+            let (result, ()) = tokio::join!(biased; run(&trace, workspace.path(), shell), check);
+            match action {
+                Action::Allow => assert_eq!(result.stdout, "approved"),
+                Action::Deny => assert_eq!(result.status, "denied"),
+                Action::Stop => unreachable!(),
+            }
+        }
+        assert_eq!(
+            set_mode(AppState(app.clone()), Json(Mode::AllowAll)).await,
+            StatusCode::NO_CONTENT,
+        );
+        assert!(State::new(mode_path.clone()).mode == Mode::AllowAll);
+        let result = timeout(Duration::from_secs(3), run(&trace, workspace.path(), shell))
+            .await
+            .unwrap();
+        assert_eq!(result.stdout, "approved");
+        assert_eq!(
+            set_mode(AppState(app), Json(Mode::Ask)).await,
+            StatusCode::NO_CONTENT,
+        );
+        assert!(State::new(mode_path).mode == Mode::Ask);
+    }
 
     #[tokio::test]
     async fn preserves_exit_code_and_bounds_both_output_streams() {

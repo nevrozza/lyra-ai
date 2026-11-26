@@ -2,18 +2,48 @@ import { element, get } from './ui.js';
 
 export function createSkills() {
   const form = get('skill-import');
-  const path = get('skill-path');
   const button = get('install-skill');
+  const folder = get('skill-folder');
+  const file = get('skill-file');
+  const pickFolder = get('pick-skill-folder');
+  const pickFile = get('pick-skill-file');
+  const selection = get('skill-selection');
+  const emptySelection = selection.textContent;
   const result = get('skill-result');
   const message = get('skill-catalog-message');
   const list = get('skill-catalog');
   let saving = false;
   let online = false;
   let revision = 0;
+  let files = [];
 
   function updateControls() {
-    path.disabled = saving || !online;
-    button.disabled = path.disabled || !path.value;
+    pickFolder.disabled = pickFile.disabled = saving || !online;
+    button.disabled = saving || !online || !files.length;
+  }
+
+  function select(input) {
+    const chosen = [...input.files];
+    input.value = '';
+    if (!chosen.length) return;
+    files = chosen.map(file => ({
+      path: file.webkitRelativePath ? file.webkitRelativePath.split('/').slice(1).join('/') : file.name,
+      file,
+    }));
+    result.textContent = '';
+    if (!files.some(file => file.path === 'SKILL.md')) {
+      result.dataset.error = 'true';
+      result.textContent = 'В корне выбранного скилла нужен файл SKILL.md.';
+      files = [];
+    } else if (files.length > 2048 || files.reduce((size, entry) => size + entry.file.size, 0) > 16 * 1024 * 1024) {
+      result.dataset.error = 'true';
+      result.textContent = 'Скилл может содержать до 2048 файлов общим объёмом до 16 МБ.';
+      files = [];
+    }
+    selection.textContent = files.length
+      ? chosen[0].webkitRelativePath.split('/')[0] || chosen[0].name
+      : emptySelection;
+    updateControls();
   }
 
   async function refresh() {
@@ -36,24 +66,33 @@ export function createSkills() {
     }
   }
 
-  path.addEventListener('input', updateControls);
+  pickFolder.addEventListener('click', () => folder.click());
+  pickFile.addEventListener('click', () => file.click());
+  folder.addEventListener('change', () => select(folder));
+  file.addEventListener('change', () => select(file));
+
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (saving || !online || !path.value) return;
+    if (saving || !online || !files.length) return;
     saving = true;
     result.dataset.error = 'false';
-    result.textContent = 'Установка…';
+    result.textContent = 'Загрузка…';
     updateControls();
     try {
-      const source = path.value;
-      const response = await fetch('/skills', {
+      const payload = [];
+      for (const { path, file } of files) {
+        payload.push({ path, data: await readFile(file) });
+      }
+      const response = await fetch('/skills/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: source.startsWith('"') && source.endsWith('"') ? source.slice(1, -1) : source }),
+        body: JSON.stringify(payload),
       });
+      if (response.status === 413) throw new Error('Слишком большой объём загрузки.');
       if (!response.ok) throw new Error(await response.text());
       const skill = await response.json();
-      path.value = '';
+      files = [];
+      selection.textContent = emptySelection;
       result.textContent = `Скилл «${skill.name}» установлен.`;
       await refresh();
     } catch (error) {
@@ -74,4 +113,13 @@ export function createSkills() {
       updateControls();
     },
   };
+}
+
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(',') + 1));
+    reader.onerror = () => reject(new Error(`Не удалось прочитать файл «${file.name}».`));
+    reader.readAsDataURL(file);
+  });
 }

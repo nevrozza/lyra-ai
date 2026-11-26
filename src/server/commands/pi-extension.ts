@@ -6,7 +6,7 @@ export default function (pi) {
         name: "run_command",
         label: "Run project command",
         description: `Request a non-interactive ${shell} command in the project root. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
-        promptSnippet: "Run a project command such as a test or build with approval in Lyra.",
+        promptSnippet: "Run a project command such as a test or build through Lyra.",
         parameters: Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }) }),
         executionMode: "sequential",
         async execute(_id, { command }, signal, _onUpdate, ctx) {
