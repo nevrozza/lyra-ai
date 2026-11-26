@@ -64,6 +64,21 @@ h2 { font-size: .96rem; font-weight: 650; }
 #agents-content { width: 100%; resize: vertical; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: .83rem/1.5 var(--mono); }
 #agents-content:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #agents-result { overflow-wrap: anywhere; }
+.projects-body, .project-form, #project-chats, #project-conversation { display: grid; gap: 9px; }
+.project-controls { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; font-size: .85rem; }
+.project-controls select { min-width: 0; max-width: 100%; }
+.projects-body :is(input[type="text"], select, textarea) { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .83rem; }
+.projects-body :is(input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.projects-body textarea { width: 100%; resize: vertical; font-family: var(--mono); }
+.project-form { padding-top: 8px; border-top: 1px solid var(--line); font-size: .84rem; }
+.project-parallel { padding-top: 7px; border-top: 1px solid var(--line); }
+#project-chat-workspace, #project-message { overflow-wrap: anywhere; }
+#project-message:empty, #project-messages:empty { display: none; }
+#project-message[data-error="true"] { color: #f0ac9c; }
+#project-messages { display: grid; gap: 7px; max-height: 320px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+#project-messages li { padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
+#project-messages strong { font-size: .8rem; color: var(--accent); }
+#project-messages p { margin-top: 4px; font-size: .85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command-panel { display: grid; gap: 8px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
 .command-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; font-size: .85rem; }
 .command-settings select { padding: 6px 8px; color: inherit; background: #111613; border: 1px solid var(--line); border-radius: 7px; font: inherit; }

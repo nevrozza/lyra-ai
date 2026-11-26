@@ -164,7 +164,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       isOperationModel ? session.run?.model_action : undefined;
     const benchmarking = action === 'benchmark' || action === 'benchmark-pi' ||
       (isOperationModel && session.run?.benchmark_running);
-    const delegated = name != null && name === session.run?.delegated_model;
+    const delegated = name != null &&
+      Object.values(session.run?.delegations ?? {}).some(task => task.model === name);
     const aiAction = delegated && !session.closed ? 'request' : session.run?.ai_model_actions?.[name];
     const expiry = Date.parse(loaded?.expires_at);
     const remaining = expiry - Date.now();
@@ -179,7 +180,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       label = 'Бенчмарк';
     } else if (delegated) {
       mode = 'running';
-      label = 'Запрос Codex';
+      label = 'Обработка запроса';
     } else if (models == null) {
       mode = 'unknown';
       label = models === null ? 'Нет связи' : 'Проверяем…';

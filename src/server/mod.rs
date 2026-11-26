@@ -5,6 +5,7 @@ mod commands;
 mod mcp;
 mod models;
 mod pi;
+mod projects;
 mod runtime;
 mod sessions;
 mod skills;
@@ -37,6 +38,8 @@ struct App {
     commands: std::sync::Mutex<commands::State>,
     skills: skills::Store,
     agents_file: PathBuf,
+    projects: projects::Store,
+    command_slot: Mutex<()>,
 }
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
@@ -75,6 +78,10 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         )),
         skills: skills::Store::new(crate::data_directory().join("skills")),
         agents_file: std::path::absolute(crate::data_directory().join("AGENTS.md"))?,
+        projects: projects::Store::new(std::path::absolute(
+            crate::data_directory().join("projects"),
+        )?),
+        command_slot: Mutex::default(),
     });
     if let Some(names) = catalog {
         runtime::register_benchmarks(app.clone(), names).await;
@@ -87,6 +94,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .merge(commands::routes())
         .merge(skills::routes())
         .merge(agents::routes())
+        .merge(projects::routes())
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 

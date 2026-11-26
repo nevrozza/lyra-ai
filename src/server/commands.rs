@@ -208,6 +208,7 @@ pub(super) async fn run(trace: &Call, workspace: &Path, command: &str) -> Result
         );
     }
     let app = trace.app();
+    let _slot = app.command_slot.lock().await;
     let (preapproved, mut actions) = {
         let mut state = app.commands.lock().expect("command state lock");
         if state.active.is_some() {
@@ -429,6 +430,8 @@ mod tests {
             commands: std::sync::Mutex::new(State::new(mode_path.clone())),
             skills: super::super::skills::Store::new(workspace.path().join("skills")),
             agents_file: workspace.path().join("AGENTS.md"),
+            projects: super::super::projects::Store::new(workspace.path().join("projects")),
+            command_slot: Default::default(),
         });
         let trace = Call::start(app.clone(), "run_pi", None, "", None);
         let shell = "printf approved";

@@ -14,7 +14,7 @@ use tokio::{
 use crate::context;
 
 use super::{
-    commands,
+    commands, projects,
     sessions::{Call, Kind},
 };
 
@@ -26,6 +26,8 @@ pub(super) struct Task<'a> {
     pub(super) allow_commands: bool,
     pub(super) skills: &'a [PathBuf],
     pub(super) agents_file: &'a Path,
+    pub(super) project: Option<&'a projects::Task>,
+    pub(super) search_skill: Option<(&'a str, &'a Path)>,
 }
 
 pub(super) struct Reply {
@@ -117,6 +119,28 @@ pub(super) async fn run(
     limit: u32,
     task: Option<Task<'_>>,
 ) -> Result<Reply, String> {
+    let project = task.as_ref().and_then(|task| task.project);
+    let project_run = project
+        .map(|_| TemporaryDirectory::new("project", nonce()))
+        .transpose()
+        .map_err(|error| format!("Could not prepare Pi project: {error}"))?;
+    let runtime_config = match &project_run {
+        Some(directory) => {
+            let target = directory.0.join("config");
+            tokio::fs::create_dir(&target)
+                .await
+                .map_err(|error| error.to_string())?;
+            match tokio::fs::copy(config.join("settings.json"), target.join("settings.json")).await
+            {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Could not copy Lyra Pi settings: {error}")),
+            }
+            Some(target)
+        }
+        None => None,
+    };
+    let config = runtime_config.as_deref().unwrap_or(config);
     let source = model.to_owned();
     let backend =
         tokio::task::spawn_blocking(move || context::backend_model(&source, context_tokens))
@@ -131,7 +155,16 @@ pub(super) async fn run(
         .filter(|task| task.allow_commands)
         .map(|task| task.trace);
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
-    let agents_file = if let Some(task) = &task {
+    let project_instructions;
+    let agents_file = if let (Some(project), Some(directory), Some(task)) =
+        (project, &project_run, &task)
+    {
+        project_instructions = directory.0.join("AGENTS.md");
+        write_project_instructions(&project_instructions, project, task)
+            .await
+            .map_err(|error| format!("Could not load project instructions: {error}"))?;
+        Some(project_instructions.as_path())
+    } else if let Some(task) = &task {
         match tokio::fs::metadata(task.agents_file).await {
             Ok(metadata) if metadata.is_file() => (metadata.len() > 0).then_some(task.agents_file),
             Ok(_) => return Err("Lyra AGENTS.md must be a file".into()),
@@ -141,6 +174,12 @@ pub(super) async fn run(
     } else {
         None
     };
+    let session_file = project.and_then(|project| project.session_file.as_deref());
+    if let Some(file) = session_file {
+        tokio::fs::create_dir_all(file.parent().expect("Pi session directory"))
+            .await
+            .map_err(|error| format!("Could not prepare Pi session: {error}"))?;
+    }
     let command_directory = commands
         .map(|_| TemporaryDirectory::new("commands", nonce()))
         .transpose()
@@ -160,6 +199,7 @@ pub(super) async fn run(
         extension.as_deref(),
         skills,
         agents_file,
+        session_file,
     )
     .map_err(|error| format!("Could not start Pi: {error}"))?;
     let log = |kind, title: &str, text: &str, status| {
@@ -408,6 +448,54 @@ pub(super) async fn run(
     })
 }
 
+async fn write_project_instructions(
+    path: &Path,
+    project: &projects::Task,
+    task: &Task<'_>,
+) -> io::Result<()> {
+    use std::fmt::Write;
+
+    async fn read(path: &Path) -> io::Result<String> {
+        match tokio::fs::read_to_string(path).await {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+            result => result.map_err(|error| {
+                io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            }),
+        }
+    }
+
+    let mut text = read(task.agents_file).await?;
+    let _ = write!(
+        text,
+        "\n\n# Lyra project: {}\n\nWorking directory: {}\nRegistered project folders:\n",
+        project.project.name,
+        project.workspace.display()
+    );
+    for folder in &project.project.folders {
+        let _ = writeln!(text, "- {}", folder.display());
+    }
+    for folder in &project.project.folders {
+        let instructions = read(&folder.join("AGENTS.md")).await?;
+        if !instructions.trim().is_empty() {
+            let _ = write!(
+                text,
+                "\n## AGENTS.md for {}\nApply these instructions when working in this folder.\n\n{instructions}\n",
+                folder.display()
+            );
+        }
+    }
+    if let Some((skill, manifest)) = task.search_skill {
+        let instructions = tokio::fs::read_to_string(manifest).await?;
+        let directory = manifest.parent().expect("search skill directory");
+        let _ = write!(
+            text,
+            "\n## Project search: {skill}\n\nUse this skill's workflow for project search before using built-in search. Resolve skill resources relative to {}. If its commands are unavailable or denied, report that and use the available search tools where appropriate.\n\n{instructions}\n",
+            directory.display()
+        );
+    }
+    tokio::fs::write(path, text).await
+}
+
 async fn rpc_send(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
     stdin
         .write_all(format!("{value}\n").as_bytes())
@@ -448,6 +536,7 @@ fn spawn_pi(
     extension: Option<&Path>,
     skills: &[PathBuf],
     agents_file: Option<&Path>,
+    session_file: Option<&Path>,
 ) -> io::Result<tokio::process::Child> {
     let spawn = |program: &str| {
         let mut command = Command::new(program);
@@ -459,7 +548,6 @@ fn spawn_pi(
             model,
             "--mode",
             if extension.is_some() { "rpc" } else { "json" },
-            "--no-session",
             "--no-extensions",
             "--no-skills",
             "--no-context-files",
@@ -470,11 +558,16 @@ fn spawn_pi(
                 "read,grep,find,ls,write,edit"
             },
         ]);
+        if let Some(path) = session_file {
+            command.arg("--session").arg(path);
+        } else {
+            command.arg("--no-session");
+        }
+        if extension.is_some() || session_file.is_some() {
+            command.arg("--no-prompt-templates");
+        }
         if let Some(path) = extension {
-            command
-                .arg("--no-prompt-templates")
-                .arg("--extension")
-                .arg(path);
+            command.arg("--extension").arg(path);
         }
         if let Some(path) = agents_file {
             command.arg("--append-system-prompt").arg(path);

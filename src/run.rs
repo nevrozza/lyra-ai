@@ -18,6 +18,9 @@ pub struct Snapshot {
     model: Option<String>,
     closed: bool,
     delegated_model: Option<String>,
+    delegations: BTreeMap<u64, Delegation>,
+    #[serde(skip)]
+    next_delegation: u64,
     ai_model_actions: BTreeMap<String, AiAction>,
     pinned: Option<bool>,
     model_action: Option<ModelAction>,
@@ -29,6 +32,15 @@ pub struct Snapshot {
     metrics_revision: u64,
     sessions_revision: u64,
     commands_revision: u64,
+    projects_revision: u64,
+}
+
+#[derive(Serialize)]
+struct Delegation {
+    model: String,
+    project_session_id: Option<u64>,
+    #[serde(skip)]
+    project: bool,
 }
 
 impl Snapshot {
@@ -37,6 +49,8 @@ impl Snapshot {
             model,
             closed: false,
             delegated_model: None,
+            delegations: BTreeMap::new(),
+            next_delegation: 0,
             ai_model_actions: BTreeMap::new(),
             pinned: None,
             model_action: None,
@@ -48,6 +62,7 @@ impl Snapshot {
             metrics_revision: 0,
             sessions_revision: 0,
             commands_revision: 0,
+            projects_revision: 0,
         }
     }
 
@@ -80,17 +95,54 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_delegation(&mut self, model: String) -> bool {
-        if self.busy() {
-            return false;
+    pub fn begin_delegation(
+        &mut self,
+        model: &str,
+        project: Option<(u8, Option<u64>)>,
+    ) -> Option<u64> {
+        let project_session_id = project.and_then(|(_, session)| session);
+        if self.closed || self.model_action.is_some() || self.benchmark_running {
+            return None;
         }
-        self.delegated_model = Some(model);
-        true
+        if let Some((limit, _)) = project {
+            if self.delegations.len() >= usize::from(limit)
+                || self.delegations.values().any(|active| {
+                    !active.project
+                        || project_session_id.is_some()
+                            && active.project_session_id == project_session_id
+                })
+            {
+                return None;
+            }
+        } else if !self.delegations.is_empty() {
+            return None;
+        }
+        self.next_delegation += 1;
+        self.delegated_model.get_or_insert_with(|| model.to_owned());
+        self.delegations.insert(
+            self.next_delegation,
+            Delegation {
+                model: model.to_owned(),
+                project_session_id,
+                project: project.is_some(),
+            },
+        );
+        Some(self.next_delegation)
     }
 
-    pub fn finish_delegation(&mut self, succeeded: bool) {
-        if let Some(model) = self.delegated_model.take().filter(|_| succeeded) {
-            self.record_model_action(model, Some(AiAction::Request));
+    pub fn finish_delegation(&mut self, id: u64, succeeded: bool) {
+        if let Some(active) = self.delegations.remove(&id) {
+            self.delegated_model = self
+                .delegations
+                .values()
+                .next()
+                .map(|active| active.model.clone());
+            if active.project_session_id.is_some() {
+                self.projects_changed();
+            }
+            if succeeded {
+                self.record_model_action(active.model, Some(AiAction::Request));
+            }
         }
         self.metrics_revision += 1;
     }
@@ -175,5 +227,51 @@ impl Snapshot {
 
     pub fn commands_changed(&mut self) {
         self.commands_revision += 1;
+    }
+
+    pub fn projects_changed(&mut self) {
+        self.projects_revision += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Snapshot;
+
+    #[test]
+    fn project_chats_can_use_separate_agent_slots_without_overlapping_one_session() {
+        let mut snapshot = Snapshot::new(None);
+        let first = snapshot
+            .begin_delegation("one", Some((2, Some(10))))
+            .unwrap();
+        assert!(
+            snapshot
+                .begin_delegation("two", Some((2, Some(10))))
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .begin_delegation("two", Some((1, Some(20))))
+                .is_none()
+        );
+        assert!(snapshot.begin_delegation("two", None).is_none());
+        let second = snapshot
+            .begin_delegation("two", Some((2, Some(20))))
+            .unwrap();
+        assert!(
+            snapshot
+                .begin_delegation("three", Some((2, Some(30))))
+                .is_none()
+        );
+
+        snapshot.finish_delegation(first, true);
+        assert!(snapshot.busy());
+        assert_eq!(snapshot.delegated_model.as_deref(), Some("two"));
+        let resumed = snapshot
+            .begin_delegation("one", Some((2, Some(10))))
+            .unwrap();
+        snapshot.finish_delegation(second, false);
+        snapshot.finish_delegation(resumed, true);
+        assert!(!snapshot.busy());
     }
 }

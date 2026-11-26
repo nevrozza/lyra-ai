@@ -91,6 +91,65 @@
       </div>
 
       <div class="activity">
+        <section class="panel" aria-labelledby="projects-title">
+          <header class="panel-header"><h2 id="projects-title">Проекты</h2></header>
+          <div class="panel-body projects-body">
+            <div class="project-controls">
+              <label for="project-select">Проект</label>
+              <select id="project-select" disabled></select>
+              <button id="new-project" class="unload" type="button" disabled>Новый проект</button>
+              <button id="edit-project" class="unload" type="button" disabled>Настройки</button>
+            </div>
+            <form id="project-form" class="project-form" hidden>
+              <label for="project-name">Название</label>
+              <input id="project-name" type="text" maxlength="120" required>
+              <label for="project-folders">Абсолютные пути к папкам, по одному на строку</label>
+              <textarea id="project-folders" rows="3" required></textarea>
+              <label for="project-skill">Скилл для поиска</label>
+              <select id="project-skill"></select>
+              <div class="project-controls">
+                <button class="unload" type="submit">Сохранить проект</button>
+                <button id="cancel-project" class="unload" type="button">Отмена</button>
+              </div>
+            </form>
+            <div id="project-chats" hidden>
+              <div class="project-controls">
+                <label for="project-chat-select">Чат</label>
+                <select id="project-chat-select"></select>
+                <button id="new-project-chat" class="unload" type="button">Новый чат</button>
+              </div>
+              <form id="project-chat-form" class="project-form" hidden>
+                <label for="project-chat-name">Название чата</label>
+                <input id="project-chat-name" type="text" maxlength="120" required>
+                <label for="project-chat-folder">Рабочая папка</label>
+                <select id="project-chat-folder" required></select>
+                <div class="project-controls">
+                  <button class="unload" type="submit">Создать чат</button>
+                  <button id="cancel-project-chat" class="unload" type="button">Отмена</button>
+                </div>
+              </form>
+              <div id="project-conversation" hidden>
+                <p id="project-chat-workspace" class="secondary"></p>
+                <ol id="project-messages" aria-label="Сообщения чата"></ol>
+                <form id="project-prompt-form" class="project-form">
+                  <label for="project-prompt">Сообщение для Pi <span id="project-chat-model" class="secondary"></span></label>
+                  <textarea id="project-prompt" rows="3" required></textarea>
+                  <div class="project-controls">
+                    <button id="send-project-prompt" class="unload" type="submit">Отправить</button>
+                    <label class="pin"><input id="project-commands" type="checkbox">Разрешить запросы команд</label>
+                  </div>
+                </form>
+              </div>
+            </div>
+            <div class="project-controls project-parallel">
+              <label for="project-parallel">Одновременных агентов</label>
+              <select id="project-parallel" disabled>
+                <option>1</option><option>2</option><option>3</option><option>4</option>
+              </select>
+            </div>
+            <p id="project-message" class="secondary" role="status"></p>
+          </div>
+        </section>
         <section class="panel" aria-labelledby="sessions-title">
           <header class="panel-header"><h2 id="sessions-title">MCP-вызовы</h2></header>
           <div class="panel-body sessions-body">
