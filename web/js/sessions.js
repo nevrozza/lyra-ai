@@ -2,7 +2,7 @@ import { duration, element, get } from './ui.js';
 
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const kinds = { mcp: 'MCP', pi: 'Pi', tool: 'Инструмент Pi', thinking: 'Thinking', answer: 'Ответ' };
-const statuses = { running: 'Начато', ok: 'Готово', error: 'Ошибка' };
+const statuses = { waiting: 'Ждёт подтверждения', running: 'Начато', ok: 'Готово', error: 'Ошибка' };
 
 export function createSessions() {
   const list = get('session-list');

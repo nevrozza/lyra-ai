@@ -1,4 +1,5 @@
 import { createSessions } from './js/sessions.js';
+import { createCommands } from './js/commands.js';
 import { initLayout } from './js/layout.js';
 import { createModels } from './js/models.js';
 import { createTelemetry } from './js/telemetry.js';
@@ -16,6 +17,7 @@ const models = createModels(session, {
   requestMetrics: () => telemetry.scheduleMetrics(0),
 });
 const sessions = createSessions();
+const commands = createCommands();
 const telemetry = createTelemetry(session, {
   beginSample: models.beginMemorySample,
   onSample(sample) {
@@ -39,6 +41,7 @@ function connectionState(value, label) {
 function receiveRun(next) {
   const wasChanging = models.isMemoryChanging();
   const sessionsUpdated = session.run?.sessions_revision !== next.sessions_revision;
+  const commandsUpdated = session.run?.commands_revision !== next.commands_revision;
   const benchmarkUpdated = session.run?.benchmark_revision !== next.benchmark_revision;
   const metricsUpdated = session.run?.metrics_revision !== next.metrics_revision;
   const delegationChanged = session.run?.delegated_model !== next.delegated_model;
@@ -51,11 +54,13 @@ function receiveRun(next) {
   }
   updateControls();
   if (sessionsUpdated) sessions.refresh();
+  if (commandsUpdated) commands.refresh();
   models.render(session.metrics?.models, benchmarkUpdated);
 }
 
 function showClosed() {
   session.closed = true;
+  commands.clear();
   telemetry.showClosed();
   connectionState('closed', 'Остановлена');
   models.showClosed();
@@ -65,7 +70,10 @@ function showClosed() {
 function connect() {
   stream = new EventSource('/events');
   stream.onopen = () => {
-    if (!session.closed) connectionState('online', 'Подключено');
+    if (!session.closed) {
+      connectionState('online', 'Подключено');
+      commands.refresh();
+    }
   };
   stream.onerror = () => {
     if (!session.closed) connectionState('waiting', 'Переподключение');

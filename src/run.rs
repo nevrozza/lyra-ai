@@ -28,6 +28,7 @@ pub struct Snapshot {
     benchmark_revision: u64,
     metrics_revision: u64,
     sessions_revision: u64,
+    commands_revision: u64,
 }
 
 impl Snapshot {
@@ -46,6 +47,7 @@ impl Snapshot {
             benchmark_revision: 0,
             metrics_revision: 0,
             sessions_revision: 0,
+            commands_revision: 0,
         }
     }
 
@@ -169,5 +171,9 @@ impl Snapshot {
 
     pub fn sessions_changed(&mut self) {
         self.sessions_revision += 1;
+    }
+
+    pub fn commands_changed(&mut self) {
+        self.commands_revision += 1;
     }
 }

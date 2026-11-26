@@ -1,21 +1,31 @@
 use std::{
+    collections::HashSet,
     io,
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
+    process::{ChildStdin, Command},
 };
 
 use crate::context;
 
-use super::sessions::{Call, Kind};
+use super::{
+    commands,
+    sessions::{Call, Kind},
+};
 
 const ANSWER_LIMIT: usize = 8_000;
+const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
+
+pub(super) enum Mode<'a> {
+    Files(Option<&'a Call>),
+    Commands(&'a Call),
+}
 
 pub(super) struct Reply {
     pub(super) text: String,
@@ -26,21 +36,19 @@ pub(super) struct Reply {
 }
 
 pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bool, String> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("lyra-pi-check-{}-{nonce}", std::process::id()));
-    std::fs::create_dir(&path)
+    let nonce = nonce();
+    let directory = TemporaryDirectory::new("check", nonce)
         .map_err(|error| format!("Не удалось создать папку проверки Pi: {error}"))?;
-    let directory = CheckDirectory(path);
     let workspace = directory.0.join("workspace");
     tokio::fs::create_dir(&workspace)
         .await
         .map_err(|error| format!("Не удалось подготовить папку проверки Pi: {error}"))?;
-    tokio::fs::write(workspace.join("input.txt"), format!("id={nonce}\nstatus=pending"))
-        .await
-        .map_err(|error| format!("Не удалось создать тестовый файл Pi: {error}"))?;
+    tokio::fs::write(
+        workspace.join("input.txt"),
+        format!("id={nonce}\nstatus=pending"),
+    )
+    .await
+    .map_err(|error| format!("Не удалось создать тестовый файл Pi: {error}"))?;
     let config = directory.0.join("config");
     let reply = tokio::time::timeout(
         Duration::from_secs(120),
@@ -51,7 +59,7 @@ pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bo
             &config,
             context_tokens,
             2048,
-            None,
+            Mode::Files(None),
         ),
     )
     .await
@@ -65,17 +73,35 @@ pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bo
     let result = match tokio::fs::read_to_string(workspace.join("result.txt")).await {
         Ok(result) => result,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("Не удалось прочитать результат проверки Pi: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "Не удалось прочитать результат проверки Pi: {error}"
+            ));
+        }
     };
-    Ok(result
-        .trim_end_matches(['\r', '\n'])
-        .replace("\r\n", "\n")
+    Ok(result.trim_end_matches(['\r', '\n']).replace("\r\n", "\n")
         == format!("id={nonce}\nstatus=passed"))
 }
 
-struct CheckDirectory(PathBuf);
+fn nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
 
-impl Drop for CheckDirectory {
+struct TemporaryDirectory(PathBuf);
+
+impl TemporaryDirectory {
+    fn new(kind: &str, nonce: u128) -> io::Result<Self> {
+        let path =
+            std::env::temp_dir().join(format!("lyra-pi-{kind}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TemporaryDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
@@ -88,7 +114,7 @@ pub(super) async fn run(
     config: &Path,
     context_tokens: Option<u32>,
     limit: u32,
-    trace: Option<&Call>,
+    mode: Mode<'_>,
 ) -> Result<Reply, String> {
     let source = model.to_owned();
     let backend =
@@ -98,7 +124,23 @@ pub(super) async fn run(
     configure_pi(config, &backend, model, context_tokens, limit)
         .await
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
-    let mut child = spawn_pi(workspace, &backend, config)
+    let (trace, commands) = match mode {
+        Mode::Files(trace) => (trace, None),
+        Mode::Commands(trace) => (Some(trace), Some(trace)),
+    };
+    let command_directory = commands
+        .map(|_| TemporaryDirectory::new("commands", nonce()))
+        .transpose()
+        .map_err(|error| format!("Could not prepare Pi commands: {error}"))?;
+    let extension = command_directory
+        .as_ref()
+        .map(|dir| dir.0.join("commands.ts"));
+    if let Some(path) = &extension {
+        tokio::fs::write(path, COMMAND_EXTENSION)
+            .await
+            .map_err(|error| format!("Could not prepare Pi command extension: {error}"))?;
+    }
+    let mut child = spawn_pi(workspace, &backend, config, extension.as_deref())
         .map_err(|error| format!("Could not start Pi: {error}"))?;
     let log = |kind, title: &str, text: &str, status| {
         if let Some(trace) = trace {
@@ -111,9 +153,16 @@ pub(super) async fn run(
         &workspace.display().to_string(),
         Some("running"),
     );
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let prompt = prompt.to_owned();
-    let input = tokio::spawn(async move { stdin.write_all(prompt.as_bytes()).await });
+    let mut stdin = child.stdin.take();
+    let input = if commands.is_none() {
+        let mut stdin = stdin.take().expect("piped stdin");
+        let prompt = prompt.to_owned();
+        Some(tokio::spawn(async move {
+            stdin.write_all(prompt.as_bytes()).await
+        }))
+    } else {
+        None
+    };
     let stderr = child.stderr.take().expect("piped stderr");
     let diagnostics = tokio::spawn(collect_diagnostics(stderr));
     let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
@@ -124,16 +173,86 @@ pub(super) async fn run(
     let mut stop_reason = None;
     let mut text_clipped = false;
     let mut successful_file_tools = [false; 3];
+    let mut repeat = HashSet::new();
+    let mut ready = commands.is_none();
+    let mut legacy_rpc = false;
+    let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|error| format!("Could not read Pi output: {error}"))?
-    {
+    loop {
+        let line = if ready {
+            lines.next_line().await
+        } else {
+            tokio::time::timeout_at(startup_deadline, lines.next_line()).await
+                .map_err(|_| "Pi command extension did not start. Check that Pi supports RPC extensions.")?
+        }.map_err(|error| format!("Could not read Pi output: {error}"))?;
+        let Some(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         match event["type"].as_str() {
+            Some("extension_ui_request") if commands.is_some() => {
+                let stdin = stdin.as_mut().expect("Pi RPC input");
+                match event["method"].as_str() {
+                    Some("notify")
+                        if !ready
+                            && matches!(
+                                event["message"].as_str(),
+                                Some("lyra:commands-ready" | "lyra:commands-ready-legacy")
+                            ) =>
+                    {
+                        legacy_rpc = event["message"] == "lyra:commands-ready-legacy";
+                        rpc_send(
+                            stdin,
+                            json!({"id": "task", "type": "prompt", "message": prompt}),
+                        )
+                        .await?;
+                        ready = true;
+                    }
+                    Some("input") if ready && event["title"] == "lyra:run-command" => {
+                        let id = event["id"]
+                            .as_str()
+                            .ok_or("Missing Pi command request ID")?;
+                        let command = event["placeholder"].as_str().ok_or("Missing Pi command")?;
+                        let result = commands::run(
+                            commands.expect("command trace"),
+                            workspace,
+                            command,
+                            &mut repeat,
+                        )
+                        .await;
+                        let value =
+                            serde_json::to_string(&result).map_err(|error| error.to_string())?;
+                        rpc_send(
+                            stdin,
+                            json!({"type": "extension_ui_response", "id": id, "value": value}),
+                        )
+                        .await?;
+                    }
+                    _ => {}
+                }
+            }
+            Some("response") if event["id"] == "task" && event["success"] == false => {
+                return Err(format!(
+                    "Pi rejected the task: {}",
+                    event["error"].as_str().unwrap_or("unknown error")
+                ));
+            }
+            Some("agent_end") if legacy_rpc => {
+                // Pi 0.x checks extension shutdown requests after handling an RPC command.
+                rpc_send(
+                    stdin.as_mut().expect("Pi RPC input"),
+                    json!({"type": "get_state"}),
+                )
+                .await?;
+            }
+            Some("extension_error") if commands.is_some() => {
+                return Err(format!(
+                    "Pi command extension: {}",
+                    event["error"].as_str().unwrap_or("unknown error")
+                ));
+            }
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 text_deltas.clear();
                 delta_bytes = 0;
@@ -153,15 +272,23 @@ pub(super) async fn run(
             }
             Some("tool_execution_start") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
+                if commands.is_some() && name == "run_command" {
+                    continue;
+                }
                 let path = event["args"]["path"].as_str().unwrap_or_default();
                 log(Kind::Tool, name, path, Some("running"));
             }
             Some("tool_execution_end") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
+                if commands.is_some() && name == "run_command" {
+                    continue;
+                }
                 let status = if event["isError"] == true {
                     "error"
                 } else {
-                    if let Some(index) = ["read", "write", "edit"].iter().position(|tool| *tool == name)
+                    if let Some(index) = ["read", "write", "edit"]
+                        .iter()
+                        .position(|tool| *tool == name)
                     {
                         successful_file_tools[index] = true;
                     }
@@ -210,11 +337,19 @@ pub(super) async fn run(
 
     let status = child.wait().await.map_err(|error| error.to_string())?;
     let diagnostics = diagnostics.await.unwrap_or_default();
+    if !ready {
+        return Err(format!(
+            "Pi command extension did not start: {}",
+            diagnostics.trim()
+        ));
+    }
     if status.success() && last_error.is_none() {
-        input
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| format!("Could not send task to Pi: {error}"))?;
+        if let Some(input) = input {
+            input
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("Could not send task to Pi: {error}"))?;
+        }
     } else {
         let reason = last_error
             .as_deref()
@@ -258,6 +393,13 @@ pub(super) async fn run(
     })
 }
 
+async fn rpc_send(stdin: &mut ChildStdin, value: Value) -> Result<(), String> {
+    stdin
+        .write_all(format!("{value}\n").as_bytes())
+        .await
+        .map_err(|error| format!("Could not send RPC message to Pi: {error}"))
+}
+
 async fn configure_pi(
     directory: &Path,
     model: &str,
@@ -288,25 +430,36 @@ fn spawn_pi(
     workspace: &Path,
     model: &str,
     pi_agent_dir: &Path,
+    extension: Option<&Path>,
 ) -> io::Result<tokio::process::Child> {
     let spawn = |program: &str| {
         let mut command = Command::new(program);
         command.env("PI_CODING_AGENT_DIR", pi_agent_dir);
+        command.args([
+            "--provider",
+            "ollama",
+            "--model",
+            model,
+            "--mode",
+            if extension.is_some() { "rpc" } else { "json" },
+            "--no-session",
+            "--no-extensions",
+            "--no-skills",
+            "--no-context-files",
+            "--tools",
+            if extension.is_some() {
+                "read,grep,find,ls,write,edit,run_command"
+            } else {
+                "read,grep,find,ls,write,edit"
+            },
+        ]);
+        if let Some(path) = extension {
+            command
+                .arg("--no-prompt-templates")
+                .arg("--extension")
+                .arg(path);
+        }
         command
-            .args([
-                "--provider",
-                "ollama",
-                "--model",
-                model,
-                "--mode",
-                "json",
-                "--no-session",
-                "--no-extensions",
-                "--no-skills",
-                "--no-context-files",
-                "--tools",
-                "read,grep,find,ls,write,edit",
-            ])
             .current_dir(workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

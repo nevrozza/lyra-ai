@@ -158,6 +158,10 @@ pub(super) struct Call {
 }
 
 impl Call {
+    pub(super) fn app(&self) -> &App {
+        &self.app
+    }
+
     pub(super) fn start(
         app: Arc<App>,
         tool: &str,

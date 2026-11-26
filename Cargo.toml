@@ -16,5 +16,8 @@ ureq = { version = "2.12", default-features = false, features = ["json"] }
 [build-dependencies]
 embed-resource = "3.0.11"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

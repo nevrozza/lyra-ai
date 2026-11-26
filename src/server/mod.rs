@@ -1,4 +1,5 @@
 mod assets;
+mod commands;
 mod mcp;
 mod models;
 mod pi;
@@ -30,6 +31,7 @@ struct App {
     pi_agent_dir: Option<PathBuf>,
     benchmarks: benchmark::Store,
     sessions: std::sync::Mutex<sessions::History>,
+    commands: std::sync::Mutex<commands::State>,
 }
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
@@ -62,6 +64,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         pi_agent_dir: options.pi_agent_dir,
         benchmarks: benchmark::Store::new(options.benchmark_file),
         sessions: std::sync::Mutex::default(),
+        commands: std::sync::Mutex::default(),
     });
     if let Some(names) = catalog {
         runtime::register_benchmarks(app.clone(), names).await;
@@ -71,6 +74,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .merge(models::routes())
         .merge(mcp::routes())
         .merge(sessions::routes())
+        .merge(commands::routes())
         .layer(middleware::from_fn_with_state(app.clone(), local_only))
         .with_state(app.clone());
 

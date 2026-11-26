@@ -51,6 +51,13 @@ button:disabled { color: #aeb9ad; background: #333d34; cursor: default; }
 h2 { font-size: .96rem; font-weight: 650; }
 .panel-body { padding: 17px 19px 20px; }
 .service, .secondary { color: var(--muted); font-size: .83rem; }
+.command-panel { display: grid; gap: 8px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.command-panel h3 { margin: 0; font-size: .9rem; }
+.command-panel p { overflow-wrap: anywhere; }
+.command-panel pre { margin: 0; max-height: 14rem; overflow: auto; padding: 9px; background: #111613; border-radius: 6px; font: .8rem/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+#command-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#command-actions button { white-space: normal; text-align: left; }
+.session-events li[data-status="waiting"] .session-event-status { color: var(--accent); }
 .session-list, .session-events { margin: 0; padding: 0; list-style: none; }
 .session-list { display: grid; gap: 5px; max-height: 235px; overflow: auto; }
 .session-list button { display: grid; gap: 5px; width: 100%; padding: 9px 11px; background: transparent; color: inherit; border: 1px solid var(--line); text-align: left; white-space: normal; overflow-wrap: anywhere; }

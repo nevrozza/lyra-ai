@@ -93,6 +93,18 @@
       <section class="panel activity" aria-labelledby="sessions-title">
         <header class="panel-header"><h2 id="sessions-title">MCP-вызовы</h2></header>
         <div class="panel-body sessions-body">
+          <section id="command-panel" class="command-panel" aria-labelledby="command-title" hidden>
+            <h3 id="command-title" role="status"></h3>
+            <p id="command-workspace" class="secondary"></p>
+            <pre id="command-script" dir="ltr"></pre>
+            <div id="command-actions">
+              <button type="button" class="unload" data-action="allow">Запустить</button>
+              <button type="button" class="unload" data-action="allow_repeat" title="Разрешить повторы точно такой же команды до конца задачи Pi">Разрешить повторы в этой задаче</button>
+              <button type="button" class="unload" data-action="deny">Отклонить</button>
+              <button type="button" class="unload" data-action="stop" hidden>Остановить</button>
+            </div>
+            <p id="command-error" class="secondary" role="alert" hidden></p>
+          </section>
           <p id="session-message" class="secondary">Пока нет вызовов Lyra MCP.</p>
           <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов"></ul>
           <div id="session-detail" hidden>
