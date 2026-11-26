@@ -101,7 +101,9 @@ impl Cache {
                 .iter_mut()
                 .filter(|entry| context::is_alias(&entry.name))
             {
-                if let Some(source) = aliases.get(&entry.name) {
+                if let Some(source) =
+                    context::profile_base(&entry.name).and_then(|base| aliases.get(base))
+                {
                     entry.name = (*source).clone();
                     entry.context_profile = true;
                 }

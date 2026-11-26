@@ -123,10 +123,11 @@ pub(crate) fn chat(
             return Some(entry);
         }
         let tokens = u64::from(context_tokens?);
-        let alias = context::alias(model);
+        let base = context::alias(model);
         entries.iter().find(|entry| {
             entry.context_length == Some(tokens)
-                && (same_model(&entry.name, model) || entry.name == alias)
+                && (same_model(&entry.name, model)
+                    || context::profile_base(&entry.name) == Some(base.as_str()))
         })
     });
     let backend = match resident {
@@ -220,14 +221,16 @@ pub(crate) fn same_model(left: &str, right: &str) -> bool {
 
 fn loaded_backend<'a>(entries: &'a [Model], model: &str, tokens: Option<u32>) -> Option<&'a Model> {
     if let Some(tokens) = tokens {
-        let alias = context::alias(model);
-        let entry = entries.iter().find(|entry| entry.name == alias)?;
-        let tokens = Some(u64::from(tokens));
-        // Ollama can report a smaller effective context than the profile requests.
-        (entry.context_length == tokens
-            || context::estimate(&alias)
-                .is_some_and(|profile| profile.configured_context_tokens == tokens))
-        .then_some(entry)
+        let profile = context::profile(model, tokens);
+        let legacy = context::alias(model);
+        entries
+            .iter()
+            .find(|entry| entry.name == profile)
+            .or_else(|| {
+                entries.iter().find(|entry| {
+                    entry.name == legacy && entry.context_length == Some(u64::from(tokens))
+                })
+            })
     } else {
         entries.iter().find(|entry| same_model(&entry.name, model))
     }
@@ -330,7 +333,9 @@ pub fn change_model(
         return set_keep_alive(&backend, keep_alive, Duration::from_secs(180)).map(|()| true);
     }
     let alias = context::alias(model);
-    let matches_model = |entry: &Model| same_model(&entry.name, model) || entry.name == alias;
+    let matches_model = |entry: &Model| {
+        same_model(&entry.name, model) || context::profile_base(&entry.name) == Some(alias.as_str())
+    };
     let loaded = running_models().ok_or("Ollama недоступна")?;
     let mut targets = loaded
         .iter()

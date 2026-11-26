@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    num::NonZeroU32,
     path::{Component, PathBuf},
     sync::Arc,
     time::Duration,
@@ -13,8 +14,8 @@ use super::{
     invalid, missing, work, write_scope,
 };
 use crate::{
-    ollama,
-    run::{DelegationScope, Snapshot},
+    context, ollama,
+    run::{ContextNotice, DelegationScope, Snapshot},
     server::{ai_settings::AI_SETTINGS, mcp, pi},
 };
 
@@ -25,6 +26,7 @@ mod workflow;
 pub(in crate::server) enum Status {
     Queued,
     Running,
+    ContextFull,
     Completed,
     Failed,
     Cancelled,
@@ -40,6 +42,8 @@ pub(in crate::server) struct Job {
     write_paths: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role: Option<pi::Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) chat_session_id: Option<u64>,
     origin: MessageOrigin,
     status: Status,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,10 +69,14 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-struct Prompt {
-    prompt: String,
-    max_output_tokens: Option<u32>,
-    skills: Option<Vec<String>>,
+pub(in crate::server) struct Prompt {
+    pub(in crate::server) prompt: String,
+    pub(in crate::server) max_output_tokens: Option<u32>,
+    pub(in crate::server) skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::server) context_tokens: Option<NonZeroU32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry_prompt: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -76,6 +84,8 @@ pub(in crate::server) struct JobResult {
     pub text: String,
     pub stop_reason: Option<String>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::server) context: Option<mcp::PiContext>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +105,7 @@ struct NewJob {
     prompt: String,
     folders: Option<Vec<PathBuf>>,
     max_output_tokens: Option<u32>,
+    context_tokens: Option<NonZeroU32>,
     skills: Option<Vec<String>>,
     #[serde(default)]
     parallel: bool,
@@ -128,6 +139,17 @@ pub(in crate::server) struct CompleteExternal {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(in crate::server) struct Retry {
+    project_id: u64,
+    project_session_id: u64,
+    context_tokens: Option<NonZeroU32>,
+    #[serde(default)]
+    fresh_chat: bool,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(in crate::server) struct Query {
     project_id: u64,
     task_ids: Option<Vec<u64>>,
@@ -140,13 +162,18 @@ pub(in crate::server) struct TaskView {
     project_id: u64,
     project_session_id: u64,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_notice: Option<ContextNotice>,
     #[serde(flatten)]
     job: Job,
 }
 
 impl Job {
     pub(super) fn pending(&self) -> bool {
-        matches!(self.status, Status::Queued | Status::Running)
+        matches!(
+            self.status,
+            Status::Queued | Status::Running | Status::ContextFull
+        )
     }
 
     pub(super) fn omit_payload(&mut self) {
@@ -171,8 +198,10 @@ impl Job {
     }
 
     pub(super) fn status_message(&self) -> Option<Message> {
-        if !matches!(self.status, Status::Failed | Status::Blocked)
-            && !(self.external && self.status == Status::Completed)
+        if !matches!(
+            self.status,
+            Status::Failed | Status::Blocked | Status::ContextFull
+        ) && !(self.external && self.status == Status::Completed)
         {
             return None;
         }
@@ -205,6 +234,7 @@ impl TaskView {
             project_id,
             project_session_id: session.id,
             name: session.name.clone(),
+            context_notice: None,
             job: session.job.clone()?,
         })
     }
@@ -269,6 +299,7 @@ pub(in crate::server) async fn enqueue(
                 if task.follow_up.is_some()
                     || task.skills.is_some()
                     || task.max_output_tokens.is_some()
+                    || task.context_tokens.is_some()
                     || task.parallel
                     || task.write_paths.is_some()
                     || task.role.is_some()
@@ -331,25 +362,74 @@ pub(in crate::server) async fn query(app: Arc<App>, input: Query) -> Result<Vec<
     loop {
         state.borrow_and_update();
         let query = input.clone();
-        let tasks = work(app.clone(), move |app| app.projects.query_tasks(&query)).await?;
+        let mut tasks = work(app.clone(), move |app| app.projects.query_tasks(&query)).await?;
         if input.wait_seconds == 0
             || state.borrow().closed()
+            || tasks
+                .iter()
+                .any(|task| task.job.status == Status::ContextFull)
             || tasks.iter().all(|task| !task.job.pending())
             || tokio::time::timeout_at(deadline, state.changed())
                 .await
                 .is_err()
         {
+            let snapshot = state.borrow();
+            for task in tasks
+                .iter_mut()
+                .filter(|task| task.job.status == Status::Running)
+            {
+                task.context_notice = snapshot.project_context_notice(task.project_session_id);
+            }
             return Ok(tasks);
         }
     }
 }
 
+fn context_retry_conflict() -> (StatusCode, String) {
+    (
+        StatusCode::CONFLICT,
+        "Задача не ожидает восстановления контекста.".into(),
+    )
+}
+
+pub(in crate::server) async fn retry(app: Arc<App>, input: Retry) -> Result<TaskView> {
+    work(app, move |app| {
+        if app.task.borrow().closed() {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "Lyra остановлена.".into()));
+        }
+        if let Some(tokens) = input.context_tokens {
+            let model = app
+                .projects
+                .list()?
+                .projects
+                .into_iter()
+                .find(|project| project.id == input.project_id)
+                .ok_or_else(|| missing("Project"))?
+                .session(input.project_session_id)?
+                .job
+                .as_ref()
+                .filter(|job| job.status == Status::ContextFull)
+                .ok_or_else(context_retry_conflict)?
+                .model
+                .clone();
+            context::validate_window(&model, tokens.get(), context::estimate(&model).as_ref())
+                .map_err(invalid)?;
+        }
+        let task = app.projects.retry_task(input)?;
+        app.task.send_modify(Snapshot::projects_changed);
+        Ok(task)
+    })
+    .await
+}
+
 pub(in crate::server) async fn cancel(app: Arc<App>, key: SessionKey) -> Result<()> {
     work(app, move |app| {
-        if !app
-            .projects
-            .set_job(&key, Status::Queued, Status::Cancelled, None)?
-        {
+        if !app.projects.set_job(
+            &key,
+            &[Status::Queued, Status::ContextFull],
+            Status::Cancelled,
+            None,
+        )? {
             return Err((
                 StatusCode::CONFLICT,
                 "Задача уже запущена или завершена.".into(),
@@ -388,12 +468,13 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
                 work(app.clone(), move |app| {
                     app.projects.set_job(
                         &key,
-                        Status::Queued,
+                        &[Status::Queued],
                         Status::Failed,
                         Some(JobResult {
                             text: format!("Не удалось зарезервировать файлы: {error}"),
                             stop_reason: None,
                             truncated: false,
+                            context: None,
                         }),
                     )
                 })
@@ -407,6 +488,12 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
             session_id: task.project_session_id,
             parallel,
             writes: &writes,
+            context_tokens: task
+                .job
+                .input
+                .as_ref()
+                .and_then(|input| input.context_tokens)
+                .map(NonZeroU32::get),
             max_tasks: AI_SETTINGS.parallel_project_tasks,
             max_models: AI_SETTINGS.parallel_project_models,
         };
@@ -424,7 +511,7 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
         let key = task.key();
         let claimed = work(app.clone(), move |app| {
             app.projects
-                .set_job(&key, Status::Queued, Status::Running, None)
+                .set_job(&key, &[Status::Queued], Status::Running, None)
         })
         .await;
         if !matches!(claimed, Ok(true)) {
@@ -443,6 +530,15 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
     let key = task.key();
     let mut candidates = Vec::new();
     let (status, result) = if let Some(mut input) = task.job.input.take() {
+        if let Some(handoff) = input.retry_prompt.take() {
+            input.prompt = match &task.job.workflow {
+                Some(flow) if flow.is_follow_up() => format!(
+                    "{}\n\nContinuation after context overflow. Check the current project files before repeating any work.\n{handoff}",
+                    input.prompt
+                ),
+                _ => handoff,
+            };
+        }
         let reviewing = task
             .job
             .workflow
@@ -507,9 +603,7 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
             let request = mcp::queued_request(
                 &key,
                 task.job.model,
-                input.prompt,
-                input.max_output_tokens,
-                input.skills,
+                input,
                 task.job
                     .workflow
                     .as_ref()
@@ -517,6 +611,7 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
                         flow.role(task.job.role.unwrap_or(pi::Role::Implement))
                     }),
                 writes,
+                task.job.chat_session_id,
             );
             mcp::run_queued(app.clone(), request, task.job.origin, delegation).await
         }
@@ -546,11 +641,79 @@ fn fail_dispatch(app: &App, delegation: u64, text: String) -> (Status, JobResult
             text,
             stop_reason: None,
             truncated: false,
+            context: None,
         },
     )
 }
 
 impl Store {
+    fn retry_task(&self, input: Retry) -> Result<TaskView> {
+        if input.prompt.trim().is_empty() || input.prompt.len() > 32_000 {
+            return Err(invalid(
+                "Укажите краткое состояние и оставшуюся работу до 32000 байт.",
+            ));
+        }
+        self.change(|catalog| {
+            let project = catalog
+                .projects
+                .iter_mut()
+                .find(|project| project.id == input.project_id)
+                .ok_or_else(|| missing("Project"))?;
+            project.ensure_active()?;
+            let session = project
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == input.project_session_id)
+                .ok_or_else(|| missing("Task"))?;
+            session.ensure_active()?;
+            let job = session
+                .job
+                .as_mut()
+                .filter(|job| job.status == Status::ContextFull)
+                .ok_or_else(context_retry_conflict)?;
+            let previous = job
+                .result
+                .as_ref()
+                .and_then(|result| result.context.as_ref())
+                .ok_or_else(|| invalid("Размер предыдущего окна контекста неизвестен."))?
+                .context_tokens;
+            if !input.fresh_chat
+                && !input
+                    .context_tokens
+                    .is_some_and(|tokens| tokens.get() > previous)
+            {
+                return Err(invalid(format!(
+                    "Для продолжения в том же чате укажите контекст больше {previous} токенов."
+                )));
+            }
+            let prompt = job
+                .input
+                .as_mut()
+                .ok_or_else(|| invalid("Исходный запрос задачи недоступен."))?;
+            prompt.context_tokens = input.context_tokens.or_else(|| NonZeroU32::new(previous));
+            prompt.retry_prompt = Some(input.prompt);
+            job.status = Status::Queued;
+            job.result = None;
+
+            let new_chat = input.fresh_chat.then(|| {
+                catalog.next_id += 1;
+                job.chat_session_id = Some(catalog.next_id);
+                Session {
+                    id: catalog.next_id,
+                    name: format!("Продолжение задачи #{}", session.id),
+                    folder: session.folder.clone(),
+                    folders: session.folders.clone(),
+                    archived: false,
+                    job: None,
+                }
+            });
+            let mut view = TaskView::from_session(project.id, session).expect("retry task");
+            view.job.omit_payload();
+            project.sessions.extend(new_chat);
+            Ok(view)
+        })
+    }
+
     fn complete_external(&self, input: CompleteExternal) -> Result<TaskView> {
         if input.summary.trim().is_empty()
             || input.summary.len() > 4_000
@@ -635,6 +798,7 @@ impl Store {
                 text: input.summary,
                 stop_reason: None,
                 truncated: false,
+                context: None,
             });
             Ok(TaskView::from_session(project.id, session).expect("external task"))
         })
@@ -717,6 +881,7 @@ impl Store {
                             text: format!("Задача заблокирована: шаг #{id} не завершился успешно."),
                             stop_reason: None,
                             truncated: false,
+                            context: None,
                         });
                         changed = true;
                     }
@@ -872,6 +1037,7 @@ impl Store {
                         parallel: new.parallel,
                         write_paths,
                         role: new.role,
+                        chat_session_id: None,
                         origin,
                         status: Status::Queued,
                         batch_id: input.batch_id.clone(),
@@ -879,6 +1045,8 @@ impl Store {
                             prompt: new.prompt,
                             max_output_tokens: new.max_output_tokens,
                             skills: new.skills,
+                            context_tokens: new.context_tokens,
+                            retry_prompt: None,
                         }),
                         result: None,
                         workflow,
@@ -970,7 +1138,7 @@ impl Store {
     fn set_job(
         &self,
         key: &SessionKey,
-        expected: Status,
+        expected: &[Status],
         status: Status,
         result: Option<JobResult>,
     ) -> Result<bool> {
@@ -987,7 +1155,7 @@ impl Store {
                 })
                 .and_then(|session| session.job.as_mut())
                 .ok_or_else(|| missing("Task"))?;
-            if job.status != expected {
+            if !expected.contains(&job.status) {
                 return Ok(false);
             }
             job.status = status;
@@ -1054,7 +1222,7 @@ impl Project {
         for job in std::iter::once(root_job).chain(chain) {
             match job.status {
                 Status::Completed => {}
-                Status::Queued | Status::Running => pending = true,
+                Status::Queued | Status::Running | Status::ContextFull => pending = true,
                 _ => return Dependency::Failed,
             }
         }
@@ -1070,6 +1238,91 @@ impl Project {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fresh_retry_keeps_the_task_identity_scope_and_waiting_dependents() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let store = Store::new(data.clone());
+        let project = store
+            .save(super::super::SaveProject {
+                id: None,
+                name: "Test project".into(),
+                folders: vec![dir.path().to_path_buf()],
+                search_skill: None,
+            })
+            .unwrap();
+        let id = project.id;
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": id,
+            "tasks": [
+                {"key": "edit", "name": "Edit", "model": "local", "prompt": "Edit",
+                    "parallel": true, "write_paths": ["src/test.rs"], "context_tokens": 4096},
+                {"name": "Check", "model": "local", "prompt": "Check", "after": ["edit"]}
+            ]
+        })).unwrap(), MessageOrigin::Lyra).unwrap();
+        let original = tasks[0].key();
+        assert!(
+            store
+                .set_job(&original, &[Status::Queued], Status::Running, None)
+                .unwrap()
+        );
+        let overflow = serde_json::from_value(json!({
+            "text": "Full", "stop_reason": "context_full", "truncated": true,
+            "context": {"context_tokens": 4096, "notice": "full"}
+        }))
+        .unwrap();
+        store
+            .complete_job(&original, Status::ContextFull, overflow, &[])
+            .unwrap();
+
+        let store = Store::new(data);
+        assert!(!store.block_failed_dependencies().unwrap());
+        assert!(store.ready_tasks().unwrap().is_empty());
+        let retry = |fresh_chat| Retry {
+            project_id: id,
+            project_session_id: original.project_session_id,
+            context_tokens: None,
+            fresh_chat,
+            prompt: "Continue with a compact handoff.".into(),
+        };
+        assert!(store.retry_task(retry(false)).is_err());
+        let retried = store.retry_task(retry(true)).unwrap();
+        assert_eq!(retried.project_session_id, original.project_session_id);
+        let new_chat = retried.job.chat_session_id.unwrap();
+        assert_ne!(new_chat, original.project_session_id);
+        let catalog = store.list().unwrap();
+        let project = &catalog.projects[0];
+        assert!(project.has_pending_task(new_chat));
+        assert_eq!(
+            project.session(new_chat).unwrap().folder,
+            project.session(original.project_session_id).unwrap().folder
+        );
+        assert!(!store.session_file(new_chat).exists());
+        let ready = store.ready_tasks().unwrap();
+        assert_eq!(ready.len(), 1);
+        let job = &ready[0].0.job;
+        assert_eq!(job.write_paths, [PathBuf::from("src/test.rs")]);
+        assert_eq!(
+            job.input.as_ref().unwrap().context_tokens,
+            NonZeroU32::new(4096)
+        );
+
+        assert!(
+            store
+                .set_job(&original, &[Status::Queued], Status::Running, None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_job(&original, &[Status::Running], Status::Completed, None)
+                .unwrap()
+        );
+        assert_eq!(
+            store.ready_tasks().unwrap()[0].0.project_session_id,
+            tasks[1].project_session_id
+        );
+    }
 
     #[test]
     fn batch_fixes_keep_dependencies_and_gate_the_next_review() {
@@ -1104,7 +1357,7 @@ mod tests {
             let key = task.key();
             assert!(
                 store
-                    .set_job(&key, Status::Queued, Status::Running, None)
+                    .set_job(&key, &[Status::Queued], Status::Running, None)
                     .unwrap()
             );
             store
@@ -1115,6 +1368,7 @@ mod tests {
                         text: text.into(),
                         stop_reason: None,
                         truncated: false,
+                        context: None,
                     },
                     candidates,
                 )

@@ -11,7 +11,6 @@ pub(super) struct AiSettings {
     pub(super) parallel_project_models: usize,
     #[serde(default)]
     pub(super) project_models: ProjectModels,
-    pub(super) orchestrator_instructions: String,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -35,10 +34,6 @@ pub(super) static AI_SETTINGS: LazyLock<AiSettings> = LazyLock::new(|| {
         (1..=16).contains(&settings.parallel_project_tasks)
             && (1..=settings.parallel_project_tasks).contains(&settings.parallel_project_models),
         "В ai-settings.yaml требуется 1 ≤ parallel_project_models ≤ parallel_project_tasks ≤ 16"
-    );
-    assert!(
-        !settings.orchestrator_instructions.trim().is_empty(),
-        "В ai-settings.yaml нужны инструкции оркестратора"
     );
     settings
 });

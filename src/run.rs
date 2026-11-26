@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{benchmark, ollama::ModelAction};
 
@@ -56,9 +56,11 @@ struct Delegation {
     exclusive: bool,
     #[serde(skip)]
     writes: Vec<PathBuf>,
+    #[serde(skip)]
+    context_tokens: Option<u32>,
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextNotice {
     NearLimit,
@@ -78,6 +80,7 @@ pub enum DelegationScope<'a> {
         session_id: u64,
         parallel: bool,
         writes: &'a [PathBuf],
+        context_tokens: Option<u32>,
         max_tasks: usize,
         max_models: usize,
     },
@@ -154,22 +157,25 @@ impl Snapshot {
         if self.closed || self.model_action.is_some() || self.benchmark_running {
             return None;
         }
-        let (project, project_session_id, exclusive, writes) = match scope {
+        let (project, project_session_id, exclusive, writes, context_tokens) = match scope {
             DelegationScope::Standalone if self.delegations.is_empty() => {
-                (false, None, false, &[][..])
+                (false, None, false, &[][..], None)
             }
             DelegationScope::Standalone => return None,
-            DelegationScope::Project { session_id, work } => (true, session_id, work, &[][..]),
+            DelegationScope::Project { session_id, work } => {
+                (true, session_id, work, &[][..], None)
+            }
             DelegationScope::Queued {
                 session_id,
                 parallel,
                 writes,
+                context_tokens,
                 max_tasks,
                 max_models,
             } => {
                 let exclusive = !parallel || writes.is_empty();
                 if !exclusive {
-                    let mut models = BTreeSet::from([model]);
+                    let mut models = BTreeSet::from([(model, context_tokens)]);
                     let mut active_tasks = 0;
                     for active in self
                         .delegations
@@ -177,13 +183,13 @@ impl Snapshot {
                         .filter(|active| !active.writes.is_empty())
                     {
                         active_tasks += 1;
-                        models.insert(active.model.as_str());
+                        models.insert((active.model.as_str(), active.context_tokens));
                     }
                     if active_tasks >= max_tasks || models.len() > max_models {
                         return None;
                     }
                 }
-                (true, Some(session_id), exclusive, writes)
+                (true, Some(session_id), exclusive, writes, context_tokens)
             }
         };
         let writes: Vec<_> = writes.iter().map(|path| path_key(path)).collect();
@@ -218,6 +224,7 @@ impl Snapshot {
                 project,
                 exclusive,
                 writes,
+                context_tokens,
             },
         );
         Some(self.next_delegation)
@@ -265,6 +272,17 @@ impl Snapshot {
             }
         }
         self.metrics_revision += 1;
+    }
+
+    pub fn project_context_notice(&self, session_id: u64) -> Option<ContextNotice> {
+        self.delegations
+            .values()
+            .find(|active| active.project_session_id == Some(session_id))?
+            .context_notice
+    }
+
+    pub fn context_notice(&self, id: u64) -> Option<ContextNotice> {
+        self.delegations.get(&id)?.context_notice
     }
 
     pub fn delegation_context(&mut self, id: u64, notice: ContextNotice) -> bool {
@@ -406,6 +424,7 @@ mod tests {
             session_id,
             parallel: true,
             writes,
+            context_tokens: None,
             max_tasks: 2,
             max_models: 1,
         };

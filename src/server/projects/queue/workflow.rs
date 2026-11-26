@@ -266,6 +266,10 @@ impl Workflow {
         self.root_id
     }
 
+    pub(super) fn is_follow_up(&self) -> bool {
+        self.stage != Stage::Implementation
+    }
+
     pub(super) fn is_review(&self) -> bool {
         self.stage == Stage::Review
     }
@@ -480,6 +484,7 @@ Return one JSON verdict. Use {"status":"pass","summary":"change made or confirme
                 parallel: false,
                 write_paths: Vec::new(),
                 role: None,
+                chat_session_id: None,
                 origin: MessageOrigin::Lyra,
                 status: Status::Queued,
                 batch_id: None,
@@ -491,6 +496,8 @@ Return one JSON verdict. Use {"status":"pass","summary":"change made or confirme
                             .max(AI_SETTINGS.minimum_output_tokens),
                     ),
                     skills: None,
+                    context_tokens: None,
+                    retry_prompt: None,
                 }),
                 result: None,
                 workflow: Some(Self {

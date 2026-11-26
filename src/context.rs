@@ -10,13 +10,29 @@ const ALIAS_PREFIX: &str = "lyra-context/model:";
 static PROFILES: Mutex<()> = Mutex::new(());
 
 pub fn is_alias(model: &str) -> bool {
-    model
-        .strip_prefix(ALIAS_PREFIX)
-        .is_some_and(|tag| tag.len() == 16 && tag.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    profile_base(model).is_some()
+}
+
+pub fn profile_base(model: &str) -> Option<&str> {
+    let tag = model.strip_prefix(ALIAS_PREFIX)?;
+    let (hash, size) = tag
+        .split_once('-')
+        .map_or((tag, None), |(hash, size)| (hash, Some(size)));
+    (hash.len() == 16
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && size.is_none_or(|size| {
+            size.bytes().all(|byte| byte.is_ascii_digit())
+                && size.parse::<u32>().is_ok_and(|size| size > 0)
+        }))
+    .then(|| &model[..ALIAS_PREFIX.len() + hash.len()])
+}
+
+pub fn profile(model: &str, tokens: u32) -> String {
+    format!("{}-{tokens}", alias(model))
 }
 
 pub fn alias(model: &str) -> String {
-    // FNV-1a gives one stable, short Ollama tag per source model across Lyra builds.
+    // FNV-1a gives one stable, short Ollama identifier per source model across Lyra builds.
     let identity = model.strip_suffix(":latest").unwrap_or(model);
     let hash = identity.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
         (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(0x100000001b3)
@@ -35,7 +51,15 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
         return Err(format!("Модель больше не установлена в Ollama: {model}."));
     }
     // Pi uses the OpenAI-compatible API, where Ollama takes num_ctx from the model.
-    let alias = alias(model);
+    let legacy = alias(model);
+    if ollama::running_models().is_some_and(|models| {
+        models
+            .iter()
+            .any(|entry| entry.name == legacy && entry.context_length == Some(u64::from(tokens)))
+    }) {
+        return Ok(legacy);
+    }
+    let alias = profile(model, tokens);
     #[derive(Deserialize)]
     struct Created {
         status: String,
@@ -77,7 +101,10 @@ fn orphan_profiles(installed: &[String], known: &[String]) -> BTreeSet<String> {
         .filter(|profile| {
             let mut sources = known
                 .iter()
-                .filter(|source| !is_alias(source) && alias(source) == profile.as_str())
+                .filter(|source| {
+                    !is_alias(source)
+                        && profile_base(profile).is_some_and(|base| base == alias(source))
+                })
                 .peekable();
             sources.peek().is_some()
                 && sources.all(|source| !installed.iter().any(|name| same_source(name, source)))
@@ -148,6 +175,7 @@ pub fn cache_bytes_per_token(model: &str) -> Option<u64> {
 pub(crate) struct Estimate {
     pub bytes_per_token_f16: Option<u64>,
     pub configured_context_tokens: Option<u64>,
+    pub max_context_tokens: Option<u64>,
     pub thinking: Value,
     pub thinking_options: Vec<ollama::Think>,
     pub capabilities: Option<Vec<String>>,
@@ -160,6 +188,21 @@ impl Estimate {
                 && capabilities.iter().any(|item| item == "tools")
         })
     }
+}
+
+pub(crate) fn validate_window(
+    model: &str,
+    tokens: u32,
+    estimate: Option<&Estimate>,
+) -> Result<(), String> {
+    if let Some(maximum) = estimate.and_then(|info| info.max_context_tokens)
+        && u64::from(tokens) > maximum
+    {
+        return Err(format!(
+            "{model} supports up to {maximum} context tokens, requested {tokens}."
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn estimate(model: &str) -> Option<Estimate> {
@@ -215,7 +258,12 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
     if !thinking_options.is_empty() {
         thinking_options.push(ollama::Think::Enabled(false));
     }
+    let max_context_tokens = info.model_info["general.architecture"]
+        .as_str()
+        .and_then(|architecture| info.model_info[format!("{architecture}.context_length")].as_u64())
+        .filter(|&tokens| tokens > 0);
     Some(Estimate {
+        max_context_tokens,
         bytes_per_token_f16: estimate_f16(&info.model_info),
         configured_context_tokens,
         thinking: info.thinking,
@@ -270,15 +318,23 @@ mod tests {
         let known = vec!["alpha:latest".into(), "team/beta:q4".into()];
         let alpha = alias("alpha");
         let beta = alias("team/beta:q4");
+        let beta_8k = profile("team/beta:q4", 8192);
+        let beta_16k = profile("team/beta:q4", 16384);
         let unrelated = alias("unrelated");
         let installed = vec![
             "registry.ollama.ai/library/Alpha:latest".into(),
             "team/beta:q8".into(),
             alpha.clone(),
             beta.clone(),
+            beta_8k.clone(),
+            beta_16k.clone(),
             unrelated,
         ];
-        assert_eq!(orphan_profiles(&installed, &known), BTreeSet::from([beta]));
+        assert_eq!(profile_base(&beta_8k), Some(beta.as_str()));
+        assert_eq!(
+            orphan_profiles(&installed, &known),
+            BTreeSet::from([beta, beta_8k, beta_16k])
+        );
         assert!(orphan_profiles(&installed, &[]).is_empty());
         assert!(is_alias(&alpha));
     }

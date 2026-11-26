@@ -369,17 +369,15 @@ impl Store {
                 .ok_or_else(|| missing("Project"))?;
             project.ensure_active()?;
             let folders = project.session_folders(&input.folders)?;
+            if project.has_pending_task(input.project_session_id) {
+                return Err(invalid("Дождитесь завершения задачи перед сменой папок."));
+            }
             let session = project
                 .sessions
                 .iter_mut()
                 .find(|session| session.id == input.project_session_id)
                 .ok_or_else(|| missing("Session"))?;
             session.ensure_active()?;
-            if session.job.as_ref().is_some_and(queue::Job::pending) {
-                return Err(invalid(
-                    "Дождитесь запуска и завершения задачи перед сменой папок.",
-                ));
-            }
             if folders[0] != session.folder {
                 return Err(invalid(
                     "Основная папка существующего чата остаётся первой.",
@@ -398,14 +396,14 @@ impl Store {
                 .find(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
             if let Some(id) = input.project_session_id {
+                if input.archived && project.has_pending_task(id) {
+                    return Err(invalid("Остановите задачу перед архивацией."));
+                }
                 let session = project
                     .sessions
                     .iter_mut()
                     .find(|session| session.id == id)
                     .ok_or_else(|| missing("Session"))?;
-                if input.archived && session.job.as_ref().is_some_and(queue::Job::pending) {
-                    return Err(invalid("Остановите задачу перед архивацией."));
-                }
                 session.archived = input.archived;
             } else {
                 if input.archived
@@ -594,7 +592,7 @@ impl Store {
                                     .map(|name| (context::alias(&name), name))
                                     .collect()
                             })
-                            .get(model)
+                            .get(context::profile_base(model)?)
                             .cloned()
                     })
                 } else {
@@ -636,8 +634,11 @@ impl Project {
     }
 
     pub(super) fn has_pending_task(&self, id: u64) -> bool {
-        self.session(id)
-            .is_ok_and(|session| session.job.as_ref().is_some_and(queue::Job::pending))
+        self.sessions.iter().any(|session| {
+            session.job.as_ref().is_some_and(|job| {
+                job.pending() && (session.id == id || job.chat_session_id == Some(id))
+            })
+        })
     }
 
     fn ensure_active(&self) -> Result<()> {

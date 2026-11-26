@@ -62,8 +62,7 @@ async fn handle(
             json!({
                 "protocolVersion": if VERSIONS.contains(&version) { version } else { VERSIONS[0] },
                 "serverInfo": {"name": "lyra", "version": env!("CARGO_PKG_VERSION")},
-                "capabilities": {"tools": {}},
-                "instructions": AI_SETTINGS.orchestrator_instructions
+                "capabilities": {"tools": {}}
             })
         }
         "ping" => json!({}),
@@ -88,6 +87,7 @@ async fn handle(
                     | "enqueue_project_tasks"
                     | "get_project_tasks"
                     | "cancel_project_task"
+                    | "retry_project_task"
                     | "complete_project_step"
             ) {
                 return rpc_error(id, -32602, "Unknown tool");
@@ -158,13 +158,13 @@ fn rpc_error(id: &Value, code: i32, message: &str) -> Response {
 fn tools() -> Value {
     let complete_step = json!({
         "name": "complete_project_step",
-        "description": "Report the result of a ready external step you executed with Codex or a connected tool. On success you can register existing files relative to the step's primary folder. This releases dependent tasks.",
+        "description": "Complete a ready external step and optionally register its output files.",
         "inputSchema": {"type": "object", "properties": {
             "project_id": {"type": "integer", "minimum": 1},
             "project_session_id": {"type": "integer", "minimum": 1},
             "succeeded": {"type": "boolean"},
             "summary": {"type": "string"},
-            "artifacts": {"type": "array", "maxItems": 16, "items": {"type": "string"}}
+            "artifacts": {"type": "array", "maxItems": 16, "items": {"type": "string"}, "description": "Produced files relative to the primary folder."}
         }, "required": ["project_id", "project_session_id", "succeeded", "summary"], "additionalProperties": false}
     });
     let stage = json!({
@@ -175,7 +175,7 @@ fn tools() -> Value {
     });
     let follow_up = json!({
         "type": "object",
-        "description": "Pick a review model once. It reviews the full task diff, plans small fixes with a model for each, and reviews the full diff again after each batch. Up to three reviews. Independent fixes can run in parallel, and the next review waits for the entire batch.",
+        "description": "Automatic review, fixes, and optional startup verification.",
         "properties": {
             "review": stage,
             "launch": stage,
@@ -185,22 +185,34 @@ fn tools() -> Value {
         "additionalProperties": false
     });
     let queue_task = json!({"type": "object", "properties": {
-        "name": {"type": "string"}, "prompt": {"type": "string", "description": "Task text. Thinking for local tasks follows the model configuration. Do not insert Thinking directives into the prompt."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
+        "name": {"type": "string"}, "prompt": {"type": "string", "description": "Instructions for the step."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
         "key": {"type": "string", "description": "Unique key for this task within the batch."},
         "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
-        "external": {"type": "boolean", "default": false, "description": "Codex or a connected specialist tool executes this step and reports completion."},
-        "parallel": {"type": "boolean", "default": false, "description": "Allow overlapping Work with independent tasks. Requires write_paths and disables shell commands."},
-        "write_paths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Complete set of allowed file paths for write and edit, relative to the first working folder. Use forward slashes."},
-        "role": {"enum": ["implement", "fix", "review"], "default": "implement", "description": "Local task role. A standalone review uses read-only file tools and may run checks through the command approval flow."},
+        "external": {"type": "boolean", "default": false, "description": "Step completed outside Lyra with complete_project_step."},
+        "parallel": {"type": "boolean", "default": false, "description": "Allow this step to overlap other steps. Requires write_paths."},
+        "write_paths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Allowed write paths relative to the primary folder. Disables shell access."},
+        "role": {"enum": ["implement", "fix", "review"], "default": "implement", "description": "Local worker role. Review uses read-only file tools."},
         "folders": {"type": "array", "items": {"type": "string"}, "description": "Optional registered project folders, primary first. Defaults to the project's folders."},
         "skills": {"type": "array", "items": {"type": "string"}},
+        "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
         "follow_up": follow_up,
         "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens}
     }, "required": ["name", "prompt"], "additionalProperties": false});
+    let retry_task = json!({
+        "name": "retry_project_task",
+        "description": "Resume a task paused on context_full while preserving its task ID and dependencies.",
+        "inputSchema": {"type": "object", "properties": {
+            "project_id": {"type": "integer", "minimum": 1},
+            "project_session_id": {"type": "integer", "minimum": 1, "description": "Original queued task ID."},
+            "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context for the retry. Required and strictly larger for a retry in the same chat. For a fresh chat, omit to keep the last window."},
+            "fresh_chat": {"type": "boolean", "default": false, "description": "Start a new saved chat with the same working folders and no previous messages."},
+            "prompt": {"type": "string", "minLength": 1, "maxLength": 32000, "description": "Continuation prompt for the retry."}
+        }, "required": ["project_id", "project_session_id", "prompt"], "additionalProperties": false}
+    });
     let mut tools = json!([
         {
             "name": "inspect",
-            "description": "System load, queue limits, project model preferences, and local model shortlist. Pass model for benchmark, memory, thinking controls, the Pi benchmark result (benchmark_and_settings.pi_check), and Ollama tool capabilities (ollama_agent_tools). Pass system=true for detailed system and RAM usage.",
+            "description": "Read system load, local models, benchmarks, memory estimates, and Lyra queue settings.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Estimate memory for this context size. Requires model."},
@@ -210,7 +222,7 @@ fn tools() -> Value {
         },
         {
             "name": "set_description",
-            "description": "Replace one model's description only when the user explicitly requests the edit.",
+            "description": "Replace the saved description of a model.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
                 "description": {"type": "string", "maxLength": 2000}
@@ -228,10 +240,10 @@ fn tools() -> Value {
         },
         {
             "name": "run_model",
-            "description": "Send a bounded text task to one installed Ollama model. Use the user's chosen model or choose from inspect by task fit, memory and speed.",
+            "description": "Generate a bounded text response with an installed Ollama model.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name from Lyra inspect"},
-                "prompt": {"type": "string", "minLength": 1, "description": "Task text. Put any Thinking override in the separate think argument. Do not insert /think, /no_think, or other Thinking directives."},
+                "prompt": {"type": "string", "minLength": 1, "description": "Text prompt."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or Ollama default."},
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens, "description": "Generation budget. On reasoning models it can include thinking tokens and run out before any visible text."},
                 "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional Thinking override. Pass false for Off, true for On, or a model-supported level. Omit to use the Lyra model setting or the Ollama default."},
@@ -241,13 +253,13 @@ fn tools() -> Value {
         },
         {
             "name": "list_projects",
-            "description": "List Lyra projects and saved Pi chats with their IDs and archive status. Only active projects and chats can be used with run_pi.",
+            "description": "List projects and saved Pi chats with IDs and archive status.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
         },
         {
             "name": "archive_project",
-            "description": "On explicit user request, archive or restore a Lyra project or one of its chats. Archived history remains readable.",
+            "description": "Archive or restore a project or saved chat.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1, "description": "Omit to change the entire project."},
@@ -257,7 +269,7 @@ fn tools() -> Value {
         },
         {
             "name": "save_project",
-            "description": "Create a Lyra project or update it by id. Register only the local folders the user wants in the project.",
+            "description": "Create a project or update its registered folders and metadata.",
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
@@ -267,12 +279,12 @@ fn tools() -> Value {
         },
         {
             "name": "create_project_session",
-            "description": "Create a persistent Pi chat in a Lyra project. Continue the chat using project_id and the returned id as project_session_id in run_pi.",
+            "description": "Create a saved Pi chat in a project.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Registered working folders for this chat. The first is the working directory. Omit to use all project folders."},
-                "folder": {"type": "string", "description": "Legacy option to set only the working directory. Use folders for new clients."}
+                "folder": {"type": "string", "description": "Legacy primary working directory."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
         },
         {
@@ -286,7 +298,7 @@ fn tools() -> Value {
         },
         {
             "name": "enqueue_project_tasks",
-            "description": "Queue tasks or build a project pipeline. Each gets a numbered saved chat. Dependencies must finish successfully before their consumers run. External steps wait for complete_project_step. Ready local tasks with disjoint write scopes can overlap within the configured limits.",
+            "description": "Queue a batch of project steps with optional dependencies and parallel file scopes.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
@@ -295,17 +307,17 @@ fn tools() -> Value {
         },
         {
             "name": "get_project_tasks",
-            "description": "Read queue status and results. Use task_ids from enqueue_project_tasks and wait_seconds to wait for those tasks and their automatic follow-up stages to finish or until the timeout.",
+            "description": "Read project task status, results, follow-ups, and context notices.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "task_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
-                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 25, "default": 0}
+                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 25, "default": 0, "description": "Maximum wait for completion or a context pause."}
             }, "required": ["project_id"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
         },
         {
             "name": "cancel_project_task",
-            "description": "Cancel a task waiting in the queue and keep its chat. For running work use the Stop control in its chat.",
+            "description": "Cancel a queued or context-paused task and keep its chat.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1}
@@ -322,15 +334,16 @@ fn tools() -> Value {
         },
         {
             "name": "run_pi",
-            "description": "Work with files in a Pi workspace and request shell commands under Lyra's global Pi command mode. Before choosing or loading a model, use inspect to check benchmark_and_settings.pi_check and ollama_agent_tools.",
+            "description": "Run a Pi Work session with an installed Ollama model.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
                 "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. With project_session_id, the folder is set by the chat."},
                 "project_id": {"type": "integer", "minimum": 1, "description": "Lyra project to use. Loads instructions from its registered folders."},
                 "project_session_id": {"type": "integer", "minimum": 1, "description": "Saved project chat to continue. Requires project_id."},
-                "prompt": {"type": "string", "minLength": 1, "description": "Task text. Thinking follows the model configuration. Do not insert Thinking directives into the prompt."},
+                "prompt": {"type": "string", "minLength": 1, "description": "Task prompt."},
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to the given installed Lyra skill names. Omit to make all installed Lyra skills available, or pass [] to run without skills."},
+                "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens}
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
@@ -339,7 +352,7 @@ fn tools() -> Value {
     tools
         .as_array_mut()
         .expect("tool definitions")
-        .push(complete_step);
+        .extend([complete_step, retry_task]);
     for tool in tools.as_array_mut().expect("tool definitions") {
         tool["inputSchema"]["properties"]["session_id"] = json!({
             "type": "string", "description": "Shared ID for related calls in the dashboard",
@@ -351,7 +364,11 @@ fn tools() -> Value {
                 "properties": {
                     "stop_reason": {"type": ["string", "null"]},
                     "truncated": {"type": "boolean"},
-                    "max_output_tokens": {"type": "integer"}
+                    "max_output_tokens": {"type": "integer"},
+                    "context": {"type": "object", "properties": {
+                        "context_tokens": {"type": "integer"},
+                        "notice": {"enum": ["near_limit", "compacting", "compacted", "full"]}
+                    }, "required": ["context_tokens"]}
                 },
                 "required": ["stop_reason", "truncated", "max_output_tokens"]
             });
@@ -411,6 +428,9 @@ pub(super) struct RunPi {
     project_session_id: Option<u64>,
     request_id: Option<String>,
     mode: Option<ChatMode>,
+    context_tokens: Option<NonZeroU32>,
+    #[serde(skip)]
+    chat_session_id: Option<u64>,
     prompt: String,
     max_output_tokens: Option<u32>,
     skills: Option<Vec<String>>,
@@ -429,6 +449,13 @@ enum ChatMode {
     Work,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct PiContext {
+    pub(super) context_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notice: Option<ContextNotice>,
+}
+
 #[derive(Serialize)]
 struct GenerationInfo {
     stop_reason: Option<String>,
@@ -436,6 +463,8 @@ struct GenerationInfo {
     max_output_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<PiContext>,
 }
 
 struct ToolOutput {
@@ -534,6 +563,7 @@ async fn call(
             projects::queue::enqueue(app, arguments(args)?, projects::MessageOrigin::Orchestrator)
                 .await,
         ),
+        "retry_project_task" => project_result(projects::queue::retry(app, arguments(args)?).await),
         "get_project_tasks" => project_result(projects::queue::query(app, arguments(args)?).await),
         "complete_project_step" => {
             project_result(projects::queue::complete_external(app, arguments(args)?).await)
@@ -688,6 +718,7 @@ async fn run_model(
         stop_reason,
         max_output_tokens: limit,
         text_only: None,
+        context: None,
     });
     if let Some(thinking) = reply.thinking() {
         trace.event(Kind::Thinking, "Ollama", thinking, None);
@@ -728,8 +759,9 @@ async fn run_pi(
     let session_id = request.project_session_id;
     let (project, workspace) = if let Some(id) = request.project_id {
         let workspace = request.workspace;
+        let chat_session_id = request.chat_session_id.or(session_id);
         let project = projects::work(app.clone(), move |app| {
-            app.projects.task(id, session_id, workspace.as_deref())
+            app.projects.task(id, chat_session_id, workspace.as_deref())
         })
         .await
         .map_err(|(_, error)| error)?;
@@ -765,6 +797,7 @@ async fn run_pi(
     let store = app.clone();
     let source = model.clone();
     let text_only = mode == ChatMode::Chat;
+    let requested_context = request.context_tokens.map(NonZeroU32::get);
     let (tokens, context_window, think) = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
         if text_only && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
@@ -789,19 +822,21 @@ async fn run_pi(
                 format!("{source} failed Lyra's Pi benchmark. Choose another model or rerun the Pi benchmark in Lyra.")
             });
         }
-        let context_window = session_id.map(|_| {
-            record.context_tokens.map(u64::from)
-                .or_else(|| {
-                    ollama::running_models()?.into_iter()
-                        .find(|entry| ollama::same_model(&entry.name, &source))?.context_length
-                })
-                .or_else(|| estimate.and_then(|info| info.configured_context_tokens))
-                .or_else(|| record.latest.as_ref().and_then(benchmark::Measurement::auto_context_tokens))
-                .and_then(|tokens| u32::try_from(tokens).ok())
-                .filter(|&tokens| tokens > 0)
-                .unwrap_or(4096)
-        });
-        Ok((record.context_tokens, context_window, record.think))
+        if let Some(tokens) = requested_context {
+            context::validate_window(&source, tokens, estimate.as_ref())?;
+        }
+        let tokens = requested_context.or(record.context_tokens);
+        let context_window = tokens.map(u64::from)
+            .or_else(|| {
+                ollama::running_models()?.into_iter()
+                    .find(|entry| ollama::same_model(&entry.name, &source))?.context_length
+            })
+            .or_else(|| estimate.and_then(|info| info.configured_context_tokens))
+            .or_else(|| record.latest.as_ref().and_then(benchmark::Measurement::auto_context_tokens))
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .filter(|&tokens| tokens > 0)
+            .unwrap_or(4096);
+        Ok((tokens, context_window, record.think))
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -865,7 +900,7 @@ async fn run_pi(
             text_only,
             model: &model,
             delegation,
-            context_window,
+            context_window: Some(context_window),
             think: think.as_ref(),
             role: request.role,
             writes: &request.writes,
@@ -900,6 +935,10 @@ async fn run_pi(
                 truncated: false,
                 max_output_tokens: limit,
                 text_only: None,
+                context: Some(PiContext {
+                    context_tokens: context_window,
+                    notice: None,
+                }),
             }),
         });
     };
@@ -912,14 +951,30 @@ async fn run_pi(
     }
     let context_full = error.is_some_and(pi::is_context_overflow)
         || result.as_ref().is_ok_and(|reply| reply.context_overflow);
-    if context_full && session_id.is_some() {
+    if context_full {
         app.task.send_if_modified(|snapshot| {
             snapshot.delegation_context(delegation, ContextNotice::Full)
         });
     }
-    finish_delegation(&app, delegation, error.is_none(), false).await;
-    if context_full && session_id.is_some() {
-        return Err("Контекст модели заполнен. Увеличь размер контекста в настройках модели, сократи запрос или начни новый чат.".into());
+    let context = Some(PiContext {
+        context_tokens: context_window,
+        notice: app.task.borrow().context_notice(delegation),
+    });
+    finish_delegation(&app, delegation, !context_full && error.is_none(), false).await;
+    if context_full {
+        return Ok(ToolOutput {
+            text: format!(
+                "Контекст модели заполнен. Окно Pi: {context_window} токенов. Увеличьте окно или начните новый чат с кратким состоянием задачи."
+            ),
+            is_error: true,
+            generation: Some(GenerationInfo {
+                stop_reason: Some("context_full".into()),
+                truncated: true,
+                max_output_tokens: limit,
+                text_only: text_only.then_some(true),
+                context,
+            }),
+        });
     }
     let reply = result?;
     let is_error = reply.error.is_some();
@@ -940,6 +995,7 @@ async fn run_pi(
             truncated: reply.truncated,
             max_output_tokens: limit,
             text_only: text_only.then_some(true),
+            context,
         }),
     })
 }
@@ -947,17 +1003,18 @@ async fn run_pi(
 pub(super) fn queued_request(
     key: &projects::SessionKey,
     model: String,
-    prompt: String,
-    max_output_tokens: Option<u32>,
-    skills: Option<Vec<String>>,
+    input: projects::queue::Prompt,
     role: Option<pi::Role>,
     writes: Vec<PathBuf>,
+    chat_session_id: Option<u64>,
 ) -> RunPi {
     RunPi {
         model,
-        prompt,
-        max_output_tokens,
-        skills,
+        prompt: input.prompt,
+        max_output_tokens: input.max_output_tokens,
+        skills: input.skills,
+        context_tokens: input.context_tokens,
+        chat_session_id,
         workspace: None,
         project_id: Some(key.project_id),
         project_session_id: Some(key.project_session_id),
@@ -990,15 +1047,15 @@ pub(super) async fn run_queued(
     }
     match result {
         Ok(reply) => {
-            let (stop_reason, truncated) = reply.generation.map_or((None, false), |details| {
-                (details.stop_reason, details.truncated)
-            });
-            let status = if stop_reason.as_deref() == Some("aborted") {
-                Status::Cancelled
-            } else if reply.is_error {
-                Status::Failed
-            } else {
-                Status::Completed
+            let (stop_reason, truncated, context) =
+                reply.generation.map_or((None, false, None), |details| {
+                    (details.stop_reason, details.truncated, details.context)
+                });
+            let status = match stop_reason.as_deref() {
+                Some("aborted") => Status::Cancelled,
+                Some("context_full") => Status::ContextFull,
+                _ if reply.is_error => Status::Failed,
+                _ => Status::Completed,
             };
             (
                 status,
@@ -1006,6 +1063,7 @@ pub(super) async fn run_queued(
                     text: reply.text,
                     stop_reason,
                     truncated,
+                    context,
                 },
             )
         }
@@ -1019,6 +1077,7 @@ pub(super) async fn run_queued(
                 text,
                 stop_reason: None,
                 truncated: false,
+                context: None,
             },
         ),
     }
@@ -1147,7 +1206,13 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                     entry.context_length
                         == requested_tokens.or(record.context_tokens.map(u64::from))
                 })
-                .or_else(|| entries.first())
+                .or_else(|| {
+                    if requested_tokens.is_some() {
+                        entries.iter().find(|entry| !entry.is_pinned())
+                    } else {
+                        entries.first()
+                    }
+                })
                 .copied()
         });
         let memory = memory_estimate(
@@ -1173,6 +1238,7 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                 "benchmark_and_settings": record,
                 "loaded": loaded,
                 "memory_estimate": memory,
+                "max_context_tokens": estimate.max_context_tokens,
                 "ollama_agent_tools": match estimate.supports_agent_tools() {
                     Some(true) => "advertised",
                     Some(false) => "unsupported",

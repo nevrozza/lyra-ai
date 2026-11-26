@@ -1,0 +1,29 @@
+# Model selection and context
+
+## Select and run the model
+
+1. Honor the model the user named. When the choice is delegated, call `inspect` for the shortlist and inspect one or two promising exact tags. Prefer the configured `project_models.implement`, `project_models.fix`, or `project_models.review` when eligible and suitable. Otherwise choose by task complexity, tools, working context, and memory. Choose a small model for a mechanical change with a clear contract, or a stronger suitable model for coupled changes and assembled review. Keep model tags out of reusable instructions and examples.
+2. For Pi, `benchmark_and_settings.pi_check: true` means the model passed Lyra's check. Prefer it when available. Lyra rejects `false` and `ollama_agent_tools: unsupported`. For an untested model (`pi_check: null`), prefer `ollama_agent_tools: advertised` over `unknown`. Use `inspect` with the exact model and proposed `context_tokens` when a different window could affect memory. Compare with `max_context_tokens` when reported. Missing estimates are unknown.
+3. Among suitable models, consider warm residency or startup time for short jobs and measured generation speed for longer jobs. Use `manage_model` for useful preloading or to manage idle models within the user's residency requirements. Respect pinned models and active work. Use `set_description` only for a requested catalog-description edit. Use `run_model(require_loaded: true)` when the user wants an already loaded runner with the requested or configured context.
+4. Give `run_model` a self-contained prompt. An explicit `context_tokens` on `run_model` is saved after Ollama finishes, including when it produces no visible answer before the output limit. An explicit context on `run_pi` or a queued step applies to that run or step and uses an Ollama profile for that size.
+
+Use the saved Thinking preference when present. Leave the model's default otherwise, especially for review, correctness checks, and Thinking tests. For a simple task, use `run_model` with `think: false` when appropriate and supported. Pi and queued tasks use the saved Thinking setting or Ollama's default. Keep Thinking directives out of prompt text. Give reasoning tasks an explicit `max_output_tokens` large enough for reasoning and the requested answer.
+
+## Interpret the result
+
+- `context_notice: near_limit` in a running queue call or `context.notice: near_limit` in a result means the next turn benefits from a compact prompt or fresh history. `compacting` and `compacted` describe history compaction. Continue to check the task result.
+- `stop_reason: context_full` or a queued status of `context_full` calls for context recovery. Read `context.context_tokens` from `run_pi.structuredContent` or the queued `result`. The reported value is Pi's context window.
+- `stop_reason: length` can indicate the output limit. Check `truncated` and any error before accepting the result. For a generation-budget issue, shorten the requested answer, raise `max_output_tokens` within the allowed range, or adjust Thinking when appropriate. A larger input window serves context pressure.
+- Treat cancelled, interrupted, or otherwise failed work as incomplete. Inspect saved results and work already done before deciding whether to retry.
+
+## Recover an overflow
+
+| Situation | Direct Pi chat | Queued task |
+| --- | --- | --- |
+| Useful history and memory for a larger window | Call `inspect` with the exact model and candidate context. Call `run_pi` on the same project and chat with a larger `context_tokens` and a compact continuation. Keep passing that size on subsequent turns that need it. | Call `retry_project_task` with the original task ID, a strictly larger `context_tokens`, and a compact continuation. |
+| Mostly stale history or a tight memory budget | Call `create_project_session` with the same registered working folders and primary folder first. Then call `run_pi` with the new chat ID and the handoff. | Call `retry_project_task` with the original task ID, `fresh_chat: true`, and the handoff. Omit `context_tokens` to reuse the previous window, or supply a different size when appropriate. |
+| Fresh, compact run still overflows | Reduce the files, prompt, or task slice. Report a blocker when there is no useful change to make before another retry. | Narrow the remaining work within the existing write scope, or report the blocked step and its waiting dependents. Avoid replaying the same request unchanged. |
+
+A useful handoff carries the goal, scope, constraints, the relevant files and changes already made, remaining work, and the acceptance check. Preserve the old transcript. Ask Pi to inspect the current files before repeating edits, since an overflow can happen after a successful write. Use `read_project_session` to recover the few missing facts you need.
+
+After a fresh queued retry, poll the original `project_session_id` with `get_project_tasks`. Use the returned `chat_session_id` with `read_project_session` to inspect the new transcript. The queue preserves the original model, role, file scope, dependencies, and automatic follow-up.

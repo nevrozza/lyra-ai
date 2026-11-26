@@ -194,7 +194,10 @@ pub(super) async fn run(
     configure_pi(config, &backend, model, context_window, limit)
         .await
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
-    if let Some(window) = task.as_ref().and_then(|task| task.context_window) {
+    if let Some(window) = task.as_ref().and_then(|task| {
+        task.project?.session_file.as_ref()?;
+        task.context_window
+    }) {
         configure_chat_compaction(config, window)
             .await
             .map_err(|error| format!("Could not configure Pi history compaction: {error}"))?;
@@ -638,6 +641,9 @@ pub(super) fn is_context_overflow(error: &str) -> bool {
         "context_window_exceeded",
         "context length exceeded",
         "exceeds the context window",
+        "exceeds the context length",
+        "exceeds maximum context length",
+        "maximum context length is",
         "context window exceeded",
         "exceeded max context length",
         "exceeds the maximum context length",

@@ -3,7 +3,7 @@ import { createThinkingControl } from './chat-thinking.js';
 
 const taskStatuses = {
   queued: 'В очереди', running: 'В работе', completed: 'Готово',
-  failed: 'Ошибка', cancelled: 'Отменена', interrupted: 'Прервана', blocked: 'Заблокирована',
+  context_full: 'Ждёт восстановления контекста', failed: 'Ошибка', cancelled: 'Отменена', interrupted: 'Прервана', blocked: 'Заблокирована',
 };
 
 function taskStatus(job) {
@@ -70,11 +70,17 @@ export function createProjects() {
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
   const available = () => online && catalog != null && !saving && !picking;
   const agents = () => online ? Object.values(run?.delegations ?? {}) : [];
-  const chatRun = id => online && id != null
-    ? Object.entries(run?.delegations ?? {}).find(([, task]) => task.project_session_id === id)
-    : undefined;
+  const taskChat = chat => chat && (chat.job ? chat
+    : selectedProject()?.sessions.find(owner => owner.job?.chat_session_id === chat.id));
+  const chatRun = id => {
+    if (!online || id == null) return undefined;
+    const chat = selectedProject()?.sessions.find(session => session.id === id);
+    const owner = taskChat(chat)?.id;
+    return Object.entries(run?.delegations ?? {}).find(([, task]) =>
+      task.project_session_id === id || (owner != null && task.project_session_id === owner));
+  };
   const visibleChats = project => project.sessions.filter(chat => project.archived || chat.archived === archiveView);
-  const pendingTask = chat => ['queued', 'running'].includes(chat?.job?.status);
+  const pendingTask = chat => ['queued', 'running', 'context_full'].includes(chat?.job?.status);
   const chatLabel = chat => chat.job ? `#${chat.id} · ${chat.name}` : chat.name;
 
   function report(text = '', error = false) {
@@ -91,11 +97,13 @@ export function createProjects() {
     const chat = selectedChat();
     const delegation = chatRun(chat?.id);
     renderLiveThinking(delegation);
-    const queued = chat?.job?.status === 'queued';
-    const taskPending = pendingTask(chat);
+    const owner = taskChat(chat);
+    const queued = owner?.job?.status === 'queued';
+    const contextPaused = owner?.job?.status === 'context_full';
+    const taskPending = pendingTask(owner);
     const active = chat && (sending.has(chat.id) || delegation || taskPending);
     const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
-    const contextNotice = delegation?.[1].context_notice ?? run?.chat_context?.[chat?.id];
+    const contextNotice = delegation?.[1].context_notice ?? run?.chat_context?.[chat?.id] ?? run?.chat_context?.[owner?.id];
     const contextStatus = {
       near_limit: 'Контекст почти заполнен. Старые сообщения могут быть сжаты.',
       full: 'Контекст модели заполнен. Увеличь окно контекста, сократи запрос или начни новый чат.',
@@ -106,13 +114,18 @@ export function createProjects() {
     contextBanner.hidden = !contextStatus || statusShowsOverflow;
     if (contextBanner.textContent !== (contextStatus ?? '')) contextBanner.textContent = contextStatus ?? '';
     const running = agents();
-    const activeChats = new Set([...sending.keys(), ...running.map(task => task.project_session_id)]);
+    const activeChats = new Set(sending.keys());
+    for (const entry of running) {
+      activeChats.add(entry.project_session_id);
+      const child = project?.sessions.find(session => session.id === entry.project_session_id)?.job?.chat_session_id;
+      if (child != null) activeChats.add(child);
+    }
     for (const spinner of tree.querySelectorAll('[data-chat-progress]')) {
       spinner.hidden = !activeChats.has(Number(spinner.dataset.chatProgress));
     }
     get('project-progress').hidden = !active;
     const progressText = stopping ? 'Останавливаем…' : contextNotice === 'compacting'
-      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : queued ? (chat.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
+      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : contextPaused ? 'Задача ждёт восстановления контекста…' : queued ? (owner.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
     const progress = get('project-progress-text');
     if (progress.textContent !== progressText) progress.textContent = progressText;
     get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));
@@ -158,8 +171,8 @@ export function createProjects() {
     thinking.update(online && run && !composer.hidden ? model : undefined, run);
     sendButton.disabled = !online || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
     sendButton.hidden = Boolean(active);
-    stopButton.disabled = (!delegation && !queued) || Boolean(stopping) || !online || saving;
-    stopButton.textContent = stopping ? 'Останавливаем…' : queued && !delegation ? 'Отменить задачу' : 'Остановить';
+    stopButton.disabled = (!delegation && !queued && !contextPaused) || Boolean(stopping) || !online || saving;
+    stopButton.textContent = stopping ? 'Останавливаем…' : (queued || contextPaused) && !delegation ? 'Отменить задачу' : 'Остановить';
   }
 
   function refreshModels() {
@@ -167,7 +180,7 @@ export function createProjects() {
     const defaultModel = installedModels.length && !installedModels.includes(dashboardModel)
       ? installedModels[0] : dashboardModel;
     const models = [...new Set([defaultModel, ...installedModels].filter(Boolean))];
-    const preferred = chatModels.get(chatId) ?? selectedChat()?.job?.model;
+    const preferred = chatModels.get(chatId) ?? taskChat(selectedChat())?.job?.model;
     const selected = models.includes(preferred) ? preferred : '';
     const key = JSON.stringify([defaultModel, models, selected]);
     if (key !== modelOptionsKey) {
@@ -596,9 +609,9 @@ export function createProjects() {
   };
   stopButton.onclick = async () => {
     if (stopButton.disabled) return;
-    const chat = selectedChat();
+    const chat = taskChat(selectedChat());
     const delegation = chatRun(chatId);
-    if (!delegation && chat?.job?.status === 'queued') {
+    if (!delegation && ['queued', 'context_full'].includes(chat?.job?.status)) {
       await save('/projects/tasks/cancel', {
         project_id: selectedProject().id,
         project_session_id: chat.id,
