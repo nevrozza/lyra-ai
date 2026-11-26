@@ -44,6 +44,43 @@ function Test-LyraSession {
     } finally { $tray.Dispose() }
 }
 
+function Confirm-LyraStartupRestart($Directory, $Sessions) {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) { return $false }
+
+    $workerArgument = '\s-WorkerDirectory\s+"(?<session>' + [regex]::Escape($Sessions) + '\\[0-9a-f]{32})"(?=\s|$)'
+    $buildArgument = '\s-BuildDirectory\s+"' + [regex]::Escape($Directory) + '"(?=\s|$)'
+    $candidates = @(foreach ($candidate in (Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop)) {
+        if ($candidate.CommandLine -notmatch '\s-File\s+"[^"\r\n]+\\Start-Lyra\.ps1"(?=\s|$)' -or
+            $candidate.CommandLine -notmatch $buildArgument -or
+            $candidate.CommandLine -notmatch $workerArgument) { continue }
+        $session = $Matches['session']
+        if (-not (Test-Path -LiteralPath (Join-Path $session 'startup.log') -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $session 'ready'))) { continue }
+        [pscustomobject]@{ ProcessId = $candidate.ProcessId; CreationDate = $candidate.CreationDate; Directory = $session }
+    })
+    if ($candidates.Count -ne 1) { return $false }
+
+    $worker = $candidates[0]
+    $process = Get-Process -Id $worker.ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) { return $true }
+    try {
+        # Hold the process handle across the prompt so a recycled PID cannot be stopped.
+        [void]$process.Handle
+        $log = Join-Path $worker.Directory 'startup.log'
+        Write-Host "Lyra startup is still active (PID $($worker.ProcessId)). Startup log: $log"
+        $answer = [string](Read-Host 'Stop this Lyra startup and start again here? [y/N]')
+        if ($answer.Trim() -notmatch '^(y|yes)$') { return $false }
+
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($worker.ProcessId)" -ErrorAction Stop
+        if (-not $current -or $current.CreationDate -ne $worker.CreationDate -or $process.HasExited -or
+            (Test-Path -LiteralPath (Join-Path $worker.Directory 'ready'))) { return $true }
+        try { $process.Kill() }
+        catch { if (-not $process.HasExited) { throw } }
+        if (-not $process.WaitForExit(10000)) { throw "Lyra startup process $($worker.ProcessId) did not exit." }
+        return $true
+    } finally { $process.Dispose() }
+}
+
 function Start-LyraWorker($SourceRoot, $Directory) {
     $arguments = '-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "{0}" -Port {1} -WorkerDirectory "{2}" -BuildDirectory "{3}"' -f
         (Join-Path $SourceRoot 'Start-Lyra.ps1'), $Port, $Directory, $BuildDirectory
@@ -143,9 +180,21 @@ try {
                 return
             }
             $sessions = Join-Path $env:LOCALAPPDATA 'LyraAI\startup'
-            if (-not $ownsStartup) { throw "Lyra startup is already in progress. Startup logs: $sessions" }
-            if (-not $UpdateAndRestart -and (Test-LyraSession)) {
-                throw "A Lyra startup process is still active. No ready dashboard was found. Startup logs: $sessions"
+            if (-not $ownsStartup -or (-not $UpdateAndRestart -and (Test-LyraSession))) {
+                if (-not $UpdateAndRestart -and (Confirm-LyraStartupRestart $BuildDirectory $sessions)) {
+                    if (-not $ownsStartup) {
+                        try { $ownsStartup = $startup.WaitOne(5000) }
+                        catch [Threading.AbandonedMutexException] { $ownsStartup = $true }
+                    }
+                    if (Request-LyraDashboard) {
+                        Write-Host 'Opening the dashboard in the existing Lyra session.'
+                        return
+                    }
+                }
+                if (-not $ownsStartup) { throw "Lyra startup is already in progress. Startup logs: $sessions" }
+                if (Test-LyraSession) {
+                    throw "A Lyra startup process is still active. No ready dashboard was found. Startup logs: $sessions"
+                }
             }
             Get-ChildItem -LiteralPath $sessions -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -cmatch '^[0-9a-f]{32}$' -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
@@ -225,7 +274,7 @@ try {
         $startupLog = Join-Path $WorkerDirectory 'startup.log'
         [void][Windows.Forms.MessageBox]::Show("$message`n`nStartup log: $startupLog", 'Lyra AI startup')
     }
-    if ($HideStartupConsole -and -not [Console]::IsInputRedirected) { [void](Read-Host 'Press Enter to hide') }
+    if ($HideStartupConsole -and -not [Console]::IsInputRedirected) { [void](Read-Host 'Press Enter to close') }
     exit 1
 } finally {
     if ($previousWorker) { $previousWorker.Dispose() }
