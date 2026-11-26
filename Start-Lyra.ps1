@@ -2,7 +2,8 @@ param(
     [string]$Model = '',
     [ValidateRange(1, 65535)]
     [int]$Port = 8787,
-    [switch]$CloseStartupConsole,
+    [Alias('CloseStartupConsole')]
+    [switch]$HideStartupConsole,
     [string]$WorkerDirectory,
     [string]$BuildDirectory,
     [switch]$UpdateAndRestart,
@@ -24,6 +25,25 @@ function Update-LyraShortcut($Directory) {
     $shortcut.Save()
 }
 
+function Request-LyraDashboard {
+    $activation = $null
+    if (-not [Threading.EventWaitHandle]::TryOpenExisting('Local\LyraAI.Activate', [ref]$activation)) { return $false }
+    try { return $activation.Set() }
+    finally { $activation.Dispose() }
+}
+
+function Test-LyraSession {
+    $tray = $null
+    if (-not [Threading.Mutex]::TryOpenExisting('Local\LyraAI.Tray', [ref]$tray)) { return $false }
+    try {
+        try {
+            if (-not $tray.WaitOne(0)) { return $true }
+        } catch [Threading.AbandonedMutexException] {}
+        $tray.ReleaseMutex()
+        return $false
+    } finally { $tray.Dispose() }
+}
+
 function Start-LyraWorker($SourceRoot, $Directory) {
     $arguments = '-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "{0}" -Port {1} -WorkerDirectory "{2}" -BuildDirectory "{3}"' -f
         (Join-Path $SourceRoot 'Start-Lyra.ps1'), $Port, $Directory, $BuildDirectory
@@ -33,12 +53,17 @@ function Start-LyraWorker($SourceRoot, $Directory) {
     }
     $output = Join-Path $Directory 'startup.log'
     $ready = Join-Path $Directory 'ready'
+    $workerStarted = Join-Path $Directory 'worker-started'
+    $hidden = Join-Path $Directory 'console-hidden'
     $printed = (Get-Item -LiteralPath $output).Length
     $startInfo = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'powershell.exe'), $arguments)
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $worker = [Diagnostics.Process]::Start($startInfo)
     try {
+        $canHide = $HideStartupConsole -and -not [Console]::IsInputRedirected
+        $hideRequested = $false
+        if ($canHide) { Write-Host 'Press Enter to hide' }
         $stream = [IO.File]::Open($output, 'Open', 'Read', 'ReadWrite')
         $stream.Position = $printed
         $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $false)
@@ -49,11 +74,18 @@ function Start-LyraWorker($SourceRoot, $Directory) {
                 $count = $reader.Read($buffer, 0, $buffer.Length)
                 if ($count -gt 0) { [Console]::Write($buffer, 0, $count) }
                 if ($finished -and $count -eq 0) { break }
+                if ($canHide -and -not $hideRequested -and [Console]::KeyAvailable) {
+                    $hideRequested = [Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter
+                }
+                if ($hideRequested -and -not $finished -and (Test-Path -LiteralPath $workerStarted)) {
+                    [IO.File]::WriteAllText($hidden, '')
+                    if (-not $worker.HasExited) { return }
+                }
                 Start-Sleep -Milliseconds 150
             }
         } finally { $reader.Dispose() }
         if ($worker.HasExited) {
-            throw "Lyra exited during startup (code $($worker.ExitCode))."
+            throw "Lyra exited during startup (code $($worker.ExitCode)). Startup log: $output"
         }
     } finally { $worker.Dispose() }
 }
@@ -106,13 +138,15 @@ try {
             $startupWait = if ($UpdateAndRestart) { 5000 } else { 0 }
             try { $ownsStartup = $startup.WaitOne($startupWait) }
             catch [Threading.AbandonedMutexException] { $ownsStartup = $true }
-            if (-not $ownsStartup) { throw 'Lyra is already starting.' }
-            $tray = $null
-            if (-not $UpdateAndRestart -and [Threading.Mutex]::TryOpenExisting('Local\LyraAI.Tray', [ref]$tray)) {
-                $tray.Dispose()
-                throw 'Lyra is already running. Use its tray icon.'
+            if (-not $UpdateAndRestart -and (Request-LyraDashboard)) {
+                Write-Host 'Opening the dashboard in the existing Lyra session.'
+                return
             }
             $sessions = Join-Path $env:LOCALAPPDATA 'LyraAI\startup'
+            if (-not $ownsStartup) { throw "Lyra startup is already in progress. Startup logs: $sessions" }
+            if (-not $UpdateAndRestart -and (Test-LyraSession)) {
+                throw "A Lyra startup process is still active. No ready dashboard was found. Startup logs: $sessions"
+            }
             Get-ChildItem -LiteralPath $sessions -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -cmatch '^[0-9a-f]{32}$' -and $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
                 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -186,7 +220,12 @@ try {
         }
     }
     [Console]::WriteLine($message)
-    if ($CloseStartupConsole) { [void](Read-Host 'Press Enter to close') }
+    if ($WorkerDirectory -and (Test-Path -LiteralPath (Join-Path $WorkerDirectory 'console-hidden'))) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $startupLog = Join-Path $WorkerDirectory 'startup.log'
+        [void][Windows.Forms.MessageBox]::Show("$message`n`nStartup log: $startupLog", 'Lyra AI startup')
+    }
+    if ($HideStartupConsole -and -not [Console]::IsInputRedirected) { [void](Read-Host 'Press Enter to hide') }
     exit 1
 } finally {
     if ($previousWorker) { $previousWorker.Dispose() }

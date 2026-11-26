@@ -34,6 +34,7 @@ namespace LyraTray
         private readonly List<StreamReader> startupLogs = new List<StreamReader>();
         private readonly char[] logBuffer = new char[16384];
         private NotifyIcon icon;
+        private EventWaitHandle dashboardActivation;
         private Icon trayImage;
         private ContextMenuStrip menu;
         private ToolStripItem updateItem, quitItem;
@@ -61,11 +62,12 @@ namespace LyraTray
                 catch (AbandonedMutexException) { owned = true; }
                 if (!owned)
                 {
-                    throw new InvalidOperationException("Lyra is already starting or running.");
+                    throw new InvalidOperationException("Another Lyra startup process is still active.");
                 }
                 try
                 {
                     Application.EnableVisualStyles();
+                    File.WriteAllText(Path.Combine(startupDirectory, "worker-started"), "");
                     using (var session = new Session(root, cargo, ollama, model, port, startupDirectory, target, revision))
                     {
                         Application.Run(session);
@@ -198,7 +200,7 @@ namespace LyraTray
                     build = null;
                     if (exitCode != 0) throw new InvalidOperationException("Cargo build failed (exit code " + exitCode + "). See " + Log("build"));
                     Console.WriteLine("Build finished.");
-                    stage = Stage.WaitingForPorts;
+                    BeginProbe(Stage.WaitingForPorts);
                 }
 
                 if (stage == Stage.WaitingForPorts)
@@ -207,6 +209,7 @@ namespace LyraTray
                     if (listeners.Any(endpoint => endpoint.Port == port))
                     {
                         string blocked = "Dashboard port " + port + " is in use. Stop the other server or relaunch with -Port.";
+                        if (Stopwatch.GetTimestamp() >= deadline) throw new InvalidOperationException(blocked);
                         if (waitingFor != blocked) Console.WriteLine(blocked);
                         waitingFor = blocked;
                         timer.Interval = 1000;
@@ -253,12 +256,14 @@ namespace LyraTray
                     StopFollowingLogs();
                     ShowTray();
                     if (ollama == null) icon.ShowBalloonTip(6000, "Lyra AI", SharedOllamaWarning, ToolTipIcon.Warning);
+                    dashboardActivation = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\LyraAI.Activate");
                     Console.WriteLine("Ready: " + dashboard);
                     File.WriteAllText(Path.Combine(startupDirectory, "ready"), "");
                     stage = Stage.Ready;
                     timer.Interval = 2000;
                     OpenDashboard(installedOnly: true);
                 }
+                if (!openingDashboard && dashboardActivation != null && dashboardActivation.WaitOne(0)) OpenDashboard();
             }
             catch (Exception error)
             {
@@ -463,6 +468,7 @@ namespace LyraTray
             timer.Stop();
             StopFollowingLogs();
             job.Dispose();
+            if (dashboardActivation != null) dashboardActivation.Dispose();
             if (build != null) build.Dispose();
             if (lyra != null) lyra.Dispose();
             if (ollama != null) ollama.Dispose();
