@@ -18,6 +18,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/select", post(select_model))
         .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
         .route("/model/description", post(describe_model))
+        .route("/model/pi-support", post(set_pi_support))
         .route("/model/context", post(set_model_context))
         .route("/model/context/estimate", get(context_estimate))
 }
@@ -63,6 +64,34 @@ async fn get_benchmark(
 #[derive(serde::Deserialize)]
 struct DescriptionRequest {
     description: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PiSupportRequest {
+    pi_supported: bool,
+}
+
+async fn set_pi_support(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<PiSupportRequest>,
+) -> StatusCode {
+    let model = match control_model(&app, &headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
+    };
+    let store = app.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.benchmarks.set_pi_supported(model, request.pi_supported)
+    })
+    .await
+    {
+        Ok(Ok(())) => {
+            app.task.send_modify(|snapshot| snapshot.model_record_changed());
+            StatusCode::NO_CONTENT
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn describe_model(

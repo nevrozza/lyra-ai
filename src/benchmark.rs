@@ -31,6 +31,7 @@ pub enum Stage {
 #[serde(default)]
 pub struct Record {
     description: String,
+    pi_supported: bool,
     pub context_tokens: Option<u32>,
     pub latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
@@ -187,6 +188,15 @@ impl Store {
             let record = records.entry(model).or_default();
             let changed = record.context_tokens != tokens;
             record.context_tokens = tokens;
+            changed
+        })
+    }
+
+    pub fn set_pi_supported(&self, model: String, supported: bool) -> io::Result<()> {
+        self.update(|records| {
+            let record = records.entry(model).or_default();
+            let changed = record.pi_supported != supported;
+            record.pi_supported = supported;
             changed
         })
     }

@@ -232,7 +232,7 @@ fn spawn_pi(
                 "--no-skills",
                 "--no-context-files",
                 "--tools",
-                "read,grep,find,ls",
+                "read,grep,find,ls,write,edit",
             ])
             .current_dir(workspace)
             .stdin(Stdio::piped())

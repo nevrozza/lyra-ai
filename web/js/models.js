@@ -8,6 +8,7 @@ const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 
 export function createModels(session, { refreshControls, requestMetrics }) {
   const pinModel = get('pin-model');
+  const piSupport = get('pi-support');
   const unloadModel = get('unload-model');
   const benchmarkRun = get('benchmark-run');
   const description = get('model-description');
@@ -19,6 +20,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
+  let piSupportSaving;
 
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
@@ -40,6 +42,10 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const blocked = isBlocked();
     const installed = session.metrics?.installed_models?.includes(observedModel);
     pinModel.disabled = blocked || !installed || session.metrics?.models == null;
+    piSupport.disabled = session.closed || !session.online || !installed || !benchmarkRecord ||
+      Boolean(piSupportSaving);
+    piSupport.checked = piSupportSaving && piSupportSaving.model === observedModel
+      ? piSupportSaving.checked : Boolean(benchmarkRecord?.pi_supported);
     unloadModel.disabled = blocked || !installed || !loadedModel(session.metrics?.models, observedModel);
     benchmarkRun.disabled = blocked || !installed || session.metrics?.models == null;
     description.readOnly = session.closed;
@@ -61,6 +67,28 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   pinModel.addEventListener('change', () => {
     const pinned = pinModel.checked;
     changeModel(pinned ? 'pin' : 'unpin', '/model/pin', { pinned });
+  });
+
+  piSupport.addEventListener('change', async () => {
+    const model = displayedModel();
+    if (piSupport.disabled || !model) return;
+    const checked = piSupport.checked;
+    piSupportSaving = { model, checked };
+    modelRequestError = '';
+    renderModel(session.metrics?.models);
+    try {
+      const response = await postModel('/model/pi-support', session.run?.model, { pi_supported: checked }, model);
+      if (!response.ok) throw new Error(modelResponseError(response));
+      if (displayedModel() === model && benchmarkRecord) {
+        benchmarkRecord.pi_supported = checked;
+        readBenchmark(model, false);
+      }
+    } catch (error) {
+      if (displayedModel() === model) modelRequestError = `Отметка Pi не сохранена. ${error.message}`;
+    } finally {
+      piSupportSaving = undefined;
+      renderModel(session.metrics?.models);
+    }
   });
 
   unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
