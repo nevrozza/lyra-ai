@@ -3,6 +3,15 @@ import { Type } from "@sinclair/typebox";
 export default function (pi) {
     const textOnly = process.env.LYRA_PI_TEXT_ONLY === "1";
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
+    const effort = process.env.LYRA_THINKING_EFFORT;
+    if (effort) {
+        pi.on("before_provider_request", ({ payload }) => {
+            // Ollama levels can differ from Pi's built-in thinking presets.
+            const request = { ...payload, reasoning_effort: effort };
+            if (request.reasoning) request.reasoning = { ...request.reasoning, effort };
+            return request;
+        });
+    }
     let earlierMessages = [];
     let promptTimestamp;
     if (!textOnly) {
@@ -25,7 +34,7 @@ export default function (pi) {
     }
     pi.on("session_start", (_event, ctx) => {
         pi.setActiveTools(textOnly ? [] : ["read", "grep", "find", "ls", "write", "edit", "run_command"]);
-        if (origin) earlierMessages = recentMessages(ctx.sessionManager);
+        if (origin) earlierMessages = savedMessages(ctx.sessionManager);
         ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");
     });
     if (origin === "dashboard" || origin === "orchestrator") {
@@ -40,46 +49,69 @@ export default function (pi) {
                 });
             }
         });
-        pi.on("context", ({ messages }) => {
-            const currentPromptPresent = messages.some(message => message.role === "user" &&
+        let reportedNearLimit = false;
+        pi.on("session_before_compact", (_event, ctx) => ctx.ui.notify("lyra:context-compacting"));
+        pi.on("session_compact", (_event, ctx) => ctx.ui.notify("lyra:context-compacted"));
+        pi.on("session_compact_failed", ({ aborted }, ctx) => {
+            if (!aborted) ctx.ui.notify("lyra:context-near-limit");
+        });
+        pi.on("context", ({ messages }, ctx) => {
+            const usage = ctx.getContextUsage?.();
+            if (!reportedNearLimit && usage?.percent >= 90) {
+                reportedNearLimit = true;
+                ctx.ui.notify("lyra:context-near-limit");
+            }
+            const promptIndex = messages.findLastIndex(message => message.role === "user" &&
                 message.timestamp === promptTimestamp);
             const historyPresent = messages.some(message => message.role === "compactionSummary" ||
                 earlierMessages.some(earlier => earlier.role === message.role &&
                     earlier.timestamp === message.timestamp));
-            if (currentPromptPresent && !historyPresent) messages = [...earlierMessages, ...messages];
-            if (textOnly) {
-                messages = messages.flatMap(message => {
-                    if (["system", "compactionSummary", "branchSummary"].includes(message.role)) return [message];
-                    const text = textMessage(message);
-                    return text ? [text] : [];
-                });
+            if (promptIndex < 0) return { messages };
+            if (!historyPresent) {
+                messages = [...messages.slice(0, promptIndex), ...earlierMessages, ...messages.slice(promptIndex)];
             }
-            return { messages };
+            return { messages: conversationContext(messages, promptTimestamp, textOnly) };
         });
     }
     pi.on("agent_end", (_event, ctx) => ctx.shutdown());
 }
 
-function textMessage(message, limit = Infinity) {
+function conversationContext(messages, promptTimestamp, textOnly) {
+    const conversation = textOnly ? messages.flatMap(message => {
+        if (["system", "compactionSummary", "branchSummary"].includes(message.role)) return [message];
+        const text = textMessage(message);
+        return text ? [text] : [];
+    }) : messages;
+    const promptIndex = conversation.findLastIndex(message => message.role === "user" &&
+        message.timestamp === promptTimestamp);
+    const hasHistory = conversation.slice(0, Math.max(promptIndex, 0)).some(message =>
+        ["user", "assistant", "compactionSummary", "branchSummary"].includes(message.role));
+    if (!hasHistory) return conversation;
+
+    const prompt = conversation[promptIndex];
+    // Keep every preceding turn in its original role, including native compaction summaries.
+    const continuation = {
+        type: "text",
+        text: "This is the next message in the same Lyra chat. Use the preceding messages and any saved summary when answering, including when asked to recall earlier turns.\n\nLatest user message\n",
+    };
+    const content = typeof prompt.content === "string"
+        ? [{ type: "text", text: prompt.content }] : prompt.content;
+    return [...conversation.slice(0, promptIndex), { ...prompt, content: [continuation, ...content] },
+        ...conversation.slice(promptIndex + 1)];
+}
+
+function textMessage(message) {
     if (message.role !== "user" && message.role !== "assistant") return;
-    const text = (typeof message.content === "string" ? message.content
-        : message.content?.filter(block => block.type === "text").map(block => block.text).join("\n"))
-        ?.slice(0, limit);
+    const text = typeof message.content === "string" ? message.content
+        : message.content?.filter(block => block.type === "text").map(block => block.text).join("\n");
     if (!text?.trim()) return;
     const content = [{ type: "text", text }];
     return message.role === "assistant" ? { ...message, content, stopReason: "stop" } : { ...message, content };
 }
 
-function recentMessages(sessionManager) {
+function savedMessages(sessionManager) {
     const branch = sessionManager?.getBranch?.() ?? [];
     // Honor a saved compaction or explicit context edit instead of restoring raw entries.
     if (branch.some(entry => entry.type === "compaction" || entry.type === "context_edit")) return [];
-    const messages = [];
-    for (let index = branch.length - 1; index >= 0 && messages.length < 8; index--) {
-        const entry = branch[index];
-        if (entry.type !== "message") continue;
-        const message = textMessage(entry.message, 512);
-        if (message) messages.push(message);
-    }
-    return messages.reverse();
+    return branch.flatMap(entry => entry.type === "message" ? [entry.message] : []);
 }

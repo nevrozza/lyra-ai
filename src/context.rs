@@ -149,6 +149,7 @@ pub(crate) struct Estimate {
     pub bytes_per_token_f16: Option<u64>,
     pub configured_context_tokens: Option<u64>,
     pub thinking: Value,
+    pub thinking_options: Vec<ollama::Think>,
     pub capabilities: Option<Vec<String>>,
 }
 
@@ -190,10 +191,35 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
                 .filter(|&tokens| tokens > 0)
         })
     });
+    let mut thinking_options = Vec::new();
+    if let Some(values) = info.thinking["values"].as_array() {
+        for value in values {
+            let option = match value {
+                Value::Bool(true) => ollama::Think::Enabled(true),
+                Value::String(level) if !level.trim().is_empty() => {
+                    ollama::Think::Level(level.clone())
+                }
+                _ => continue,
+            };
+            if !thinking_options.contains(&option) {
+                thinking_options.push(option);
+            }
+        }
+    } else if info
+        .capabilities
+        .as_ref()
+        .is_some_and(|items| items.iter().any(|item| item == "thinking"))
+    {
+        thinking_options.push(ollama::Think::Enabled(true));
+    }
+    if !thinking_options.is_empty() {
+        thinking_options.push(ollama::Think::Enabled(false));
+    }
     Some(Estimate {
         bytes_per_token_f16: estimate_f16(&info.model_info),
         configured_context_tokens,
         thinking: info.thinking,
+        thinking_options,
         capabilities: info.capabilities,
     })
 }

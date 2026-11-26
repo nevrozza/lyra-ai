@@ -11,7 +11,7 @@ use tokio::{
     process::{ChildStdin, Command},
 };
 
-use crate::context;
+use crate::{context, ollama, run::ContextNotice};
 
 use super::{
     commands, projects,
@@ -31,6 +31,9 @@ pub(super) struct Task<'a> {
     pub(super) request_id: Option<&'a str>,
     pub(super) text_only: bool,
     pub(super) model: &'a str,
+    pub(super) delegation: u64,
+    pub(super) context_window: Option<u32>,
+    pub(super) think: Option<&'a ollama::Think>,
 }
 
 pub(super) struct Reply {
@@ -38,6 +41,7 @@ pub(super) struct Reply {
     pub(super) stop_reason: Option<String>,
     pub(super) truncated: bool,
     pub(super) error: Option<String>,
+    pub(super) context_overflow: bool,
     successful_file_tools: [bool; 3],
 }
 
@@ -149,9 +153,18 @@ pub(super) async fn run(
         tokio::task::spawn_blocking(move || context::backend_model(&source, context_tokens))
             .await
             .map_err(|error| error.to_string())??;
-    configure_pi(config, &backend, model, context_tokens, limit)
+    let context_window = task
+        .as_ref()
+        .and_then(|task| task.context_window)
+        .or(context_tokens);
+    configure_pi(config, &backend, model, context_window, limit)
         .await
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
+    if let Some(window) = task.as_ref().and_then(|task| task.context_window) {
+        configure_chat_compaction(config, window)
+            .await
+            .map_err(|error| format!("Could not configure Pi history compaction: {error}"))?;
+    }
     let trace = task.as_ref().map(|task| task.trace);
     let commands = trace;
     let text_only = task.as_ref().is_some_and(|task| task.text_only);
@@ -231,6 +244,7 @@ pub(super) async fn run(
     let mut delta_bytes = 0usize;
     let mut last_error = None;
     let mut stop_reason = None;
+    let mut last_input_tokens = None;
     let mut text_clipped = false;
     let mut successful_file_tools = [false; 3];
     let mut ready = commands.is_none();
@@ -251,9 +265,25 @@ pub(super) async fn run(
             continue;
         };
         match event["type"].as_str() {
+            Some("auto_compaction_start") => {
+                report_context(task.as_ref(), ContextNotice::Compacting)
+            }
+            Some("auto_compaction_end") if event["result"].is_object() => {
+                report_context(task.as_ref(), ContextNotice::Compacted);
+            }
+            Some("auto_compaction_end") => report_context(task.as_ref(), ContextNotice::NearLimit),
             Some("extension_ui_request") if commands.is_some() => {
                 let stdin = stdin.as_mut().expect("Pi RPC input");
                 match event["method"].as_str() {
+                    Some("notify") if event["message"] == "lyra:context-near-limit" => {
+                        report_context(task.as_ref(), ContextNotice::NearLimit);
+                    }
+                    Some("notify") if event["message"] == "lyra:context-compacting" => {
+                        report_context(task.as_ref(), ContextNotice::Compacting);
+                    }
+                    Some("notify") if event["message"] == "lyra:context-compacted" => {
+                        report_context(task.as_ref(), ContextNotice::Compacted);
+                    }
                     Some("notify")
                         if !ready
                             && matches!(
@@ -357,6 +387,12 @@ pub(super) async fn run(
                 let message = &event["message"];
                 let reason = message["stopReason"].as_str();
                 stop_reason = reason.map(str::to_owned);
+                let usage = &message["usage"];
+                last_input_tokens = usage["input"].as_u64().map(|input| {
+                    input
+                        .saturating_add(usage["cacheRead"].as_u64().unwrap_or_default())
+                        .saturating_add(usage["cacheWrite"].as_u64().unwrap_or_default())
+                });
                 last_error = match reason {
                     Some("error" | "aborted") => Some(
                         message["errorMessage"]
@@ -442,12 +478,46 @@ pub(super) async fn run(
         }
     }
     Ok(Reply {
+        context_overflow: answer.trim().is_empty()
+            && stop_reason.as_deref() == Some("length")
+            && last_input_tokens
+                .zip(context_window)
+                .is_some_and(|(input, window)| input >= u64::from(window)),
         text: answer,
         stop_reason,
         truncated,
         error: last_error,
         successful_file_tools,
     })
+}
+
+fn report_context(task: Option<&Task<'_>>, notice: ContextNotice) {
+    let Some(task) = task else { return };
+    if task.context_window.is_some() {
+        task.trace
+            .app()
+            .task
+            .send_if_modified(|snapshot| snapshot.delegation_context(task.delegation, notice));
+    }
+}
+
+pub(super) fn is_context_overflow(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context_window_exceeded",
+        "context length exceeded",
+        "exceeds the context window",
+        "context window exceeded",
+        "exceeded max context length",
+        "exceeds the maximum context length",
+        "exceeds the available context size",
+        "exceeds model's maximum context length",
+        "prompt too long",
+        "prompt is too long",
+    ]
+    .iter()
+    .any(|phrase| error.contains(phrase))
 }
 
 async fn write_project_instructions(
@@ -496,10 +566,10 @@ async fn write_project_instructions(
         );
     }
     if task.text_only {
-        text.push_str("\nThis turn is text-only. Answer from the available conversation and instructions. File and shell tools are unavailable. If the task needs them, say so.\n");
+        text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
     }
     if project.session_file.is_some() {
-        text.push_str("\nThis is a continuing local Lyra conversation. Previous user messages and model replies in the conversation are available as context even when the user switches models. When asked about earlier messages, use the turns and summaries you actually received and say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");
+        text.push_str("\nEarlier turns and saved summaries, when present, belong to this same local Lyra chat even if the user switched models. Use the conversation you actually received to answer questions about earlier turns. Say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");
     }
     tokio::fs::write(path, text).await
 }
@@ -537,6 +607,35 @@ async fn configure_pi(
     tokio::fs::write(directory.join("models.json"), config.to_string()).await
 }
 
+async fn configure_chat_compaction(directory: &Path, window: u32) -> io::Result<()> {
+    let path = directory.join("settings.json");
+    let mut settings: Value = match tokio::fs::read(&path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error),
+    };
+    let settings = settings
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("Pi settings must be an object"))?;
+    let compaction = settings
+        .entry("compaction")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("Pi compaction settings must be an object"))?;
+    // Pi's defaults target large windows. Scale defaults to leave room for a summary on small models.
+    compaction
+        .entry("reserveTokens")
+        .or_insert_with(|| json!((window / 4).min(16_384)));
+    compaction
+        .entry("keepRecentTokens")
+        .or_insert_with(|| json!((window / 2).min(20_000)));
+    tokio::fs::write(
+        path,
+        serde_json::to_vec(settings).map_err(io::Error::other)?,
+    )
+    .await
+}
+
 fn spawn_pi(
     workspace: &Path,
     model: &str,
@@ -556,6 +655,15 @@ fn spawn_pi(
     let spawn = |program: &str| {
         let mut command = Command::new(program);
         command.env("PI_CODING_AGENT_DIR", pi_agent_dir);
+        command.env_remove("LYRA_THINKING_EFFORT");
+        if let Some(think) = task.and_then(|task| task.think) {
+            let effort = match think {
+                ollama::Think::Enabled(true) => "medium",
+                ollama::Think::Enabled(false) => "none",
+                ollama::Think::Level(level) => level,
+            };
+            command.env("LYRA_THINKING_EFFORT", effort);
+        }
         command.args([
             "--provider",
             "ollama",

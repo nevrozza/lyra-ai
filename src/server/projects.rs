@@ -196,6 +196,7 @@ async fn history(
                 project_session_id,
             },
             &app.benchmarks,
+            true,
         )
     })
     .await
@@ -436,6 +437,7 @@ impl Store {
         &self,
         key: SessionKey,
         benchmarks: &benchmark::Store,
+        include_context_notices: bool,
     ) -> Result<VecDeque<Message>> {
         let catalog = self.list()?;
         let project = catalog
@@ -461,6 +463,19 @@ impl Store {
             if entry["type"] == "custom" && entry["customType"] == "lyra-message-origin" {
                 pending_origin =
                     serde_json::from_value::<MessageOriginEntry>(entry["data"].clone()).ok();
+                continue;
+            }
+            if include_context_notices && entry["type"] == "compaction" {
+                if messages.len() == 100 {
+                    messages.pop_front();
+                }
+                messages.push_back(Message {
+                    role: "notice",
+                    text: "История сжата для модели. Исходная переписка сохранена.".into(),
+                    model: None,
+                    origin: None,
+                    request_id: None,
+                });
                 continue;
             }
             if entry["type"] != "message" {

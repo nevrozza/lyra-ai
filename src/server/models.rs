@@ -21,6 +21,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/benchmark/pi", post(start_pi_benchmark))
         .route("/model/context", post(set_model_context))
         .route("/model/context/estimate", get(context_estimate))
+        .route("/model/thinking", post(set_model_thinking))
 }
 
 #[derive(serde::Deserialize)]
@@ -201,10 +202,51 @@ async fn set_model_context(
 }
 
 pub(super) fn model_context(app: &App, model: &str) -> Result<Option<u32>, String> {
+    Ok(model_settings(app, model)?.context_tokens)
+}
+
+pub(super) fn model_settings(app: &App, model: &str) -> Result<benchmark::Record, String> {
     app.benchmarks
         .get(model)
-        .map(|record| record.context_tokens)
         .map_err(|error| format!("Не удалось прочитать настройки модели: {error}"))
+}
+
+#[derive(serde::Deserialize)]
+struct ThinkingRequest {
+    think: Option<ollama::Think>,
+}
+
+async fn set_model_thinking(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<ThinkingRequest>,
+) -> StatusCode {
+    let model = match control_model(&app, &headers).await {
+        Ok(model) => model,
+        Err(status) => return status,
+    };
+    let store = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(think) = &request.think {
+            let estimate = context::estimate(&model).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+            if !estimate.thinking_options.contains(think) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+        store
+            .benchmarks
+            .set_thinking(model, request.think)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            app.task.send_modify(run::Snapshot::model_record_changed);
+            StatusCode::NO_CONTENT
+        }
+        Ok(Err(status)) => status,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {

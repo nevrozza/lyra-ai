@@ -34,6 +34,7 @@ pub struct Record {
     description: String,
     pub(crate) pi_check: Option<bool>,
     pub context_tokens: Option<u32>,
+    pub(crate) think: Option<ollama::Think>,
     pub latest: Option<Measurement>,
     last_cold_load: Option<ColdLoad>,
     average_run: Option<TimingAverage>,
@@ -189,6 +190,19 @@ impl Store {
             let record = records.entry(model).or_default();
             let changed = record.context_tokens != tokens;
             record.context_tokens = tokens;
+            changed
+        })
+    }
+
+    pub(crate) fn set_thinking(
+        &self,
+        model: String,
+        think: Option<ollama::Think>,
+    ) -> io::Result<()> {
+        self.update(|records| {
+            let record = records.entry(model).or_default();
+            let changed = record.think != think;
+            record.think = think;
             changed
         })
     }

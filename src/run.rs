@@ -19,6 +19,7 @@ pub struct Snapshot {
     closed: bool,
     delegated_model: Option<String>,
     delegations: BTreeMap<u64, Delegation>,
+    chat_context: BTreeMap<u64, ContextNotice>,
     #[serde(skip)]
     next_delegation: u64,
     ai_model_actions: BTreeMap<String, AiAction>,
@@ -40,8 +41,19 @@ struct Delegation {
     model: String,
     project_session_id: Option<u64>,
     stopping: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_notice: Option<ContextNotice>,
     #[serde(skip)]
     project: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextNotice {
+    NearLimit,
+    Compacting,
+    Compacted,
+    Full,
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +69,7 @@ impl Snapshot {
             closed: false,
             delegated_model: None,
             delegations: BTreeMap::new(),
+            chat_context: BTreeMap::new(),
             next_delegation: 0,
             ai_model_actions: BTreeMap::new(),
             pinned: None,
@@ -120,6 +133,9 @@ impl Snapshot {
             }
         };
         self.next_delegation += 1;
+        if let Some(session) = project_session_id {
+            self.chat_context.remove(&session);
+        }
         self.delegated_model.get_or_insert_with(|| model.to_owned());
         self.delegations.insert(
             self.next_delegation,
@@ -127,6 +143,7 @@ impl Snapshot {
                 model: model.to_owned(),
                 project_session_id,
                 stopping: false,
+                context_notice: None,
                 project,
             },
         );
@@ -158,7 +175,12 @@ impl Snapshot {
                 .values()
                 .next()
                 .map(|active| active.model.clone());
-            if active.project_session_id.is_some() {
+            if let Some(session) = active.project_session_id {
+                if let Some(notice @ (ContextNotice::NearLimit | ContextNotice::Full)) =
+                    active.context_notice
+                {
+                    self.chat_context.insert(session, notice);
+                }
                 self.projects_changed();
             }
             if succeeded {
@@ -166,6 +188,17 @@ impl Snapshot {
             }
         }
         self.metrics_revision += 1;
+    }
+
+    pub fn delegation_context(&mut self, id: u64, notice: ContextNotice) -> bool {
+        let Some(active) = self.delegations.get_mut(&id) else {
+            return false;
+        };
+        if active.context_notice == Some(notice) {
+            return false;
+        }
+        active.context_notice = Some(notice);
+        true
     }
 
     pub fn begin_model_action(&mut self, model: String, action: ModelAction) -> bool {

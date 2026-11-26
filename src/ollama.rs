@@ -59,7 +59,7 @@ struct ChatMessage {
     thinking: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum Think {
     Enabled(bool),

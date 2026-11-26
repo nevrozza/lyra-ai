@@ -70,6 +70,7 @@
             </div>
           </div>
           <p id="project-message" class="secondary project-feedback" role="status"></p>
+          <p id="project-context-notice" class="project-feedback project-context-notice" role="status" hidden></p>
           <p id="project-archive-notice" class="secondary project-feedback" hidden></p>
           <form id="project-prompt-form" class="project-composer" hidden>
             <label for="project-prompt" class="visually-hidden">Сообщение для Lyra</label>
@@ -171,12 +172,26 @@
                 <p id="context-memory-warning" class="memory-warning" role="status" hidden></p>
               </form>
               <div class="model-actions">
+                <button id="model-thinking" class="unload" type="button" aria-haspopup="dialog" aria-controls="model-thinking-dialog" hidden>Thinking</button>
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>
               </div>
             </div>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
           </div>
+          <dialog id="model-thinking-dialog" class="project-dialog model-thinking-dialog" aria-labelledby="model-thinking-title">
+            <form id="model-thinking-form" class="project-form">
+              <h3 id="model-thinking-title">Thinking</h3>
+              <p id="model-thinking-name" class="secondary"></p>
+              <div id="model-thinking-options" role="radiogroup" aria-label="Уровень thinking"></div>
+              <p id="model-thinking-note" class="secondary" hidden>Для этой модели Off использует минимальный уровень thinking.</p>
+              <p id="model-thinking-feedback" class="project-feedback" data-error="true" role="status"></p>
+              <div class="project-controls project-dialog-actions">
+                <button id="cancel-model-thinking" class="unload" type="button">Отмена</button>
+                <button id="save-model-thinking" type="submit">Сохранить</button>
+              </div>
+            </form>
+          </dialog>
         </section>
         <section id="benchmark-panel" class="panel model-benchmark" aria-labelledby="benchmark-title" hidden>
           <div id="benchmark-resizer" class="column-resizer" role="separator" aria-orientation="vertical" aria-labelledby="benchmark-title" aria-controls="benchmark-panel" title="Потяните, чтобы изменить ширину" tabindex="0"></div>
@@ -198,11 +213,11 @@
       </div>
 
       <div class="activity">
-        <section class="panel" aria-labelledby="sessions-title">
-          <header class="panel-header"><h2 id="sessions-title">MCP-вызовы</h2></header>
-          <div class="panel-body sessions-body">
+        <section class="panel" aria-labelledby="command-settings-title">
+          <header class="panel-header"><h2 id="command-settings-title">Команды Pi</h2></header>
+          <div class="panel-body">
             <div class="command-settings">
-              <label for="command-mode">Команды Pi</label>
+              <label for="command-mode">Подтверждение</label>
               <select id="command-mode" disabled>
                 <option value="ask">Спрашивать</option>
                 <option value="allow_all">Всё разрешать</option>
@@ -222,8 +237,13 @@
               </div>
               <p id="command-error" class="secondary" role="alert" hidden></p>
             </section>
-            <p id="session-message" class="secondary">Пока нет вызовов Lyra MCP.</p>
-            <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов"></ul>
+          </div>
+        </section>
+        <section class="panel" aria-labelledby="sessions-title">
+          <header class="panel-header"><h2 id="sessions-title">MCP-вызовы оркестратора</h2></header>
+          <div class="panel-body sessions-body">
+            <p id="session-message" class="secondary">Пока нет MCP-вызовов оркестратора.</p>
+            <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов оркестратора"></ul>
             <div id="session-detail" hidden>
               <p id="session-omitted" class="secondary" hidden>Показаны последние события.</p>
               <ol id="session-events" class="session-events" aria-label="Хронология MCP-вызовов"></ol>

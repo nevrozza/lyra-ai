@@ -17,7 +17,7 @@ export function createSessions() {
 
   function render(view) {
     message.hidden = view.sessions.length > 0;
-    message.textContent = 'Пока нет вызовов Lyra MCP.';
+    message.textContent = 'Пока нет MCP-вызовов оркестратора.';
     const nextListKey = JSON.stringify([view.sessions, view.selected]);
     if (nextListKey !== listKey) {
       const focused = document.activeElement?.dataset.session;
@@ -107,7 +107,7 @@ export function createSessions() {
       }
     } catch {
       message.hidden = false;
-      message.textContent = 'Не удалось обновить MCP-вызовы.';
+      message.textContent = 'Не удалось обновить MCP-вызовы оркестратора.';
     } finally {
       reading = false;
       if (queued) {

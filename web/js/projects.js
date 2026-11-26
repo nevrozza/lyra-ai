@@ -64,13 +64,24 @@ export function createProjects() {
     const delegation = chatRun(chat?.id);
     const active = chat && (sending.has(chat.id) || delegation);
     const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
+    const contextNotice = delegation?.[1].context_notice ?? run?.chat_context?.[chat?.id];
+    const contextStatus = {
+      near_limit: 'Контекст почти заполнен. Старые сообщения могут быть сжаты.',
+      full: 'Контекст модели заполнен. Увеличь окно контекста, сократи запрос или начни новый чат.',
+    }[contextNotice];
+    const contextBanner = get('project-context-notice');
+    const statusShowsOverflow = contextNotice === 'full' &&
+      get('project-message').textContent.startsWith('Контекст модели заполнен.');
+    contextBanner.hidden = !contextStatus || statusShowsOverflow;
+    if (contextBanner.textContent !== (contextStatus ?? '')) contextBanner.textContent = contextStatus ?? '';
     const running = agents();
     const activeChats = new Set([...sending.keys(), ...running.map(task => task.project_session_id)]);
     for (const spinner of tree.querySelectorAll('[data-chat-progress]')) {
       spinner.hidden = !activeChats.has(Number(spinner.dataset.chatProgress));
     }
     get('project-progress').hidden = !active;
-    const progressText = stopping ? 'Останавливаем…' : delegation ? 'Модель отвечает…' : 'Отправляем…';
+    const progressText = stopping ? 'Останавливаем…' : contextNotice === 'compacting'
+      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : 'Отправляем…';
     const progress = get('project-progress-text');
     if (progress.textContent !== progressText) progress.textContent = progressText;
     get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));

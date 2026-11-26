@@ -149,6 +149,10 @@ impl Session {
 
 pub(super) struct Call {
     app: Arc<App>,
+    tracked: Option<TrackedCall>,
+}
+
+struct TrackedCall {
     session: u64,
     id: u64,
     tool: String,
@@ -160,6 +164,10 @@ pub(super) struct Call {
 impl Call {
     pub(super) fn app(&self) -> &App {
         &self.app
+    }
+
+    pub(super) fn untracked(app: Arc<App>) -> Self {
+        Self { app, tracked: None }
     }
 
     pub(super) fn start(
@@ -216,11 +224,13 @@ impl Call {
         app.task.send_modify(crate::run::Snapshot::sessions_changed);
         Self {
             app,
-            session,
-            id,
-            tool: tool.into(),
-            started: Instant::now(),
-            token_usage: None,
+            tracked: Some(TrackedCall {
+                session,
+                id,
+                tool: tool.into(),
+                started: Instant::now(),
+                token_usage: None,
+            }),
         }
     }
 
@@ -231,9 +241,12 @@ impl Call {
         generated: Option<u64>,
         stop_reason: Option<&str>,
     ) {
+        let Some(call) = self.tracked.as_mut() else {
+            return;
+        };
         let count =
             |count: Option<u64>| count.map_or_else(|| "—".into(), |count| count.to_string());
-        self.token_usage = Some(format!(
+        call.token_usage = Some(format!(
             "Токены · вход {} · генерация {} / {budget} · остановка {}",
             count(prompt),
             count(generated),
@@ -244,35 +257,36 @@ impl Call {
     }
 
     pub(super) fn event(&self, kind: Kind, title: &str, text: &str, status: Option<&'static str>) {
-        self.update(|session| session.push(self.id, kind, title, text, status));
+        self.update(|call, session| session.push(call.id, kind, title, text, status));
     }
 
     pub(super) fn finish(self, error: Option<&str>) {
-        self.update(|session| {
+        self.update(|call, session| {
             session.summary.active -= 1;
             let (status, mut detail) = match error {
-                None => ("ok", format!("{} мс", self.started.elapsed().as_millis())),
+                None => ("ok", format!("{} мс", call.started.elapsed().as_millis())),
                 Some(error) => {
                     session.summary.errors += 1;
                     ("error", error.to_owned())
                 }
             };
-            if let Some(usage) = &self.token_usage {
+            if let Some(usage) = &call.token_usage {
                 detail.insert(0, '\n');
                 detail.insert_str(0, usage);
             }
-            session.push(self.id, Kind::Mcp, &self.tool, &detail, Some(status))
+            session.push(call.id, Kind::Mcp, &call.tool, &detail, Some(status))
         });
     }
 
-    fn update(&self, update: impl FnOnce(&mut Session) -> bool) {
+    fn update(&self, update: impl FnOnce(&TrackedCall, &mut Session) -> bool) {
+        let Some(call) = &self.tracked else { return };
         let changed = {
             let mut history = self.app.sessions.lock().expect("session history lock");
             let changed = history
                 .sessions
                 .iter_mut()
-                .find(|session| session.summary.id == self.session)
-                .is_some_and(update);
+                .find(|session| session.summary.id == call.session)
+                .is_some_and(|session| update(call, session));
             history.trim();
             changed
         };

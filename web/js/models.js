@@ -6,6 +6,13 @@ import { duration, get, memoryAmount, whole } from './ui.js';
 
 const farFuture = 100 * 365 * 24 * 60 * 60 * 1000;
 
+function thinkingLabel(think) {
+  if (think == null) return 'По умолчанию';
+  if (think === true) return 'On';
+  if (think === false) return 'Off';
+  return think;
+}
+
 export function createModels(session, { refreshControls, requestMetrics }) {
   const pinModel = get('pin-model');
   const piSupport = get('pi-support');
@@ -15,6 +22,12 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   const benchmarkRun = get('benchmark-run');
   const description = get('model-description');
   const saveDescription = get('save-description');
+  const thinkingButton = get('model-thinking');
+  const thinkingDialog = get('model-thinking-dialog');
+  const thinkingForm = get('model-thinking-form');
+  const thinkingOptions = get('model-thinking-options');
+  const saveThinking = get('save-model-thinking');
+  const cancelThinking = get('cancel-model-thinking');
   let modelSubmitting;
   let modelRequestError = '';
   let inspectedModel;
@@ -22,6 +35,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
+  let thinkingModel;
+  let thinkingSaving = false;
 
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
@@ -58,6 +73,13 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     saveDescription.hidden = !descriptionChanged;
     saveDescription.disabled = description.readOnly || description.disabled || !descriptionChanged ||
       !session.online;
+    const canEditThinking = session.online && !session.closed && Boolean(session.run);
+    thinkingButton.hidden = !installed || !settings.estimate?.thinking_options?.length;
+    thinkingButton.disabled = !canEditThinking || !benchmarkRecord || thinkingSaving;
+    thinkingButton.textContent = `Thinking · ${thinkingLabel(benchmarkRecord?.think)}`;
+    saveThinking.disabled = !canEditThinking || thinkingSaving;
+    cancelThinking.disabled = thinkingSaving;
+    thinkingOptions.querySelectorAll('input').forEach(input => { input.disabled = thinkingSaving; });
     settings.updateControls(blocked, installed);
     list.setDisabled(session.closed);
   }
@@ -76,6 +98,60 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
   benchmarkRun.addEventListener('click', () => changeModel('benchmark', '/model/benchmark'));
   piBenchmarkRun.addEventListener('click', () => changeModel('benchmark-pi', '/model/benchmark/pi'));
+
+  thinkingButton.addEventListener('click', () => {
+    thinkingModel = observedModel;
+    const estimate = settings.estimate;
+    const choices = [null, ...estimate.thinking_options];
+    const saved = benchmarkRecord.think ?? null;
+    const selected = choices.includes(saved) ? saved : null;
+    thinkingOptions.replaceChildren(...choices.map(think => {
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'think';
+      input.value = JSON.stringify(think);
+      input.checked = think === selected;
+      input.autofocus = input.checked;
+      const label = document.createElement('label');
+      label.className = 'pin';
+      label.append(input, thinkingLabel(think));
+      return label;
+    }));
+    const advertised = estimate.thinking?.values;
+    get('model-thinking-name').textContent = thinkingModel;
+    get('model-thinking-note').hidden = !Array.isArray(advertised) || advertised.includes(false);
+    get('model-thinking-feedback').textContent = '';
+    thinkingDialog.showModal();
+  });
+
+  cancelThinking.addEventListener('click', () => thinkingDialog.close());
+  thinkingDialog.addEventListener('cancel', event => {
+    if (thinkingSaving) event.preventDefault();
+  });
+  thinkingForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (saveThinking.disabled) return;
+    const model = thinkingModel;
+    const think = JSON.parse(new FormData(thinkingForm).get('think'));
+    const feedback = get('model-thinking-feedback');
+    thinkingSaving = true;
+    feedback.textContent = '';
+    renderControls();
+    try {
+      const response = await postModel('/model/thinking', session.run?.model, { think }, model);
+      if (!response.ok) {
+        throw new Error(response.status === 400 ? 'Модель больше не поддерживает этот уровень.' :
+          modelResponseError(response));
+      }
+      if (model === observedModel && benchmarkRecord) benchmarkRecord.think = think;
+      thinkingDialog.close();
+    } catch (error) {
+      feedback.textContent = error.message;
+    } finally {
+      thinkingSaving = false;
+      renderControls();
+    }
+  });
 
   description.addEventListener('input', refreshControls);
   get('model-description-form').addEventListener('submit', async (event) => {

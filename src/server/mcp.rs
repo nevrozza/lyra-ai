@@ -12,14 +12,14 @@ use serde_json::{Value, json};
 
 use crate::{
     benchmark, context, model_name, ollama,
-    run::{AiAction, DelegationScope},
+    run::{AiAction, ContextNotice, DelegationScope},
     telemetry,
 };
 
 use super::{
     App,
     ai_settings::AI_SETTINGS,
-    models::{execute_model_action, model_context, save_description},
+    models::{execute_model_action, model_settings, save_description},
     pi, projects,
     sessions::{Call, Kind},
 };
@@ -189,7 +189,7 @@ fn tools() -> Value {
                 "prompt": {"type": "string", "minLength": 1},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or Ollama default."},
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens, "description": "Generation budget. On reasoning models it can include thinking tokens and run out before any visible text."},
-                "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional thinking switch or a supported model-specific level from inspect. Omit for the model default."},
+                "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional override for the thinking switch or model-specific level. Omit to use the Lyra model setting or the Ollama default."},
                 "require_loaded": {"type": "boolean", "description": "Use only a model already loaded with the requested or configured context"}
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
@@ -439,7 +439,10 @@ async fn call(
         "read_project_session" => {
             let input = arguments(args)?;
             project_result(
-                projects::work(app, |app| app.projects.history(input, &app.benchmarks)).await,
+                projects::work(app, |app| {
+                    app.projects.history(input, &app.benchmarks, false)
+                })
+                .await,
             )
         }
         "archive_project" => {
@@ -544,7 +547,8 @@ async fn run_model(
     let store = app.clone();
     let source = model.clone();
     let execution = tokio::task::spawn_blocking(move || {
-        let tokens = model_context(&store, &source)?;
+        let settings = model_settings(&store, &source)?;
+        let tokens = settings.context_tokens;
         let requested = request.context_tokens.map(NonZeroU32::get);
         let reply = ollama::chat(
             &source,
@@ -553,7 +557,7 @@ async fn run_model(
             tokens,
             requested,
             request.require_loaded,
-            request.think,
+            request.think.or(settings.think),
         )?;
         let saved = if requested.is_some() && requested != tokens && reply.completed() {
             store
@@ -662,14 +666,14 @@ async fn run_pi(
     let store = app.clone();
     let source = model.clone();
     let text_only = mode == ChatMode::Chat;
-    let tokens = tokio::task::spawn_blocking(move || {
+    let (tokens, context_window, think) = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
         if text_only && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
             .is_some_and(|capabilities| !capabilities.iter().any(|item| item == "completion"))
         {
             return Err(format!("Модель {source} не поддерживает текстовые ответы."));
         }
-        let unsupported = estimate.and_then(|info| info.supports_agent_tools()) == Some(false);
+        let unsupported = estimate.as_ref().and_then(|info| info.supports_agent_tools()) == Some(false);
         if unsupported && !text_only {
             return Err(if dashboard {
                 format!("Модель {source} не поддерживает инструменты Pi для режима Work. Выберите другую модель или переключитесь на Chat.")
@@ -677,8 +681,7 @@ async fn run_pi(
                 format!("{source} lacks Ollama text generation or tool calling support required for agentic Pi tasks. Inspect another model.")
             });
         }
-        let record = store.benchmarks.get(&source)
-            .map_err(|error| format!("Не удалось прочитать настройки модели: {error}"))?;
+        let record = model_settings(&store, &source)?;
         let failed = record.pi_check == Some(false);
         if failed && !text_only {
             return Err(if dashboard {
@@ -687,7 +690,19 @@ async fn run_pi(
                 format!("{source} failed Lyra's Pi benchmark. Choose another model or rerun the Pi benchmark in Lyra.")
             });
         }
-        Ok(record.context_tokens)
+        let context_window = session_id.map(|_| {
+            record.context_tokens.map(u64::from)
+                .or_else(|| {
+                    ollama::running_models()?.into_iter()
+                        .find(|entry| ollama::same_model(&entry.name, &source))?.context_length
+                })
+                .or_else(|| estimate.and_then(|info| info.configured_context_tokens))
+                .or_else(|| record.latest.as_ref().and_then(benchmark::Measurement::auto_context_tokens))
+                .and_then(|tokens| u32::try_from(tokens).ok())
+                .filter(|&tokens| tokens > 0)
+                .unwrap_or(4096)
+        });
+        Ok((record.context_tokens, context_window, record.think))
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -744,6 +759,9 @@ async fn run_pi(
             origin,
             text_only,
             model: &model,
+            delegation,
+            context_window,
+            think: think.as_ref(),
             request_id: match origin {
                 projects::MessageOrigin::Dashboard => request.request_id.as_deref(),
                 projects::MessageOrigin::Orchestrator => None,
@@ -786,7 +804,17 @@ async fn run_pi(
     if let Some(error) = error {
         trace.event(Kind::Pi, "Pi", error, Some("error"));
     }
+    let context_full = error.is_some_and(pi::is_context_overflow)
+        || result.as_ref().is_ok_and(|reply| reply.context_overflow);
+    if context_full && session_id.is_some() {
+        app.task.send_if_modified(|snapshot| {
+            snapshot.delegation_context(delegation, ContextNotice::Full)
+        });
+    }
     finish_delegation(&app, delegation, error.is_none(), false).await;
+    if context_full && session_id.is_some() {
+        return Err("Контекст модели заполнен. Увеличь размер контекста в настройках модели, сократи запрос или начни новый чат.".into());
+    }
     let reply = result?;
     let is_error = reply.error.is_some();
     let status = if reply.stop_reason.as_deref() == Some("length") {
@@ -814,9 +842,9 @@ pub(super) async fn run_project_chat(
     State(app): State<Arc<App>>,
     Json(request): Json<RunPi>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (Some(project), Some(session)) = (request.project_id, request.project_session_id) else {
+    if request.project_id.is_none() || request.project_session_id.is_none() {
         return Err((StatusCode::BAD_REQUEST, "Choose a project session".into()));
-    };
+    }
     if request
         .request_id
         .as_deref()
@@ -825,20 +853,8 @@ pub(super) async fn run_project_chat(
         return Err((StatusCode::BAD_REQUEST, "Invalid request_id".into()));
     }
     tokio::spawn(async move {
-        let trace = Call::start(
-            app.clone(),
-            "run_pi",
-            Some(&request.model),
-            &request.model,
-            Some(format!("project-{project}-chat-{session}")),
-        );
-        let result = run_pi(app, request, &trace, projects::MessageOrigin::Dashboard).await;
-        trace.finish(match &result {
-            Ok(reply) if reply.is_error => Some(&reply.text),
-            Ok(_) => None,
-            Err(error) => Some(error),
-        });
-        match result {
+        let trace = Call::untracked(app.clone());
+        match run_pi(app, request, &trace, projects::MessageOrigin::Dashboard).await {
             Ok(reply) if !reply.is_error => Ok(Json(reply.into_result())),
             Ok(reply) => Err((StatusCode::BAD_REQUEST, reply.text)),
             Err(error) => Err((StatusCode::BAD_REQUEST, error)),
@@ -936,19 +952,13 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
             resident,
             requested_tokens,
         );
-        let thinking_supported = estimate.thinking["values"]
-            .as_array()
-            .map(|values| {
-                values
-                    .iter()
-                    .any(|value| value == true || value.is_string())
-            })
-            .or_else(|| {
-                estimate
-                    .capabilities
-                    .as_ref()
-                    .map(|items| items.iter().any(|item| item == "thinking"))
-            });
+        let thinking_supported = if !estimate.thinking_options.is_empty() {
+            Some(true)
+        } else if estimate.thinking["values"].is_array() || estimate.capabilities.is_some() {
+            Some(false)
+        } else {
+            None
+        };
         write!(
             output,
             "\n{}",
