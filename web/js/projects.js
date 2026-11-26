@@ -14,8 +14,13 @@ export function createProjects() {
   const messages = get('project-messages');
   const actions = get('project-actions');
   const sendButton = get('send-project-prompt');
+  const stopButton = get('stop-project-prompt');
+  const modelSelect = get('project-chat-model');
+  const chatFolderSelect = get('project-chat-folder');
   const drafts = new Map();
-  const sending = new Set();
+  const chatModels = new Map();
+  const sending = new Map();
+  const stopRequests = new Set();
   let catalog;
   let archiveView = false;
   let projectId;
@@ -25,6 +30,8 @@ export function createProjects() {
   let installedSkills = [];
   let online = false;
   let run;
+  let installedModels = [];
+  let modelOptionsKey;
   let saving = false;
   let picking = false;
   let catalogRequest = 0;
@@ -36,6 +43,9 @@ export function createProjects() {
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
   const available = () => online && catalog != null && !saving && !picking;
   const agents = () => online ? Object.values(run?.delegations ?? {}) : [];
+  const chatRun = id => online && id != null
+    ? Object.entries(run?.delegations ?? {}).find(([, task]) => task.project_session_id === id)
+    : undefined;
   const visibleChats = project => project.sessions.filter(chat => project.archived || chat.archived === archiveView);
 
   function report(text = '', error = false) {
@@ -49,9 +59,19 @@ export function createProjects() {
     const ready = available();
     const project = selectedProject();
     const chat = selectedChat();
-    const active = chat && (sending.has(chat.id) ||
-      agents().some(task => task.project_session_id === chat.id));
+    const delegation = chatRun(chat?.id);
+    const active = chat && (sending.has(chat.id) || delegation);
+    const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
     const running = agents();
+    const activeChats = new Set([...sending.keys(), ...running.map(task => task.project_session_id)]);
+    for (const spinner of tree.querySelectorAll('[data-chat-progress]')) {
+      spinner.hidden = !activeChats.has(Number(spinner.dataset.chatProgress));
+    }
+    get('project-progress').hidden = !active;
+    const progressText = stopping ? 'Останавливаем…' : delegation ? 'Pi работает…' : 'Отправляем…';
+    const progress = get('project-progress-text');
+    if (progress.textContent !== progressText) progress.textContent = progressText;
+    get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));
     const agentStatus = running.length > 2
       ? `Активные агенты · ${running.length} · ${running.map(agent => agent.model).join(', ')}`
       : '';
@@ -63,6 +83,8 @@ export function createProjects() {
     get('new-project-chat').disabled = !ready;
     get('edit-project').hidden = !project || project.archived;
     get('edit-project').disabled = !ready;
+    get('edit-project-chat-folders').hidden = !chat || chat.archived || project.archived;
+    get('edit-project-chat-folders').disabled = !ready;
     const archiveProject = get('archive-project');
     archiveProject.textContent = project?.archived ? 'Восстановить проект' : 'Архивировать проект';
     archiveProject.disabled = !ready;
@@ -78,11 +100,28 @@ export function createProjects() {
     projectForm.querySelector('[type="submit"]').disabled = !ready || !folders.length;
     chatForm.querySelector('[type="submit"]').disabled = !ready;
     composer.hidden = !chat || chat.archived || project.archived;
-    sendButton.disabled = !online || !run?.model || composer.hidden || Boolean(active);
-    sendButton.textContent = active ? 'Pi работает…' : 'Отправить';
-    const model = get('project-chat-model');
-    model.textContent = run?.model ?? 'Выбери модель';
-    model.title = run?.model ?? '';
+    const model = refreshModels();
+    modelSelect.disabled = !online || !model;
+    sendButton.disabled = !online || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
+    sendButton.hidden = Boolean(active);
+    stopButton.disabled = !delegation || Boolean(stopping);
+    stopButton.textContent = stopping ? 'Останавливаем…' : 'Остановить';
+  }
+
+  function refreshModels() {
+    const dashboardModel = run?.model;
+    const defaultModel = installedModels.length && !installedModels.includes(dashboardModel)
+      ? installedModels[0] : dashboardModel;
+    const models = [...new Set([defaultModel, ...installedModels].filter(Boolean))];
+    const preferred = chatModels.get(chatId);
+    const selected = models.includes(preferred) ? preferred : '';
+    const key = JSON.stringify([defaultModel, models, selected]);
+    if (key !== modelOptionsKey) {
+      modelOptionsKey = key;
+      const options = [['', defaultModel ? `По умолчанию · ${defaultModel}` : 'Нет доступных моделей']];
+      setOptions(modelSelect, [...options, ...models.map(model => [model, model])], selected);
+    }
+    return selected || defaultModel;
   }
 
   function renderTree(projects) {
@@ -112,11 +151,21 @@ export function createProjects() {
   }
 
   function treeButton(label, id, session) {
-    const button = element('button', label);
+    const button = element('button', '');
     button.type = 'button';
     button.title = label;
     button.dataset.projectEntry = `${id}/${session ?? ''}`;
     button.setAttribute('aria-current', String(id === projectId && session === chatId));
+    button.append(element('span', label));
+    if (session != null) {
+      const spinner = element('span', '');
+      spinner.className = 'project-spinner';
+      spinner.dataset.chatProgress = session;
+      spinner.setAttribute('role', 'img');
+      spinner.setAttribute('aria-label', 'Pi работает');
+      spinner.hidden = true;
+      button.append(spinner);
+    }
     button.onclick = () => {
       report();
       select({ project: id, chat: session });
@@ -148,8 +197,9 @@ export function createProjects() {
     get('current-project-title').textContent = chat?.name ?? project?.name ?? '';
     const workspace = get('project-chat-workspace');
     workspace.hidden = !chat;
-    workspace.textContent = chat?.folder ?? '';
-    workspace.title = workspace.textContent;
+    const workingFolders = chat ? chatFolders(project, chat) : [];
+    workspace.textContent = chat ? [chat.folder, ...(workingFolders.length > 1 ? [`+${workingFolders.length - 1}`] : [])].join(' · ') : '';
+    workspace.title = workingFolders.join('\n');
     const notice = get('project-archive-notice');
     notice.hidden = !project?.archived && !chat?.archived;
     notice.textContent = project?.archived ? 'Проект в архиве. Восстанови проект, чтобы продолжить работу.'
@@ -159,22 +209,29 @@ export function createProjects() {
     return refreshHistory();
   }
 
-  function renderHistory() {
+  function renderHistory(scrollToEnd = false) {
+    const pending = sending.get(chatId);
+    const entries = pending && !history.some(message => message.request_id === pending.request_id)
+      ? [...history, pending] : history;
     const empty = get('project-empty');
-    empty.hidden = history.length > 0;
+    empty.hidden = entries.length > 0 || Boolean(chatRun(chatId));
     empty.textContent = chatId ? 'В этом чате пока нет сообщений.'
       : projectId ? archiveView ? 'Выбери чат, чтобы прочитать переписку.' : 'Выбери чат или начни новый.'
         : archiveView ? 'Здесь появятся архивированные проекты и чаты.' : 'Создай проект, чтобы начать работу.';
     const reading = messages.parentElement;
     const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
-    messages.hidden = !history.length;
-    messages.replaceChildren(...history.map(message => {
+    messages.hidden = !entries.length;
+    messages.replaceChildren(...entries.map(message => {
       const item = element('li', '');
       item.dataset.role = message.role;
-      item.append(element('strong', message.role === 'user' ? 'Ты' : 'Pi'), element('p', message.text));
+      item.dataset.origin = message.origin ?? '';
+      const author = message.role === 'user'
+        ? ({ dashboard: 'Ты', orchestrator: 'Оркестратор' }[message.origin] ?? 'Запрос')
+        : message.model ? `Pi · ${message.model}` : 'Pi';
+      item.append(element('strong', author), element('p', message.text));
       return item;
     }));
-    if (atEnd) reading.scrollTop = reading.scrollHeight;
+    if (atEnd || scrollToEnd) reading.scrollTop = reading.scrollHeight;
   }
 
   async function refreshHistory() {
@@ -182,9 +239,11 @@ export function createProjects() {
     if (!chatId || !online) return;
     try {
       const next = await request(`/projects/${projectId}/sessions/${chatId}`);
-      if (requestId !== historyRequest) return;
-      history = next;
-      renderHistory();
+      if (requestId === historyRequest) {
+        history = next;
+        renderHistory();
+      }
+      return next;
     } catch (error) {
       if (requestId === historyRequest) report(error.message, true);
     }
@@ -334,64 +393,141 @@ export function createProjects() {
     });
   };
 
-  let newChatProject;
-  get('new-project-chat').onclick = () => {
-    newChatProject = selectedProject();
-    const folder = get('project-chat-folder');
-    setOptions(folder, newChatProject.folders.map(path => [path, path]));
-    get('project-chat-name').value = '';
+  let chatEditor;
+  function openChatForm(chat) {
+    const project = selectedProject();
+    chatEditor = { project, chat, folders: new Set(chat ? chatFolders(project, chat) : project.folders) };
+    const name = get('project-chat-name');
+    name.value = chat?.name ?? '';
+    name.readOnly = Boolean(chat);
+    const folders = [...new Set([...(chat ? [chat.folder] : []), ...project.folders])];
+    setOptions(chatFolderSelect, folders.map(path => [path, path]), chat?.folder);
+    chatFolderSelect.disabled = Boolean(chat);
+    get('project-chat-dialog-title').textContent = chat ? 'Папки чата' : 'Новый чат';
+    get('save-project-chat').textContent = chat ? 'Сохранить' : 'Создать чат';
+    renderChatFolders();
+    actions.open = false;
     chatDialog.showModal();
     report();
-  };
+  }
+
+  function chatFolders(project, chat) {
+    return chat.folders ?? [chat.folder, ...project.folders.filter(path => path !== chat.folder)];
+  }
+
+  function renderChatFolders() {
+    const primary = chatFolderSelect.value;
+    chatEditor.folders.add(primary);
+    get('project-chat-folder-list').replaceChildren(...chatEditor.project.folders.map(path => {
+      const label = element('label', '');
+      label.className = 'pin';
+      const checkbox = element('input', '');
+      checkbox.type = 'checkbox';
+      checkbox.checked = chatEditor.folders.has(path);
+      checkbox.disabled = path === primary;
+      checkbox.onchange = () => {
+        if (checkbox.checked) chatEditor.folders.add(path);
+        else chatEditor.folders.delete(path);
+      };
+      label.append(checkbox, element('span', path));
+      return label;
+    }));
+  }
+
+  get('new-project-chat').onclick = () => openChatForm();
+  get('edit-project-chat-folders').onclick = () => openChatForm(selectedChat());
+  chatFolderSelect.onchange = renderChatFolders;
   chatForm.onsubmit = event => {
     event.preventDefault();
-    save('/projects/sessions', {
-      project_id: newChatProject.id,
-      name: get('project-chat-name').value,
-      folder: get('project-chat-folder').value,
+    const { project, chat, folders } = chatEditor;
+    const primary = chatFolderSelect.value;
+    const selected = [primary, ...project.folders.filter(path => path !== primary && folders.has(path))];
+    save(chat ? '/projects/sessions/folders' : '/projects/sessions', {
+      project_id: project.id,
+      ...(chat ? { project_session_id: chat.id } : { name: get('project-chat-name').value }),
+      folders: selected,
     }, async chat => {
       chatDialog.close();
-      await refresh({ project: newChatProject.id, chat: chat.id });
+      await refresh({ project: project.id, chat: chat.id });
     });
   };
 
-  prompt.oninput = () => drafts.set(chatId, prompt.value);
+  modelSelect.onchange = () => {
+    chatModels.set(chatId, modelSelect.value);
+    updateControls();
+  };
+  prompt.oninput = () => {
+    drafts.set(chatId, prompt.value);
+    updateControls();
+  };
+  stopButton.onclick = async () => {
+    const delegation = chatRun(chatId);
+    if (!delegation || stopButton.disabled) return;
+    const [id, task] = delegation;
+    stopRequests.add(id);
+    updateControls();
+    try {
+      await request('/projects/run/stop', {
+        delegation_id: Number(id),
+        project_session_id: task.project_session_id,
+      });
+    } catch (error) {
+      if (chatRun(chatId)?.[0] === id && error.status !== 404) report(error.message, true);
+    } finally {
+      stopRequests.delete(id);
+      updateControls();
+    }
+  };
+
   composer.onsubmit = async event => {
     event.preventDefault();
     if (sendButton.disabled || !prompt.value.trim()) return;
     const project = selectedProject();
     const chat = selectedChat();
     const text = prompt.value;
-    sending.add(chat.id);
+    const model = refreshModels();
+    const requestId = crypto.randomUUID();
+    sending.set(chat.id, { role: 'user', origin: 'dashboard', text, request_id: requestId });
+    drafts.delete(chat.id);
+    prompt.value = '';
     report();
+    renderHistory(true);
     updateControls();
+    let restoreDraft = false;
     try {
       const reply = await request('/projects/run', {
         project_id: project.id,
         project_session_id: chat.id,
-        model: run.model,
+        model,
         prompt: text,
-        allow_commands: get('project-commands').checked,
+        request_id: requestId,
       });
-      if (drafts.get(chat.id) === text) drafts.delete(chat.id);
+      restoreDraft = reply.structuredContent?.stop_reason === 'aborted';
       if (chatId === chat.id) {
-        prompt.value = drafts.get(chat.id) ?? '';
-        if (reply.structuredContent?.truncated) report('Ответ достиг лимита генерации.');
+        if (restoreDraft) report('Генерация остановлена.');
+        else if (reply.structuredContent?.truncated) report('Ответ достиг лимита генерации.');
       }
     } catch (error) {
+      restoreDraft = true;
       if (chatId === chat.id) report(error.message, true);
     } finally {
+      const saved = chatId === chat.id ? await refreshHistory() : undefined;
       sending.delete(chat.id);
+      if (restoreDraft && !drafts.has(chat.id) && !saved?.some(message => message.request_id === requestId)) {
+        drafts.set(chat.id, text);
+        if (chatId === chat.id) prompt.value = text;
+      }
+      if (chatId === chat.id) renderHistory();
       updateControls();
-      if (chatId === chat.id) refreshHistory();
     }
   };
 
   return {
     refresh,
-    update(connected, state) {
+    update(connected, state, models) {
       online = connected;
       run = state;
+      installedModels = models ?? [];
       updateControls();
     },
   };
@@ -412,6 +548,10 @@ async function request(path, data) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!response.ok) throw new Error(await response.text() || 'Запрос к Lyra завершился ошибкой.');
-  return response.json();
+  if (!response.ok) {
+    const error = new Error(await response.text() || 'Запрос к Lyra завершился ошибкой.');
+    error.status = response.status;
+    throw error;
+  }
+  if (response.status !== 204) return response.json();
 }

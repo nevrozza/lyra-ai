@@ -49,6 +49,8 @@ pub(super) struct Session {
     pub(super) id: u64,
     name: String,
     folder: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<PathBuf>,
     #[serde(default)]
     archived: bool,
 }
@@ -68,6 +70,15 @@ pub(super) struct NewSession {
     project_id: u64,
     name: String,
     folder: Option<PathBuf>,
+    folders: Option<Vec<PathBuf>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SessionFolders {
+    project_id: u64,
+    project_session_id: u64,
+    folders: Vec<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -89,11 +100,42 @@ pub(super) struct Archive {
 pub(super) struct Message {
     role: &'static str,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<MessageOrigin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MessageOrigin {
+    Dashboard,
+    Orchestrator,
+}
+
+impl MessageOrigin {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Orchestrator => "orchestrator",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageOriginEntry {
+    message_timestamp: u64,
+    origin: MessageOrigin,
+    request_id: Option<String>,
 }
 
 pub(super) struct Task {
     pub(super) project: Project,
     pub(super) workspace: PathBuf,
+    pub(super) folders: Vec<PathBuf>,
     pub(super) session_file: Option<PathBuf>,
 }
 
@@ -102,9 +144,11 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects", get(list).post(save))
         .route("/projects/pick-folder", post(folder_picker::pick))
         .route("/projects/sessions", post(create_session))
+        .route("/projects/sessions/folders", post(update_session_folders))
         .route("/projects/archive", post(archive))
         .route("/projects/{project_id}/sessions/{session_id}", get(history))
         .route("/projects/run", post(super::mcp::run_project_chat))
+        .route("/projects/run/stop", post(super::mcp::stop_project_chat))
 }
 
 async fn list(State(app): State<Arc<App>>) -> Result<Json<Catalog>> {
@@ -123,6 +167,15 @@ async fn create_session(
     Json(input): Json<NewSession>,
 ) -> Result<Json<Session>> {
     work(app, |app| add_session(app, input)).await.map(Json)
+}
+
+async fn update_session_folders(
+    State(app): State<Arc<App>>,
+    Json(input): Json<SessionFolders>,
+) -> Result<Json<Session>> {
+    work(app, |app| set_session_folders(app, input))
+        .await
+        .map(Json)
 }
 
 async fn archive(State(app): State<Arc<App>>, Json(input): Json<Archive>) -> Result<Json<Project>> {
@@ -165,6 +218,12 @@ pub(super) fn save_project(app: &App, input: SaveProject) -> Result<Project> {
 
 pub(super) fn add_session(app: &App, input: NewSession) -> Result<Session> {
     let session = app.projects.create_session(input)?;
+    app.task.send_modify(crate::run::Snapshot::projects_changed);
+    Ok(session)
+}
+
+pub(super) fn set_session_folders(app: &App, input: SessionFolders) -> Result<Session> {
+    let session = app.projects.set_session_folders(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
     Ok(session)
 }
@@ -253,16 +312,50 @@ impl Store {
                 .find(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
             project.ensure_active()?;
-            let folder = project.workspace(input.folder.as_deref())?;
+            let folders = if let Some(folders) = input.folders {
+                if input.folder.is_some() {
+                    return Err(invalid("Укажите folders или folder."));
+                }
+                project.session_folders(&folders)?
+            } else {
+                let folder = project.workspace(input.folder.as_deref())?;
+                project.folders_with_primary(&folder)
+            };
             catalog.next_id += 1;
             let session = Session {
                 id: catalog.next_id,
                 name,
-                folder,
+                folder: folders[0].clone(),
+                folders,
                 archived: false,
             };
             project.sessions.push(session.clone());
             Ok(session)
+        })
+    }
+
+    fn set_session_folders(&self, input: SessionFolders) -> Result<Session> {
+        self.change(|catalog| {
+            let project = catalog
+                .projects
+                .iter_mut()
+                .find(|project| project.id == input.project_id)
+                .ok_or_else(|| missing("Project"))?;
+            project.ensure_active()?;
+            let folders = project.session_folders(&input.folders)?;
+            let session = project
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == input.project_session_id)
+                .ok_or_else(|| missing("Session"))?;
+            session.ensure_active()?;
+            if folders[0] != session.folder {
+                return Err(invalid(
+                    "Основная папка существующего чата остаётся первой.",
+                ));
+            }
+            session.folders = folders;
+            Ok(session.clone())
         })
     }
 
@@ -300,14 +393,9 @@ impl Store {
             .find(|project| project.id == project_id)
             .ok_or_else(|| missing("Project"))?;
         project.ensure_active()?;
-        let (workspace, session_file) = if let Some(id) = session_id {
+        let (workspace, folders, session_file) = if let Some(id) = session_id {
             let session = project.session(id)?;
-            if session.archived {
-                return Err((
-                    StatusCode::CONFLICT,
-                    "Чат в архиве. Восстановите его, чтобы продолжить.".into(),
-                ));
-            }
+            session.ensure_active()?;
             let folder = &session.folder;
             if let Some(workspace) = workspace
                 && project.workspace(Some(workspace))? != *folder
@@ -316,14 +404,20 @@ impl Store {
             }
             (
                 project.workspace(Some(folder))?,
+                if session.folders.is_empty() {
+                    project.folders_with_primary(folder)
+                } else {
+                    project.session_folders(&session.folders)?
+                },
                 Some(self.session_file(id)),
             )
         } else {
-            (project.workspace(workspace)?, None)
+            (project.workspace(workspace)?, project.folders.clone(), None)
         };
         Ok(Task {
             project,
             workspace,
+            folders,
             session_file,
         })
     }
@@ -346,11 +440,17 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(messages),
             Err(error) => return Err(storage(error)),
         };
+        let mut pending_origin = None;
         for line in BufReader::new(file).lines() {
             let line = line.map_err(storage)?;
             let Ok(entry) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            if entry["type"] == "custom" && entry["customType"] == "lyra-message-origin" {
+                pending_origin =
+                    serde_json::from_value::<MessageOriginEntry>(entry["data"].clone()).ok();
+                continue;
+            }
             if entry["type"] != "message" {
                 continue;
             }
@@ -359,6 +459,13 @@ impl Store {
                 Some("user") => "user",
                 Some("assistant") => "assistant",
                 _ => continue,
+            };
+            let metadata = if role == "user" {
+                pending_origin.take().filter(|origin| {
+                    Some(origin.message_timestamp) == message["timestamp"].as_u64()
+                })
+            } else {
+                None
             };
             let content = &message["content"];
             let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
@@ -378,6 +485,9 @@ impl Store {
                 messages.push_back(Message {
                     role,
                     text: text[..text.floor_char_boundary(24_000)].to_owned(),
+                    model: message["model"].as_str().map(str::to_owned),
+                    origin: metadata.as_ref().map(|metadata| metadata.origin),
+                    request_id: metadata.and_then(|metadata| metadata.request_id),
                 });
             }
         }
@@ -403,6 +513,26 @@ impl Project {
             .ok_or_else(|| missing("Session"))
     }
 
+    fn session_folders(&self, requested: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        if requested.is_empty() || requested.len() > 16 {
+            return Err(invalid("Выберите от 1 до 16 рабочих папок."));
+        }
+        let mut folders = Vec::new();
+        for path in requested {
+            let folder = self.workspace(Some(path))?;
+            if !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
+        Ok(folders)
+    }
+
+    fn folders_with_primary(&self, primary: &Path) -> Vec<PathBuf> {
+        std::iter::once(primary.to_path_buf())
+            .chain(self.folders.iter().filter(|path| *path != primary).cloned())
+            .collect()
+    }
+
     fn workspace(&self, requested: Option<&Path>) -> Result<PathBuf> {
         let folder = requested
             .or_else(|| self.folders.first().map(PathBuf::as_path))
@@ -413,6 +543,18 @@ impl Project {
         } else {
             Err(invalid("Choose one of the project's registered folders"))
         }
+    }
+}
+
+impl Session {
+    fn ensure_active(&self) -> Result<()> {
+        if self.archived {
+            return Err((
+                StatusCode::CONFLICT,
+                "Чат в архиве. Восстановите его, чтобы продолжить.".into(),
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -23,11 +23,12 @@ const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
 pub(super) struct Task<'a> {
     pub(super) trace: &'a Call,
-    pub(super) allow_commands: bool,
     pub(super) skills: &'a [PathBuf],
     pub(super) agents_file: &'a Path,
     pub(super) project: Option<&'a projects::Task>,
     pub(super) search_skill: Option<(&'a str, &'a Path)>,
+    pub(super) origin: projects::MessageOrigin,
+    pub(super) request_id: Option<&'a str>,
 }
 
 pub(super) struct Reply {
@@ -150,10 +151,7 @@ pub(super) async fn run(
         .await
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
     let trace = task.as_ref().map(|task| task.trace);
-    let commands = task
-        .as_ref()
-        .filter(|task| task.allow_commands)
-        .map(|task| task.trace);
+    let commands = trace;
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let project_instructions;
     let agents_file = if let (Some(project), Some(directory), Some(task)) =
@@ -174,8 +172,10 @@ pub(super) async fn run(
     } else {
         None
     };
-    let session_file = project.and_then(|project| project.session_file.as_deref());
-    if let Some(file) = session_file {
+    let session = task
+        .as_ref()
+        .and_then(|task| project?.session_file.as_deref().map(|path| (path, task)));
+    if let Some((file, _)) = session {
         tokio::fs::create_dir_all(file.parent().expect("Pi session directory"))
             .await
             .map_err(|error| format!("Could not prepare Pi session: {error}"))?;
@@ -199,7 +199,7 @@ pub(super) async fn run(
         extension.as_deref(),
         skills,
         agents_file,
-        session_file,
+        session,
     )
     .map_err(|error| format!("Could not start Pi: {error}"))?;
     let log = |kind, title: &str, text: &str, status| {
@@ -467,14 +467,14 @@ async fn write_project_instructions(
     let mut text = read(task.agents_file).await?;
     let _ = write!(
         text,
-        "\n\n# Lyra project: {}\n\nWorking directory: {}\nRegistered project folders:\n",
+        "\n\n# Lyra project: {}\n\nPrimary working directory: {}\nWorking folders for this task (use absolute paths for files in other folders):\n",
         project.project.name,
         project.workspace.display()
     );
-    for folder in &project.project.folders {
+    for folder in &project.folders {
         let _ = writeln!(text, "- {}", folder.display());
     }
-    for folder in &project.project.folders {
+    for folder in &project.folders {
         let instructions = read(&folder.join("AGENTS.md")).await?;
         if !instructions.trim().is_empty() {
             let _ = write!(
@@ -536,7 +536,7 @@ fn spawn_pi(
     extension: Option<&Path>,
     skills: &[PathBuf],
     agents_file: Option<&Path>,
-    session_file: Option<&Path>,
+    session: Option<(&Path, &Task<'_>)>,
 ) -> io::Result<tokio::process::Child> {
     let spawn = |program: &str| {
         let mut command = Command::new(program);
@@ -558,12 +558,18 @@ fn spawn_pi(
                 "read,grep,find,ls,write,edit"
             },
         ]);
-        if let Some(path) = session_file {
+        command.env_remove("LYRA_MESSAGE_REQUEST_ID");
+        if let Some((path, task)) = session {
+            command.env("LYRA_MESSAGE_ORIGIN", task.origin.as_str());
+            if let Some(request_id) = task.request_id {
+                command.env("LYRA_MESSAGE_REQUEST_ID", request_id);
+            }
             command.arg("--session").arg(path);
         } else {
+            command.env_remove("LYRA_MESSAGE_ORIGIN");
             command.arg("--no-session");
         }
-        if extension.is_some() || session_file.is_some() {
+        if extension.is_some() || session.is_some() {
             command.arg("--no-prompt-templates");
         }
         if let Some(path) = extension {

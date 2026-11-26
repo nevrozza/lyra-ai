@@ -39,6 +39,7 @@ pub struct Snapshot {
 struct Delegation {
     model: String,
     project_session_id: Option<u64>,
+    stopping: bool,
     #[serde(skip)]
     project: bool,
 }
@@ -125,10 +126,29 @@ impl Snapshot {
             Delegation {
                 model: model.to_owned(),
                 project_session_id,
+                stopping: false,
                 project,
             },
         );
         Some(self.next_delegation)
+    }
+
+    pub fn stop_project_delegation(&mut self, id: u64, session_id: u64) -> bool {
+        let Some(active) = self
+            .delegations
+            .get_mut(&id)
+            .filter(|active| active.project_session_id == Some(session_id))
+        else {
+            return false;
+        };
+        active.stopping = true;
+        true
+    }
+
+    pub fn delegation_stopping(&self, id: u64) -> bool {
+        self.delegations
+            .get(&id)
+            .is_some_and(|active| active.stopping)
     }
 
     pub fn finish_delegation(&mut self, id: u64, succeeded: bool) {
@@ -255,11 +275,17 @@ mod tests {
         let others: Vec<_> = (20..25)
             .map(|id| snapshot.begin_delegation("two", chat(id)).unwrap())
             .collect();
+        assert!(!snapshot.stop_project_delegation(first, 20));
+        assert!(snapshot.stop_project_delegation(first, 10));
+        assert!(snapshot.delegation_stopping(first));
+        assert!(!snapshot.delegation_stopping(others[0]));
 
         snapshot.finish_delegation(first, true);
         assert!(snapshot.busy());
         assert_eq!(snapshot.delegated_model.as_deref(), Some("two"));
         let resumed = snapshot.begin_delegation("one", chat(10)).unwrap();
+        assert!(!snapshot.stop_project_delegation(first, 10));
+        assert!(!snapshot.delegation_stopping(resumed));
         for id in others {
             snapshot.finish_delegation(id, false);
         }

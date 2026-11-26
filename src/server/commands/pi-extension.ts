@@ -21,5 +21,17 @@ export default function (pi) {
         pi.setActiveTools(["read", "grep", "find", "ls", "write", "edit", "run_command"]);
         ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");
     });
+    const origin = process.env.LYRA_MESSAGE_ORIGIN;
+    if (origin === "dashboard" || origin === "orchestrator") {
+        pi.on("message_end", ({ message }) => {
+            if (message.role === "user") {
+                pi.appendEntry("lyra-message-origin", {
+                    origin,
+                    messageTimestamp: message.timestamp,
+                    requestId: process.env.LYRA_MESSAGE_REQUEST_ID,
+                });
+            }
+        });
+    }
     pi.on("agent_end", (_event, ctx) => ctx.shutdown());
 }

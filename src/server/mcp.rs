@@ -82,6 +82,7 @@ async fn handle(
                     | "list_projects"
                     | "save_project"
                     | "create_project_session"
+                    | "set_project_session_folders"
                     | "read_project_session"
                     | "archive_project"
             ) {
@@ -225,8 +226,18 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "folder": {"type": "string", "description": "Registered folder for the chat. Defaults to the project's first folder."}
+                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Registered working folders for this chat. The first is the working directory. Omit to use all project folders."},
+                "folder": {"type": "string", "description": "Legacy option to set only the working directory. Use folders for new clients."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
+        },
+        {
+            "name": "set_project_session_folders",
+            "description": "Change a saved chat's working folders. Keep its existing primary folder first.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "project_session_id": {"type": "integer", "minimum": 1},
+                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}}
+            }, "required": ["project_id", "project_session_id", "folders"], "additionalProperties": false}
         },
         {
             "name": "read_project_session",
@@ -239,14 +250,14 @@ fn tools() -> Value {
         },
         {
             "name": "run_pi",
-            "description": "Work with files in a Pi workspace using read, grep, find, ls, write and edit. With allow_commands, Pi can also run shell commands according to the command mode in Lyra. Before choosing or loading a model, use inspect to check benchmark_and_settings.pi_check and ollama_agent_tools.",
+            "description": "Work with files in a Pi workspace and request shell commands under Lyra's global Pi command mode. Before choosing or loading a model, use inspect to check benchmark_and_settings.pi_check and ollama_agent_tools.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
                 "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. With project_session_id, the folder is set by the chat."},
                 "project_id": {"type": "integer", "minimum": 1, "description": "Lyra project to use. Loads instructions from its registered folders."},
                 "project_session_id": {"type": "integer", "minimum": 1, "description": "Saved project chat to continue. Requires project_id."},
                 "prompt": {"type": "string", "minLength": 1},
-                "allow_commands": {"type": "boolean", "default": false, "description": "Enable the shell command tool for this run. Individual approval follows the Lyra dashboard command mode."},
+                "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to the given installed Lyra skill names. Omit to make all installed Lyra skills available, or pass [] to run without skills."},
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens}
             }, "required": ["model", "prompt"], "additionalProperties": false},
@@ -322,11 +333,12 @@ pub(super) struct RunPi {
     workspace: Option<PathBuf>,
     project_id: Option<u64>,
     project_session_id: Option<u64>,
+    request_id: Option<String>,
     prompt: String,
     max_output_tokens: Option<u32>,
     skills: Option<Vec<String>>,
-    #[serde(default)]
-    allow_commands: bool,
+    #[serde(rename = "allow_commands")]
+    _allow_commands: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -387,7 +399,15 @@ async fn call(
         }
         "manage_model" => manage_model(app, arguments(args)?).await,
         "run_model" => return run_model(app, arguments(args)?, trace).await,
-        "run_pi" => return run_pi(app, arguments(args)?, trace).await,
+        "run_pi" => {
+            return run_pi(
+                app,
+                arguments(args)?,
+                trace,
+                projects::MessageOrigin::Orchestrator,
+            )
+            .await;
+        }
         "list_projects" => {
             let _: NoArguments = arguments(args)?;
             project_result(projects::work(app, |app| app.projects.list()).await)
@@ -399,6 +419,12 @@ async fn call(
         "create_project_session" => {
             let input = arguments(args)?;
             project_result(projects::work(app, |app| projects::add_session(app, input)).await)
+        }
+        "set_project_session_folders" => {
+            let input = arguments(args)?;
+            project_result(
+                projects::work(app, |app| projects::set_session_folders(app, input)).await,
+            )
         }
         "read_project_session" => {
             let input = arguments(args)?;
@@ -579,7 +605,12 @@ async fn run_model(
     })
 }
 
-async fn run_pi(app: Arc<App>, request: RunPi, trace: &Call) -> Result<ToolOutput, String> {
+async fn run_pi(
+    app: Arc<App>,
+    request: RunPi,
+    trace: &Call,
+    origin: projects::MessageOrigin,
+) -> Result<ToolOutput, String> {
     let limit = output_limit(&request.prompt, request.max_output_tokens)?;
     let session_id = request.project_session_id;
     let (project, workspace) = if let Some(id) = request.project_id {
@@ -603,13 +634,9 @@ async fn run_pi(app: Arc<App>, request: RunPi, trace: &Call) -> Result<ToolOutpu
         {
             return Err("workspace must be an absolute path to an existing directory".into());
         }
-        let workspace = if request.allow_commands {
-            tokio::fs::canonicalize(&workspace)
-                .await
-                .map_err(|error| format!("Could not resolve workspace: {error}"))?
-        } else {
-            workspace
-        };
+        let workspace = tokio::fs::canonicalize(&workspace)
+            .await
+            .map_err(|error| format!("Could not resolve workspace: {error}"))?;
         (None, workspace)
     };
     let search_skill = project
@@ -679,28 +706,49 @@ async fn run_pi(app: Arc<App>, request: RunPi, trace: &Call) -> Result<ToolOutpu
     let result = match tokens {
         Ok(Ok(tokens)) => {
             let mut state = app.task.subscribe();
-            let max_seconds = if request.allow_commands { 900 } else { 120 };
             let task = pi::Task {
                 trace,
-                allow_commands: request.allow_commands,
                 skills: &skills,
                 agents_file: &app.agents_file,
                 project: project.as_ref(),
                 search_skill,
+                origin,
+                request_id: match origin {
+                    projects::MessageOrigin::Dashboard => request.request_id.as_deref(),
+                    projects::MessageOrigin::Orchestrator => None,
+                },
             };
             tokio::select! {
                 biased;
-                _ = async { let _ = state.wait_for(crate::run::Snapshot::closed).await; } => {
-                    Err("Lyra stopped".into())
+                cancelled = async {
+                    // Drop the watch borrow before cancellation can drop a pending command.
+                    state.wait_for(|snapshot| snapshot.closed() || snapshot.delegation_stopping(delegation))
+                        .await.is_ok_and(|snapshot| !snapshot.closed())
+                } => {
+                    if cancelled { None } else { Some(Err("Lyra stopped".into())) }
                 },
                 result = tokio::time::timeout(
-                    Duration::from_secs(max_seconds),
+                    Duration::from_secs(900),
                     pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)),
-                ) => result.unwrap_or_else(|_| Err("Pi timed out".into())),
+                ) => Some(result.unwrap_or_else(|_| Err("Pi timed out".into()))),
             }
         }
-        Ok(Err(error)) => Err(error),
-        Err(error) => Err(error.to_string()),
+        Ok(Err(error)) => Some(Err(error)),
+        Err(error) => Some(Err(error.to_string())),
+    };
+    let Some(result) = result else {
+        finish_delegation(&app, delegation, false, false).await;
+        let text = "Генерация остановлена.";
+        trace.event(Kind::Pi, "Pi", text, Some("ok"));
+        return Ok(ToolOutput {
+            text: text.into(),
+            is_error: false,
+            generation: Some(GenerationInfo {
+                stop_reason: Some("aborted".into()),
+                truncated: false,
+                max_output_tokens: limit,
+            }),
+        });
     };
     let error = match &result {
         Ok(reply) => reply.error.as_deref(),
@@ -739,6 +787,13 @@ pub(super) async fn run_project_chat(
     let (Some(project), Some(session)) = (request.project_id, request.project_session_id) else {
         return Err((StatusCode::BAD_REQUEST, "Choose a project session".into()));
     };
+    if request
+        .request_id
+        .as_deref()
+        .is_some_and(|id| !is_session_id(id))
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid request_id".into()));
+    }
     tokio::spawn(async move {
         let trace = Call::start(
             app.clone(),
@@ -747,7 +802,7 @@ pub(super) async fn run_project_chat(
             &request.model,
             Some(format!("project-{project}-chat-{session}")),
         );
-        let result = run_pi(app, request, &trace).await;
+        let result = run_pi(app, request, &trace, projects::MessageOrigin::Dashboard).await;
         trace.finish(match &result {
             Ok(reply) if reply.is_error => Some(&reply.text),
             Ok(_) => None,
@@ -761,6 +816,25 @@ pub(super) async fn run_project_chat(
     })
     .await
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+}
+
+#[derive(Deserialize)]
+pub(super) struct StopProjectChat {
+    delegation_id: u64,
+    project_session_id: u64,
+}
+
+pub(super) async fn stop_project_chat(
+    State(app): State<Arc<App>>,
+    Json(request): Json<StopProjectChat>,
+) -> StatusCode {
+    if app.task.send_if_modified(|snapshot| {
+        snapshot.stop_project_delegation(request.delegation_id, request.project_session_id)
+    }) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u64, String> {

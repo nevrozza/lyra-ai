@@ -27,6 +27,7 @@ const telemetry = createTelemetry(session, {
   onSample(sample) {
     models.acceptMemorySample(sample);
     models.render(session.metrics.models);
+    projects.update(session.online && !session.closed, session.run, session.metrics.installed_models);
   },
 });
 
@@ -35,7 +36,7 @@ function updateControls() {
   telemetry.updateControls();
   commands.setOnline(session.online && !session.closed);
   skills.setOnline(session.online && !session.closed);
-  projects.update(session.online && !session.closed, session.run);
+  projects.update(session.online && !session.closed, session.run, session.metrics?.installed_models);
 }
 
 function connectionState(value, label) {

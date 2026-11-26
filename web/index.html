@@ -52,6 +52,7 @@
                 <summary>Действия</summary>
                 <div class="project-action-menu">
                   <button id="edit-project" type="button">Настройки проекта</button>
+                  <button id="edit-project-chat-folders" type="button">Папки чата</button>
                   <button id="archive-project" type="button">В архив проект</button>
                   <button id="archive-project-chat" type="button">В архив чат</button>
                 </div>
@@ -61,6 +62,12 @@
           <div class="project-reading">
             <p id="project-empty" class="project-empty secondary">Выбери проект или создай новый.</p>
             <ol id="project-messages" aria-label="Сообщения чата" hidden></ol>
+            <div id="project-progress" class="project-progress" hidden>
+              <p class="secondary" role="status">
+                <span class="project-spinner" aria-hidden="true"></span><span id="project-progress-text"></span>
+              </p>
+              <button id="stop-project-prompt" class="unload" type="button">Остановить</button>
+            </div>
           </div>
           <p id="project-message" class="secondary project-feedback" role="status"></p>
           <p id="project-archive-notice" class="secondary project-feedback" hidden></p>
@@ -68,8 +75,10 @@
             <label for="project-prompt" class="visually-hidden">Сообщение для Pi</label>
             <textarea id="project-prompt" rows="2" placeholder="Сообщение для Pi…" required></textarea>
             <div class="project-controls project-composer-controls">
-              <span id="project-chat-model" class="secondary"></span>
-              <label class="pin"><input id="project-commands" type="checkbox">Разрешить запросы команд</label>
+              <label class="project-model-label" for="project-chat-model">Модель
+                <select id="project-chat-model"></select>
+              </label>
+              <a class="project-command-link" href="#command-mode">Команды Pi</a>
               <button id="send-project-prompt" type="submit">Отправить</button>
             </div>
           </form>
@@ -100,12 +109,16 @@
           <h3 id="project-chat-dialog-title">Новый чат</h3>
           <label for="project-chat-name">Название чата</label>
           <input id="project-chat-name" type="text" maxlength="120" required autofocus>
-          <label for="project-chat-folder">Рабочая папка</label>
+          <label for="project-chat-folder">Основная папка</label>
           <select id="project-chat-folder" required></select>
+          <fieldset class="project-chat-folders">
+            <legend>Рабочие папки чата</legend>
+            <div id="project-chat-folder-list"></div>
+          </fieldset>
           <p id="project-chat-form-message" class="secondary project-feedback" role="status"></p>
           <div class="project-controls project-dialog-actions">
             <button id="cancel-project-chat" class="unload" type="button">Отмена</button>
-            <button type="submit">Создать чат</button>
+            <button id="save-project-chat" type="submit">Создать чат</button>
           </div>
         </form>
       </dialog>
