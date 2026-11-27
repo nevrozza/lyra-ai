@@ -106,7 +106,7 @@ export function createProjects() {
     return icon;
   }
   function setTreeState(icon, state) {
-    const label = state === 'busy' ? 'В работе или в очереди' : state === 'error' ? 'Ошибка или требуется действие' : state === 'done' ? 'Все чаты завершены' : '';
+    const label = state === 'busy' ? 'В работе или в очереди' : state === 'error' ? 'Ошибка или требуется действие' : state === 'done' ? 'Успешно завершено' : '';
     if (icon.dataset.state === state) return;
     icon.dataset.state = state;
     icon.hidden = !state;
@@ -164,11 +164,15 @@ export function createProjects() {
       if (icon.dataset.groupProgress != null) {
         const members = groupMembers(p, Number(icon.dataset.groupProgress));
         const states = members.map(chat => chatState(chat, p, activeChats));
-        const done = members.length > 0 && members.every(chat => chatCompleted(chat, p));
-        setTreeState(icon, states.includes('busy') ? 'busy' : states.includes('error') ? 'error' : done ? 'done' : '');
+        setTreeState(icon, states.includes('busy') ? 'busy' : '');
       } else {
         const chat = p.sessions.find(candidate => candidate.id === Number(icon.dataset.chatProgress));
-        if (chat) setTreeState(icon, chatState(chat, p, activeChats));
+        if (!chat) continue;
+        const state = chatState(chat, p, activeChats);
+        setTreeState(icon, state === 'busy' ? 'busy'
+          : !chat.group ? ''
+          : state === 'error' ? 'error'
+          : chatCompleted(chat, p) ? 'done' : '');
       }
     }
     get('project-progress').hidden = !active;
