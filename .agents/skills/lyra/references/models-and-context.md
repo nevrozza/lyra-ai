@@ -30,4 +30,4 @@ For output exhaustion rather than a full context window, read the structured `wo
 
 A useful handoff carries the goal, scope, constraints, the relevant files and changes already made, remaining work, and the acceptance check. Preserve the old transcript. Ask Pi to inspect the current files before repeating edits, since an overflow can happen after a successful write. Use `read_project_session` to recover the few missing facts you need.
 
-After a fresh queued retry, poll the original `project_session_id` with `get_project_tasks`. Use the returned `chat_session_id` with `read_project_session` to inspect the new transcript. The queue preserves the original model, role, file scope, dependencies, and automatic follow-up.
+After a queued retry, call `await_project_tasks` on the original `project_session_id` (no polling). Use the returned `chat_session_id` with `read_project_session` to inspect the new transcript. The queue preserves the original model, role, file scope, dependencies, and automatic follow-up.

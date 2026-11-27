@@ -75,11 +75,12 @@ The example intentionally gives the structure, decisions and checks, not full HT
 
 ### Example batch
 
-Replace model placeholders with exact inspected catalog tags and choose the project's actual ID and file paths.
+Replace model placeholders with exact inspected catalog tags and choose the project's actual ID and file paths. The following is the usual batch payload: pass it inside `batch` to `enqueue_and_wait` (with a unique stable `batch_id`), or directly to `enqueue_project_tasks` only when you need to overlap independent work.
 
 ```json
 {
   "project_id": 12,
+  "batch_id": "status-feature-v1",
   "tasks": [
     {
       "key": "api",
@@ -149,10 +150,19 @@ Use `external: true` when a user-authorized external tool must perform a step, s
 
 ## Follow the queue
 
-Call `get_project_tasks` with the returned task IDs and a bounded `wait_seconds`. It includes automatic follow-ups attached to those task IDs. Continue through actual completion and inspect outcomes. Use separate short checks while an external step needs action. Read the specific blocked or failed step and follow its dependency chain before reporting an issue.
+Prefer `enqueue_and_wait` with `batch` containing the normal enqueue payload and a stable `batch_id`. Use `enqueue_project_tasks` only when independent useful work can overlap or you must submit without waiting; then call `await_project_tasks` with the returned task IDs. Do not use `get_project_tasks` in a polling loop.
+
+The server waits asynchronously for queue changes, follows automatic review/fix rounds and unresolved prerequisites, and returns `reason`, `task_ids`, compact `tasks`, and any `attention` entries. Use the returned IDs as the task scope. On subsequent awaits, pass `known_completed_ids` for completed handoffs you have already read; failures and pauses are never suppressed. The default server wait is 3300 seconds; configure Codex's MCP timeout to 3600 seconds (see the repository README). Do not shorten waits merely to watch progress; the dashboard shows it.
+
+- `completed`: all requested tasks and automatic follow-ups completed; inspect the results and approve the next decision yourself.
+- `attention_required`: handle the listed paused, failed, cancelled or interrupted task, or run the ready external step with its returned prompt and complete it using `complete_project_step`. Do not await the unchanged blocked scope repeatedly. Independent tasks may continue; await their IDs separately if needed.
+- `timeout`: work may still be running; await the same IDs again, omitting already-read completed results. If the MCP transport lost the combined response before IDs arrived, repeat exactly the same batch ID and payload, or recover IDs with a one-off inspection. Never create a second batch as a timeout recovery.
+- `stopped`: the Lyra service is stopping; do not assume success or restart tasks automatically.
+
+User command approvals still happen in the dashboard. Keep acceptance checkpoints between batches: an implementation must not be submitted before Codex approves its unsettled design. Read a specific blocked or failed step and its evidence before deciding recovery.
 
 - `queued` or `running` means the task is pending. Respect tool and shell approvals.
-- `context_full` means the step can be recovered and dependent work is waiting. Use the [context recovery procedure](models-and-context.md#recover-an-overflow).
+- `context_full` or `output_limit` means the step can be recovered and dependent work is waiting. Use the [context recovery procedure](models-and-context.md#recover-an-overflow).
 - Use `cancel_project_task` for an authorized cancellation of a queued or context-paused task. A running task can be stopped from its dashboard chat.
 - Validate completed results against the goal. Record verification, changed files, and any remaining blockers in the user's language.
 
@@ -166,7 +176,7 @@ A group is a shared work context, not just a visual folder. Create it with `grou
 
 Declare every data dependency with `after` (task keys in the same batch or task IDs from an earlier batch in the same project). For example, a design step that produces an API contract without editing a file must be a prerequisite of both backend and frontend steps. File scopes being disjoint does not make these steps independent. Do not run a consumer in parallel with its producer. Queue results and external-step summaries are committed before the dependent step becomes ready; Lyra passes their text and existing artifact paths. Group chats additionally receive a bounded excerpt of other results, with a full generated CONTEXT.md snapshot available to Work agents via read. Chat-mode workers receive only the excerpt. A snapshot reflects completed work at dispatch, not a live message stream. Every included excerpt section identifies its source line range in CONTEXT.md; shortened sections and overall omission counts are explicit. Work agents should read relevant missing ranges on demand when the excerpt is insufficient, using read with offset and limit. Chat-mode agents must ask for missing details if needed. A saved result incomplete marker means the stored answer itself was truncated; reading the snapshot cannot recover missing original text.
 
-Ask workers to finish with actionable decisions, interfaces, paths, checks and blockers. The orchestrator must inspect the shared context before the next batch and ensure omitted or truncated details are read or supplied when needed. A failed, stopped, or partial result is not a verified decision. Do not write CONTEXT.md into the project repository or ask workers to overwrite shared group memory. Lyra assembles results from separate persisted records.
+Ask workers to finish with actionable decisions, interfaces, paths, checks and blockers. The orchestrator must inspect the returned handoffs before the next batch and read shared context when omitted or truncated details are needed. A failed, stopped, or partial result is not a verified decision. Do not write CONTEXT.md into the project repository or ask workers to overwrite shared group memory. Lyra assembles results from separate persisted records.
 
 A queue task with `stop_reason: file_conflict` is blocked, not completed. Re-read current files, inspect the worker's final report and the conflicting task, and schedule only the remaining necessary work after its prerequisites. A resolved conflict does not block the task. Do not use shell to force a change.
 
@@ -177,7 +187,7 @@ Use the existing queue, group context and brief revision APIs; do not invent an 
 
 For an unsettled design/architecture or other consequential decision:
 1. Create the group and its shared user requirements. Enqueue only the discovery/design step(s). Require a concrete, inspectable text proposal and evidence, not an implementation.
-2. Wait for the returned task IDs. Read the actual saved handoff via get_group_context/get_project_tasks or read_project_session when necessary. A finish_task call/Completed status means the worker claims to have finished; it does not approve the proposal.
+2. Use enqueue_and_wait or await_project_tasks on the returned IDs. Inspect the returned handoff; use get_group_context or read_project_session only when necessary for missing context/evidence. A finish_task call/Completed status means the worker claims to have finished; it does not approve the proposal.
 3. Personally evaluate whether it meets the original goal, has a coherent idea and is feasible. Accept it, make minor textual corrections yourself, or delegate a substantial revision with targeted feedback. Stay within the user's permission; do not edit implementation code when workers are meant to execute it. No extra model run for a small decision you can settle yourself.
 4. Persist the approved contract in the shared group brief using its current revision, preserving requirements and stating which earlier candidate it supersedes. Only after that create the consuming implementation tasks, with the approved contract and precise execution plans; use after for the actual prerequisite IDs. If a prior text proposal is inadequate, do not schedule its implementation.
 5. Read implementation handoffs and independently verify the assembled result. Use the local review/fix loop for technical checks and settled corrections, or manually coordinate fixes when their proposed approach needs your approval. Personally assess the final result against the user's goal, not merely the review JSON.
