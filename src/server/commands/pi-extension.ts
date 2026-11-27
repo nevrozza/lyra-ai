@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 export default function (pi) {
     const textOnly = process.env.LYRA_PI_TEXT_ONLY === "1";
     const review = process.env.LYRA_PI_REVIEW === "1" && !textOnly;
-    const scopedWrite = process.env.LYRA_PI_SCOPED_WRITE === "1" && !textOnly && !review;
+    const guardedWrite = process.env.LYRA_PI_GUARDED_WRITE === "1" && !textOnly && !review;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
     if (effort) {
@@ -16,27 +16,40 @@ export default function (pi) {
     }
     let earlierMessages = [];
     let promptTimestamp;
-    const scopedDescriptions = new Map();
-    if (scopedWrite) {
-        const path = Type.String({ description: "Reserved file path relative to the primary working folder (use the exact reserved path)" });
-        for (const [name, description, parameters] of [
-            ["write", "Create or replace one reserved file.", Type.Object({ path, content: Type.String() })],
-            ["edit", "Replace exact, unique, non-overlapping text in one reserved file.", Type.Object({
+    const guardedDescriptions = new Map();
+    if (guardedWrite) {
+        const path = Type.String({ description: "Exact file path, relative to the primary working folder or absolute" });
+        const definitions = [
+            ["read", "Read the current file and record its version. Optional 1-based offset and line limit.", Type.Object({
+                path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1 })),
+            }), "Read current file contents before editing. Use offset and limit for large files."],
+            ["write", "Create a new file or replace an existing file after a complete current read. Acquires a dynamic file lock.", Type.Object({ path, content: Type.String() }), "Create a new file or replace a fully read file."],
+            ["edit", "Replace exact, unique, non-overlapping text after reading the current file. Acquires a dynamic file lock.", Type.Object({
                 path,
                 edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
-            })],
-        ]) {
-            scopedDescriptions.set(name, description);
+            }), "Apply exact oldText/newText replacements to a file you have read."],
+        ];
+        for (const [name, description, parameters, snippet] of definitions) {
+            guardedDescriptions.set(name, description);
             pi.registerTool({
                 name, label: name, description, parameters, executionMode: "sequential",
-                promptSnippet: name === "write" ? "Create or replace a reserved file using path and content." : "Edit a reserved file using path and exact oldText/newText pairs.",
-                promptGuidelines: [name + " can modify only a reserved path. Use the tool's advertised argument schema."],
+                promptSnippet: snippet,
+                promptGuidelines: [
+                    "Use the exact path and advertised argument schema. Existing files require a current read; new files can be created directly.",
+                    "FILE_CHANGED: reread and reconcile. FILE_LOCKED: work elsewhere or report the dependency. Never bypass via run_command."
+                ],
                 async execute(_id, args, signal, _onUpdate, ctx) {
                     const request = JSON.stringify({ ...args, tool: name });
-                    const value = await ctx.ui.input("lyra:write-scoped-file", request, { signal });
+                    const value = await ctx.ui.input("lyra:guarded-file", request, { signal });
                     if (value === undefined) throw new Error("Lyra did not return a file result");
                     const result = JSON.parse(value);
                     if (!result.ok) throw new Error(result.message);
+                    if (name === "read") {
+                        const content = result.image
+                            ? [{ type: "image", data: result.image, mimeType: result.mime }]
+                            : [{ type: "text", text: result.text }];
+                        return { content, details: {} };
+                    }
                     return { content: [{ type: "text", text: `Updated ${args.path}` }], details: result };
                 },
             });
@@ -47,8 +60,8 @@ export default function (pi) {
         pi.registerTool({
             name: "run_command",
             label: "Run project command",
-            description: `${scopedWrite ? "Never modify files outside your reserved write_paths through shell commands or scripts. " : ""}Request a non-interactive ${shell} command in the project root. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
-            promptSnippet: "Run a project command such as a test or build through Lyra.",
+            description: `Request a non-interactive ${shell} command in the project root for inspection, tests or builds. NEVER modify shared source/configuration files through run_command, including via shell redirection, scripts, generators, formatters, git or subprocesses. Never bypass read/write/edit version checks, file locks or read-only review restrictions, even after a tool error. Avoid conflicting build outputs. If a required mutation is blocked, report it. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
+            promptSnippet: "Run a project check or build through Lyra. Never use shell commands to bypass guarded file changes.",
             parameters: Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }) }),
             executionMode: "sequential",
             async execute(_id, { command }, signal, _onUpdate, ctx) {
@@ -99,11 +112,11 @@ export default function (pi) {
         const missing = expected.filter(name => !active.includes(name));
         const unexpected = active.filter(name => !expected.includes(name));
         const all = pi.getAllTools();
-        const unguarded = [...scopedDescriptions].filter(([name, description]) =>
+        const unguarded = [...guardedDescriptions].filter(([name, description]) =>
             !all.some(tool => tool.name === name && tool.description === description)).map(([name]) => name);
         if (missing.length || unexpected.length || unguarded.length) {
             throw new Error("Pi tool configuration mismatch: missing=" + missing.join(",") +
-                "; unexpected=" + unexpected.join(",") + "; unverified scoped=" + unguarded.join(","));
+                "; unexpected=" + unexpected.join(",") + "; unverified guarded=" + unguarded.join(","));
         }
         return active;
     }
