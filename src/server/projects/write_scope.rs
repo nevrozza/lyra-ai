@@ -113,6 +113,7 @@ const VERSION_BUDGET: usize = 32 * 1024 * 1024;
 pub(in crate::server) struct FileVersions {
     // Compare the actual bytes, not mtimes or a potentially colliding hash.
     seen: HashMap<PathBuf, Version>,
+    conflicts: std::collections::BTreeMap<PathBuf, String>,
     bytes: usize,
 }
 
@@ -129,6 +130,23 @@ struct ReadRequest {
 }
 
 impl FileVersions {
+    pub(in crate::server) fn unresolved_conflicts(&self) -> Option<String> {
+        if self.conflicts.is_empty() { return None; }
+        let mut text = format!("Unresolved file conflicts ({}):", self.conflicts.len());
+        for (path, error) in self.conflicts.iter().take(8) {
+            text.push_str(&format!("\n- {}: {}", path.display(), error));
+        }
+        if self.conflicts.len() > 8 { text.push_str("\nAdditional conflicts omitted."); }
+        Some(text)
+    }
+
+    fn conflict(&mut self, target: &Path, error: &io::Error) {
+        let message = error.to_string();
+        if ["FILE_LOCKED:", "FILE_CHANGED:", "READ_REQUIRED:"].iter().any(|prefix| message.starts_with(prefix)) {
+            self.conflicts.insert(crate::run::path_key(target), message);
+        }
+    }
+
     fn remember(&mut self, path: &Path, bytes: Vec<u8>, full: bool) {
         let key = crate::run::path_key(path);
         if let Some(old) = self.seen.remove(&key) {
@@ -246,7 +264,10 @@ pub(in crate::server) fn mutate(
     let change: Mutation = serde_json::from_str(request)?;
     let target = target_path(roots, root, change.path())?;
     // All cooperating Lyra writers acquire this lock before the version check.
-    let newly_claimed = claim(&target)?;
+    let newly_claimed = match claim(&target) {
+        Ok(claimed) => claimed,
+        Err(error) => { versions.conflict(&target, &error); return Err(error); }
+    };
     let result = (|| {
         let current = match read_bytes(&target) {
             Ok(bytes) => Some(bytes),
@@ -268,7 +289,12 @@ pub(in crate::server) fn mutate(
         Ok(())
     })();
     // A failed first mutation did not earn ownership. Existing locks remain.
-    if result.is_err() && newly_claimed { release(&target); }
+    if let Err(error) = &result {
+        if newly_claimed { release(&target); }
+        versions.conflict(&target, error);
+    } else {
+        versions.conflicts.remove(&crate::run::path_key(&target));
+    }
     result
 }
 
@@ -373,9 +399,11 @@ mod tests {
         assert!(change(root, &mut a, write).unwrap_err().to_string().contains("FILE_CHANGED"));
         assert!(change(root, &mut a, r#"{"tool":"edit","path":"shared.txt","edits":[{"oldText":"old","newText":"A"}]}"#).unwrap_err().to_string().contains("FILE_CHANGED"));
         assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "new from B");
+        assert!(a.unresolved_conflicts().unwrap().contains("FILE_CHANGED"));
         a.read(root, read).unwrap();
         change(root, &mut a, r#"{"tool":"edit","path":"shared.txt","edits":[{"oldText":"new from B","newText":"new from B and A"}]}"#).unwrap();
         assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "new from B and A");
+        assert!(a.unresolved_conflicts().is_none());
     }
 
     #[test]
