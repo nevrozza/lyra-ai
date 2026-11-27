@@ -61,6 +61,24 @@ export default function (pi) {
         }
     }
     if (!textOnly) {
+        const completionDescription = "Record the actual outcome of the assignment: completed or blocked. Call before the final answer.";
+        guardedDescriptions.set("finish_task", completionDescription);
+        pi.registerTool({
+            name: "finish_task", label: "Report task outcome", description: completionDescription,
+            parameters: Type.Object({
+                status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")]),
+                summary: Type.String({ minLength: 1, maxLength: 2000, description: "Actual changes, checks and unresolved requirements." }),
+            }),
+            promptSnippet: "Record your task outcome before the final answer.",
+            executionMode: "sequential",
+            async execute(_id, args, signal, _onUpdate, ctx) {
+                const value = await ctx.ui.input("lyra:finish-task", JSON.stringify(args), { signal });
+                if (value === undefined) throw new Error("Lyra did not return a task outcome result");
+                const result = JSON.parse(value);
+                if (!result.ok) throw new Error(result.message);
+                return { content: [{ type: "text", text: "Outcome recorded." }], details: result };
+            },
+        });
         const description = "Load the instructions of an available Lyra skill by exact name, without guessing its file path. Returns SKILL.md text and the real package directory for referenced resources.";
         guardedDescriptions.set("load_skill", description);
         pi.registerTool({
@@ -132,7 +150,7 @@ export default function (pi) {
             });
         }
     }
-    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill"];
+    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill", "finish_task"];
     const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir"] : [])];
     async function verifyTools() {
         await pi.setActiveTools(expected);
