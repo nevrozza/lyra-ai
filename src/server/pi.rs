@@ -54,6 +54,7 @@ struct PiDiagnostics {
     context_window: Option<u32>,
     last_input_tokens: Option<u64>,
     last_output_tokens: Option<u64>,
+    observed_ollama_context_tokens: Option<u64>,
     provider_request_count: u64,
     last_provider_request: Option<Value>,
     elapsed_ms: u64,
@@ -927,6 +928,12 @@ pub(super) async fn run(
     // A normal answer is only a received handoff, not proof that the task is done.
     let handoff_complete = last_error.is_none() && stop_reason.as_deref() == Some("stop") && !truncated && !answer.trim().is_empty();
     diagnostic.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if task.is_some() {
+        let backend = backend.clone();
+        diagnostic.observed_ollama_context_tokens = tokio::task::spawn_blocking(move || {
+            ollama::running_models()?.into_iter().find(|entry| ollama::same_model(&entry.name, &backend))?.context_length
+        }).await.ok().flatten();
+    }
     log(Kind::Pi, "Run diagnostics", &serde_json::to_string(&diagnostic).unwrap_or_default(), None);
     work_progress.diagnostics = Some(diagnostic);
     work_progress.finish(generation_stop_reason, handoff_complete);
