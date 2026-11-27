@@ -104,6 +104,7 @@ pub(super) struct NewSession {
     project_id: u64,
     group_id: Option<u64>,
     group_name: Option<String>,
+    group_brief: Option<String>,
     name: String,
     #[serde(default)]
     mode: ChatMode,
@@ -465,6 +466,7 @@ impl Store {
             project.ensure_active()?;
             let folder = project.workspace(None)?;
             let group = choose_group(project, &mut catalog.next_id, input.group_id, input.group_name)?;
+            group_context::initialize_brief(&mut catalog.group_memory, group.as_ref(), input.group_id, input.group_brief)?;
             catalog.next_id += 1;
             let session = Session {
                 id: catalog.next_id,
