@@ -32,7 +32,23 @@ pub(super) enum Role {
 }
 
 impl Role {
-    fn instructions(self) -> io::Result<&'static str> {
+    pub(super) fn skill_name(self) -> &'static str {
+        match self {
+            Self::Implement => "lyra-implement",
+            Self::Fix => "lyra-fix",
+            Self::Review => "lyra-review",
+        }
+    }
+
+    fn instructions(self, skill_enabled: bool) -> io::Result<&'static str> {
+        if !skill_enabled {
+            // Keep the task role contract and tool restrictions independent of optional skill text.
+            return Ok(match self {
+                Self::Implement => "Implement the assigned task within its scope. Report changed paths and checks.",
+                Self::Fix => "Verify and correct the assigned finding within its scope. Report changed paths and checks.",
+                Self::Review => "Review the requested change without editing files. Report findings using the requested verdict format.",
+            });
+        }
         let manifest = match self {
             Self::Implement => super::skills::IMPLEMENT,
             Self::Fix => super::skills::FIX,
@@ -70,6 +86,7 @@ pub(super) struct Task<'a> {
     pub(super) context_window: Option<u32>,
     pub(super) think: Option<&'a ollama::Think>,
     pub(super) role: Option<Role>,
+    pub(super) role_skill_enabled: bool,
     pub(super) writes: &'a [PathBuf],
 }
 
@@ -752,7 +769,7 @@ async fn write_project_instructions(
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
-        text.push_str(role.instructions()?);
+        text.push_str(role.instructions(task.role_skill_enabled)?);
     }
     if project.session_file.is_some() {
         text.push_str("\nEarlier turns and saved summaries, when present, belong to this same local Lyra chat even if the user switched models. Use the conversation you actually received to answer questions about earlier turns. Say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");
