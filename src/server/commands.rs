@@ -85,9 +85,18 @@ struct Active {
     actions: watch::Sender<Option<Action>>,
 }
 
+// Ownership comes from the validated Pi task, never from the shell text or
+// the current dashboard selection. Standalone MCP requests have no chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct ChatOwner {
+    pub(super) project_id: u64,
+    pub(super) chat_id: u64,
+}
+
 #[derive(Clone, Serialize)]
 struct View {
     id: u64,
+    owner: Option<ChatOwner>,
     workspace: String,
     command: String,
     shell: &'static str,
@@ -200,7 +209,9 @@ impl ResultBody {
     }
 }
 
-pub(super) async fn run(trace: &Call, workspace: &Path, command: &str) -> ResultBody {
+pub(super) async fn run(
+    trace: &Call, workspace: &Path, command: &str, owner: Option<ChatOwner>,
+) -> ResultBody {
     if command.trim().is_empty() || command.len() > 4000 || command.contains('\0') {
         return ResultBody::error(
             "invalid",
@@ -220,6 +231,7 @@ pub(super) async fn run(trace: &Call, workspace: &Path, command: &str) -> Result
         state.active = Some(Active {
             view: View {
                 id: state.next_id,
+                owner,
                 workspace: workspace.display().to_string(),
                 command: command.to_owned(),
                 shell: process_tree::SHELL,
@@ -417,9 +429,11 @@ mod tests {
         let mode_path = workspace.path().join("command-mode.json");
         let app = Arc::new(App {
             host: String::new(),
+            lan_host: None,
             origin: String::new(),
             task: watch::channel(crate::run::Snapshot::new(None)).0,
             metrics: Default::default(),
+            context_admission: Default::default(),
             ram: Default::default(),
             startup_log: None,
             pi_agent_dir: None,
@@ -433,6 +447,7 @@ mod tests {
                 workspace.path().join("project-models.json"),
             )
             .unwrap(),
+            mcp_servers: super::super::mcp_servers::Store::new(workspace.path().join("mcp-servers.json")),
             agents_file: workspace.path().join("AGENTS.md"),
             projects: super::super::projects::Store::new(workspace.path().join("projects")),
             folder_picker: Default::default(),
@@ -440,16 +455,22 @@ mod tests {
         });
         let trace = Call::start(app.clone(), "run_pi", None, "", None);
         let shell = "printf approved";
+        let owner = Some(ChatOwner { project_id: 7, chat_id: 13 });
         for action in [Action::Allow, Action::Deny] {
             let check = async {
                 let command = view(AppState(app.clone())).await.0.command.unwrap();
                 assert!(!command.running);
+                assert_eq!(command.owner, owner);
+                assert_eq!(
+                    decide(AppState(app.clone()), RoutePath(command.id + 1), Json(Action::Allow)).await,
+                    StatusCode::NOT_FOUND,
+                );
                 assert_eq!(
                     decide(AppState(app.clone()), RoutePath(command.id), Json(action)).await,
                     StatusCode::NO_CONTENT,
                 );
             };
-            let (result, ()) = tokio::join!(biased; run(&trace, workspace.path(), shell), check);
+            let (result, ()) = tokio::join!(biased; run(&trace, workspace.path(), shell, owner), check);
             match action {
                 Action::Allow => assert_eq!(result.stdout, "approved"),
                 Action::Deny => assert_eq!(result.status, "denied"),
@@ -461,7 +482,7 @@ mod tests {
             StatusCode::NO_CONTENT,
         );
         assert!(State::new(mode_path.clone()).mode == Mode::AllowAll);
-        let result = timeout(Duration::from_secs(3), run(&trace, workspace.path(), shell))
+        let result = timeout(Duration::from_secs(3), run(&trace, workspace.path(), shell, None))
             .await
             .unwrap();
         assert_eq!(result.stdout, "approved");

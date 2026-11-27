@@ -1,6 +1,13 @@
 import { get } from './ui.js';
 
-export function createCommands() {
+export function commandLocation(command, selection) {
+  if (!command) return null;
+  if (!command.owner) return 'external';
+  return selection?.projectId === command.owner.project_id &&
+    selection?.chatId === command.owner.chat_id ? 'chat' : 'other';
+}
+
+export function createCommands({ openChat }) {
   const panel = get('command-panel');
   const title = get('command-title');
   const error = get('command-error');
@@ -8,6 +15,12 @@ export function createCommands() {
   const settingsError = get('command-settings-error');
   const buttons = [...get('command-actions').querySelectorAll('button')];
   const notifications = createNotifications();
+  const chatHost = get('command-chat-host');
+  const externalHost = get('command-external-host');
+  const pendingLink = get('command-pending-link');
+  const settingsDialog = get('command-settings-dialog');
+  let selection;
+  let fresh = false;
   let current;
   let savedMode;
   let online = false;
@@ -17,23 +30,30 @@ export function createCommands() {
   let revealOnLoad = location.hash === '#command-panel';
 
   function render(command) {
-    if (current?.id !== command?.id || current?.running !== command?.running) deciding = false;
+    const changed = current?.id !== command?.id || current?.running !== command?.running;
+    if (changed) deciding = false;
     current = command;
     notifications.update(command?.running ? null : command?.id);
-    panel.hidden = !command;
-    if (!command) return;
-    if (revealOnLoad) {
-      revealOnLoad = false;
-      panel.scrollIntoView({ block: 'nearest' });
-    }
+    const place = commandLocation(command, selection);
+    const host = place === 'external' ? externalHost : chatHost;
+    const visible = place === 'chat' || place === 'external';
+    const wasHidden = panel.hidden;
+    chatHost.hidden = place !== 'chat';
+    externalHost.hidden = place !== 'external';
+    if (visible && panel.parentElement !== host) host.append(panel);
+    panel.hidden = !visible;
+    pendingLink.hidden = place !== 'other';
+    pendingLink.textContent = command?.running ? 'Команда Pi в другом чате' : 'Pi ждёт подтверждения';
+    if (!visible) return;
+    if (place === 'chat' && (changed || wasHidden)) panel.scrollIntoView({ block: 'nearest' });
     title.textContent = command.stopping ? 'Остановка команды' :
       command.running ? 'Команда выполняется' : 'Разрешить запуск команды?';
-    get('command-workspace').textContent = `${command.shell} · ${command.workspace}`;
+    get('command-workspace').textContent = `${place === 'external' ? 'Вне чата · ' : ''}${command.shell} · ${command.workspace}`;
     get('command-script').textContent = command.command.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, character =>
       character === '\n' ? character : `\\u{${character.codePointAt(0).toString(16)}}`);
     for (const button of buttons) {
       button.hidden = (button.dataset.action === 'stop') !== command.running;
-      button.disabled = deciding || command.stopping;
+      button.disabled = !online || !fresh || deciding || command.stopping;
     }
   }
 
@@ -50,11 +70,19 @@ export function createCommands() {
       const state = await response.json();
       if (version !== request) return;
       savedMode = state.mode;
+      fresh = true;
       updateMode();
       error.hidden = true;
       render(state.command);
+      if (revealOnLoad && state.command) {
+        revealOnLoad = false;
+        void reveal();
+      }
     } catch {
-      if (version !== request || !current) return;
+      if (version !== request) return;
+      fresh = false;
+      render(current);
+      if (!current) return;
       error.textContent = 'Не удалось обновить состояние команды.';
       error.hidden = false;
     }
@@ -85,7 +113,7 @@ export function createCommands() {
 
   for (const button of buttons) {
     button.addEventListener('click', async () => {
-      if (!current || deciding) return;
+      if (!online || !fresh || !current || deciding || panel.hidden) return;
       const command = current;
       deciding = true;
       error.hidden = true;
@@ -96,11 +124,8 @@ export function createCommands() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(button.dataset.action),
         });
-        if (response.status === 404 || response.status === 409) {
-          await refresh();
-        } else if (!response.ok) {
-          throw new Error();
-        }
+        if (!response.ok && response.status !== 404 && response.status !== 409) throw new Error();
+        await refresh();
       } catch {
         if (current?.id !== command.id || current.running !== command.running) return;
         deciding = false;
@@ -111,16 +136,42 @@ export function createCommands() {
     });
   }
 
+  async function reveal() {
+    const command = current;
+    if (!command) return;
+    if (command.owner) await openChat(command.owner);
+    if (current?.id === command.id && !panel.hidden) panel.scrollIntoView({ block: 'nearest' });
+  }
+
+  pendingLink.addEventListener('click', () => void reveal());
+  for (const id of ['project-command-link', 'command-settings-global']) {
+    get(id).addEventListener('click', () => {
+      if (!settingsDialog.open) settingsDialog.showModal();
+    });
+  }
+  get('close-command-settings').addEventListener('click', () => settingsDialog.close());
   navigator.serviceWorker?.addEventListener('message', async event => {
     if (event.data !== 'show-command') return;
     await refresh();
-    if (current) panel.scrollIntoView({ block: 'nearest' });
+    await reveal();
   });
 
   return {
     refresh,
-    setOnline(value) { online = value; updateMode(); },
-    clear() { request++; render(null); },
+    setSelection(next) {
+      if (selection?.projectId === next?.projectId && selection?.chatId === next?.chatId) return;
+      selection = next;
+      get('command-settings-global').hidden = next?.chatId != null;
+      get('project-command-link').hidden = next?.chatId == null;
+      render(current);
+    },
+    setOnline(value) {
+      if (online && !value) fresh = false;
+      online = value;
+      updateMode();
+      render(current);
+    },
+    clear() { request++; fresh = false; render(null); },
   };
 }
 

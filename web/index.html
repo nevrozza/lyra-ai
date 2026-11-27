@@ -25,8 +25,11 @@
       <header class="panel-header project-workspace-header">
         <h2 id="projects-title">Проекты</h2>
         <p id="project-active-agents" class="secondary" role="status" hidden></p>
+        <button id="command-pending-link" class="unload command-pending-link" type="button" hidden>Запрос команды Pi</button>
+        <button id="command-settings-global" class="unload" type="button">Команды Pi</button>
         <a class="project-system-link" href="#models-panel">Модели и настройки</a>
       </header>
+      <div id="command-external-host" class="command-external-host" hidden></div>
       <div class="project-split">
         <aside class="project-sidebar" aria-label="Проекты и чаты">
           <button id="new-project" class="unload project-new" type="button" disabled>＋ Новый проект</button>
@@ -48,6 +51,7 @@
               <p id="project-job-status" class="secondary" role="status" hidden></p>
             </div>
             <div class="project-controls">
+              <button id="project-command-link" class="unload" type="button" aria-haspopup="dialog" aria-controls="command-settings-dialog" hidden>Команды Pi</button>
               <button id="new-project-chat" class="unload" type="button" hidden>＋ Новый чат</button>
               <button id="new-project-task" class="unload" type="button" hidden>＋ Задача</button>
             </div>
@@ -59,6 +63,19 @@
               <summary>Размышления модели</summary>
               <p></p>
             </details>
+            <div id="command-chat-host" class="command-chat-host" hidden>
+              <section id="command-panel" class="command-panel" aria-labelledby="command-title" hidden>
+              <h3 id="command-title" role="status"></h3>
+              <p id="command-workspace" class="secondary"></p>
+              <pre id="command-script" dir="ltr"></pre>
+              <div id="command-actions">
+                <button type="button" class="unload" data-action="allow">Да, запустить</button>
+                <button type="button" class="unload" data-action="deny">Нет</button>
+                <button type="button" class="unload" data-action="stop" hidden>Остановить</button>
+              </div>
+              <p id="command-error" class="secondary" role="alert" hidden></p>
+            </section>
+            </div>
             <div id="project-progress" class="project-progress" hidden>
               <p class="secondary" role="status">
                 <span class="project-spinner" aria-hidden="true"></span><span id="project-progress-text"></span>
@@ -81,12 +98,31 @@
                 <select id="project-chat-model"></select>
               </label>
               <button id="chat-thinking" class="unload" type="button" aria-haspopup="dialog" aria-controls="chat-thinking-dialog" hidden>Thinking</button>
-              <a id="project-command-link" class="project-command-link" href="#command-mode" hidden>Команды Pi</a>
               <button id="send-project-prompt" type="submit">Отправить</button>
             </div>
           </form>
         </div>
       </div>
+      <dialog id="command-settings-dialog" class="project-dialog" aria-labelledby="command-settings-title">
+        <div class="project-form">
+          <h3 id="command-settings-title">Команды Pi</h3>
+          <p class="secondary">Общий режим для всех чатов и внешних вызовов Pi.</p>
+          <div class="command-settings">
+            <label for="command-mode">Подтверждение</label>
+            <select id="command-mode" disabled>
+              <option value="ask">Спрашивать всегда</option>
+              <option value="allow_all">Разрешать всегда</option>
+            </select>
+            <button id="command-notifications" class="unload" type="button" hidden>Включить уведомления</button>
+            <p id="command-settings-error" class="secondary" role="status" hidden></p>
+            <p id="command-notification-status" class="secondary" role="status" hidden></p>
+          </div>
+          <p class="secondary">Автоматическое разрешение позволяет Pi запускать команды без подтверждения.</p>
+          <div class="project-controls project-dialog-actions">
+            <button id="close-command-settings" class="unload" type="button">Закрыть</button>
+          </div>
+        </div>
+      </dialog>
       <dialog id="chat-thinking-dialog" class="project-dialog chat-thinking-dialog" aria-labelledby="chat-thinking-title">
         <form id="chat-thinking-form" class="project-form">
           <h3 id="chat-thinking-title">Thinking</h3>
@@ -307,32 +343,6 @@
       </div>
 
       <div class="activity">
-        <section class="panel" aria-labelledby="command-settings-title">
-          <header class="panel-header"><h2 id="command-settings-title">Команды Pi</h2></header>
-          <div class="panel-body">
-            <div class="command-settings">
-              <label for="command-mode">Подтверждение</label>
-              <select id="command-mode" disabled>
-                <option value="ask">Спрашивать</option>
-                <option value="allow_all">Всё разрешать</option>
-              </select>
-              <button id="command-notifications" class="unload" type="button" hidden>Включить уведомления</button>
-              <p id="command-settings-error" class="secondary" role="status" hidden></p>
-              <p id="command-notification-status" class="secondary" role="status" hidden></p>
-            </div>
-            <section id="command-panel" class="command-panel" aria-labelledby="command-title" hidden>
-              <h3 id="command-title" role="status"></h3>
-              <p id="command-workspace" class="secondary"></p>
-              <pre id="command-script" dir="ltr"></pre>
-              <div id="command-actions">
-                <button type="button" class="unload" data-action="allow">Запустить</button>
-                <button type="button" class="unload" data-action="deny">Отклонить</button>
-                <button type="button" class="unload" data-action="stop" hidden>Остановить</button>
-              </div>
-              <p id="command-error" class="secondary" role="alert" hidden></p>
-            </section>
-          </div>
-        </section>
         <section class="panel" aria-labelledby="sessions-title">
           <header class="panel-header"><h2 id="sessions-title">MCP-вызовы оркестратора</h2></header>
           <div class="panel-body sessions-body">
