@@ -219,15 +219,21 @@
                 <div><dt>Контекст</dt><dd id="context">—</dd></div>
                 <div><dt>VRAM раннера по Ollama</dt><dd id="model-vram">—</dd></div>
               </dl>
-              <form id="context-form" class="context-settings">
-                <label for="context-size">Размер контекста</label>
-                <output id="context-choice" for="context-size">Авто</output>
-                <input id="context-size" type="range" min="0" max="7" step="1" value="0" aria-describedby="context-note" disabled>
-                <p id="context-note" class="secondary">Лимит действует при следующей загрузке.</p>
-                <button id="save-context" class="unload" type="submit" disabled>Применить</button>
-                <span id="context-feedback" class="secondary" role="status"></span>
-                <p id="context-memory-warning" class="memory-warning" role="status" hidden></p>
-              </form>
+              <details id="context-settings-details" class="context-settings-details">
+                <summary>
+                  <span>Размер контекста</span>
+                  <span id="context-summary-value" class="context-summary-value">Авто</span>
+                </summary>
+                <form id="context-form" class="context-settings">
+                  <label for="context-size">Размер контекста</label>
+                  <output id="context-choice" for="context-size">Авто</output>
+                  <input id="context-size" type="range" min="0" max="7" step="1" value="0" aria-describedby="context-note context-memory-warning" disabled>
+                  <p id="context-note" class="secondary">Лимит действует при следующей загрузке.</p>
+                  <button id="save-context" class="unload" type="submit" disabled>Применить</button>
+                  <span id="context-feedback" class="secondary" role="status"></span>
+                </form>
+              </details>
+              <p id="context-memory-warning" class="memory-warning" role="status" hidden></p>
               <div class="model-actions">
                 <label class="pin"><input id="pin-model" type="checkbox" disabled> Держать в памяти</label>
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>

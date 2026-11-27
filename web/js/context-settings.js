@@ -21,6 +21,8 @@ export function createContextSettings(session, {
 }) {
   const contextSize = get('context-size');
   const saveContext = get('save-context');
+  const contextDetails = get('context-settings-details');
+  const summaryValue = get('context-summary-value');
   let contextOptions = contextPresets;
   let contextSaving = false;
   let contextEstimateRequest = 0;
@@ -78,6 +80,13 @@ export function createContextSettings(session, {
     const auto = tokens == null ? configuredAutoContext : null;
     const label = contextLabel(tokens) + (auto ? ` · ${whole.format(auto)} токенов` : '');
     get('context-choice').textContent = label;
+    const record = getRecord();
+    const saved = record?.context_tokens ?? null;
+    const unavailable = Boolean(record && saved == null && configuredAutoContext == null && autoReason);
+    summaryValue.textContent = !record ? '—' : unavailable ? 'Авто недоступен' :
+      contextLabel(saved) + (saved == null && configuredAutoContext != null ? ` · ${whole.format(configuredAutoContext)}` : '');
+    summaryValue.dataset.unavailable = String(unavailable);
+    summaryValue.title = unavailable ? autoReason : '';
     const profileAuto = get('benchmark-profile-auto');
     profileAuto.hidden = configuredAutoContext == null;
     profileAuto.textContent = profileAuto.hidden ? '' : `Auto сейчас: ${whole.format(configuredAutoContext)} токенов.`;
@@ -149,6 +158,7 @@ export function createContextSettings(session, {
       saveContext.disabled = contextSize.disabled || contextOptions[contextSize.value] === record?.context_tokens;
     },
     reset() {
+      contextDetails.open = false;
       get('context-feedback').textContent = '';
       setContextChoice(null);
     },
