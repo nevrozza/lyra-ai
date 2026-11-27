@@ -14,7 +14,10 @@ export function metricsFreshness({ closed, failed, sampledAt, now }) {
 
 function meter(node, value) {
   node.hidden = value == null;
-  if (value != null) node.value = value;
+  if (value == null) return;
+  node.value = value;
+  node.dataset.motionMeter = '';
+  node.style.setProperty('--meter-fill', `${Math.max(0, Math.min(100, value))}%`);
 }
 
 export function createTelemetry(session, { beginSample, onSample }) {
@@ -34,6 +37,7 @@ export function createTelemetry(session, { beginSample, onSample }) {
   function gpuCard(gpu) {
     const node = element('div', '');
     node.className = 'gpu';
+    node.dataset.gpuName = gpu.name;
     const heading = element('div', '');
     heading.className = 'gpu-heading';
     const temperature = element('output', gpu.temperature != null ? `${gpu.temperature} °C` : '—');
@@ -48,13 +52,11 @@ export function createTelemetry(session, { beginSample, onSample }) {
       const row = element('div', '');
       row.className = 'metric';
       row.append(element('span', name), element('output', label));
-      if (value != null) {
-        const bar = element('meter', '');
-        bar.max = 100;
-        bar.setAttribute('aria-label', `${gpu.name} ${name}`);
-        meter(bar, value);
-        row.append(bar);
-      }
+      const bar = element('meter', '');
+      bar.max = 100;
+      bar.setAttribute('aria-label', `${gpu.name} ${name}`);
+      meter(bar, value);
+      row.append(bar);
       node.append(row);
     }
     return node;
@@ -79,7 +81,24 @@ export function createTelemetry(session, { beginSample, onSample }) {
     renderFreshness();
     get('cpu-value').textContent = next.cpu_percent == null ? '—' : `${whole.format(next.cpu_percent)}%`;
     renderRamTotal((ramDialog.open && detailedRam) || next.ram);
-    get('gpus').replaceChildren(...next.gpus.map(gpuCard));
+    const gpus = get('gpus');
+    // Keep native meters mounted so the fill interpolates between samples.
+    const current = [...gpus.children];
+    if (current.length !== next.gpus.length ||
+        current.some((card, index) => card.dataset.gpuName !== next.gpus[index].name)) {
+      gpus.replaceChildren(...next.gpus.map(gpuCard));
+    } else {
+      next.gpus.forEach((gpu, index) => {
+        const card = current[index];
+        const outputs = card.querySelectorAll('output');
+        const bars = card.querySelectorAll('meter');
+        outputs[0].textContent = gpu.temperature != null ? `${gpu.temperature} °C` : '—';
+        outputs[1].textContent = gpu.load != null ? `${gpu.load}%` : '—';
+        outputs[2].textContent = memoryLabel(gpu.vram);
+        meter(bars[0], gpu.load);
+        meter(bars[1], memoryPercent(gpu.vram));
+      });
+    }
     get('no-gpu').hidden = next.gpus.length > 0;
     get('no-gpu').textContent = 'Данные NVIDIA GPU недоступны.';
     renderOllamaMemory(next.models);

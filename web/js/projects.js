@@ -102,6 +102,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
   let renderedChatId;
   const expandedDetails = new Set();
   const activityOverrides = new Map();
+  let animateNextHistory = false;
 
   const selectedProject = () => catalog?.projects.find(project => project.id === projectId);
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
@@ -292,6 +293,21 @@ export function createProjects({ onSelection = () => {} } = {}) {
     return selected;
   }
 
+  function treeBranch(list) {
+    const branch = element('div', '');
+    branch.className = 'project-tree-branch';
+    const inner = element('div', '');
+    inner.append(list);
+    branch.append(inner);
+    return branch;
+  }
+
+  function collapseBranch(branch, closed) {
+    branch.dataset.collapsed = String(closed);
+    branch.inert = closed;
+    branch.setAttribute('aria-hidden', String(closed));
+  }
+
   function renderTree(projects) {
     const focused = document.activeElement?.dataset.projectEntry;
     closeEntryMenu();
@@ -307,17 +323,18 @@ export function createProjects({ onSelection = () => {} } = {}) {
       item.append(row);
       const chats = visibleChats(project);
       const list = element('ul', '');
+      const branch = treeBranch(list);
       const chevron = element('span', '');
       chevron.className = 'project-group-chevron';
       chevron.setAttribute('aria-hidden', 'true');
       heading.append(chevron);
       const applyProjectCollapsed = () => {
         const closed = collapsedProjects.has(project.id);
-        list.hidden = closed;
+        collapseBranch(branch, closed);
         chevron.hidden = !chats.length;
         if (chats.length) heading.setAttribute('aria-expanded', String(!closed));
         else heading.removeAttribute('aria-expanded');
-        chevron.textContent = closed ? '▸' : '▾';
+        chevron.textContent = '▸';
       };
       heading.onclick = () => {
         // Select a different project first; clicking the current project
@@ -364,6 +381,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
         toggle.append(label, chevron, icon);
         const children = element('ul', '');
         children.className = 'project-group-chats';
+        const branch = treeBranch(children);
         const contextRow = element('li', '');
         const contextButton = element('button', '');
         contextButton.type = 'button';
@@ -381,9 +399,9 @@ export function createProjects({ onSelection = () => {} } = {}) {
         }
         const applyCollapsed = () => {
           const closed = collapsedGroups.has(key);
-          children.hidden = closed;
+          collapseBranch(branch, closed);
           toggle.setAttribute('aria-expanded', String(!closed));
-          chevron.textContent = closed ? '▸' : '▾';
+          chevron.textContent = '▸';
         };
         toggle.onclick = () => {
           if (collapsedGroups.has(key)) collapsedGroups.delete(key);
@@ -392,10 +410,10 @@ export function createProjects({ onSelection = () => {} } = {}) {
           updateControls();
         };
         applyCollapsed();
-        entry.append(entryRow(toggle, project, undefined, group), children);
+        entry.append(entryRow(toggle, project, undefined, group), branch);
         list.append(entry);
       }
-      if (chats.length) item.append(list);
+      if (chats.length) item.append(branch);
       return item;
     }));
     if (focused) [...tree.querySelectorAll('button')].find(button => button.dataset.projectEntry === focused)?.focus();
@@ -738,6 +756,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const count = tools.length + skills.length;
     const first = entries[0];
     const key = 'activity:' + (first.tool?.id ?? `${first.timestamp ?? 'unknown'}:${index}`);
+    item.dataset.historyKey = key;
+    item.dataset.historyContent = JSON.stringify(entries);
     if (!count) {
       for (const [i, message] of entries.entries()) {
         item.append(thinkingDetail(message, key + ':thinking:' + i));
@@ -790,7 +810,13 @@ export function createProjects({ onSelection = () => {} } = {}) {
     // Snapshot open states before replacing history. Keep the outer and inner
     // disclosures independent even while tool results stream in.
     expandedDetails.clear();
-    if (renderedChatId === chatId) {
+    const switched = renderedChatId !== chatId;
+    if (switched) animateNextHistory = true;
+    const previousItems = new Map();
+    if (!switched) {
+      for (const item of messages.children) {
+        if (item.dataset.historyKey) previousItems.set(item.dataset.historyKey, item);
+      }
       for (const node of messages.querySelectorAll('details[data-detail-key]')) {
         const key = node.dataset.detailKey;
         if (node.classList.contains('project-activity')) {
@@ -805,12 +831,15 @@ export function createProjects({ onSelection = () => {} } = {}) {
     renderedChatId = chatId;
     const blocks = groupChatHistory(entries);
     const working = Boolean(chatRun(chatId));
-    messages.replaceChildren(...blocks.map((block, index) => {
+    const nextItems = blocks.map((block, index) => {
       if (block.kind === 'activity') return renderActivity(block, index, working && index === blocks.length - 1);
       const message = block.message;
       const item = element('li', '');
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
+      item.dataset.historyKey = message.request_id ? 'request:' + message.request_id
+        : `message:${message.role}:${message.timestamp ?? 'unknown'}:${index}`;
+      item.dataset.historyContent = JSON.stringify(message);
       appendMessageTime(item, message);
       const label = message.role === 'assistant' ? (message.model || 'Lyra')
         : { orchestrator: 'Оркестратор', lyra: 'Lyra · Следующий шаг' }[message.origin] ?? '';
@@ -821,7 +850,41 @@ export function createProjects({ onSelection = () => {} } = {}) {
       if (message.text) item.append(message.role === 'assistant' || message.role === 'user'
         ? renderMarkdown(message.text) : element('p', message.text));
       return item;
-    }));
+    });
+    const enteringChat = animateNextHistory && nextItems.length > 0;
+    if (enteringChat) animateNextHistory = false;
+    const reconciled = nextItems.map(next => {
+      const previous = previousItems.get(next.dataset.historyKey);
+      if (!previous) {
+        if (!enteringChat && !switched) next.classList.add('project-message-enter');
+        return next;
+      }
+      const oldActivity = previous.querySelector(':scope > .project-activity');
+      const newActivity = next.querySelector(':scope > .project-activity');
+      if (oldActivity && newActivity) {
+        // Keep the disclosure itself mounted so automatic close/open can
+        // animate even when a new result changes its children.
+        if (previous.dataset.historyContent !== next.dataset.historyContent) {
+          oldActivity.replaceChildren(...newActivity.children);
+          previous.dataset.historyContent = next.dataset.historyContent;
+        }
+        oldActivity.dataset.initialOpen = newActivity.dataset.initialOpen;
+        if (oldActivity.open !== newActivity.open) oldActivity.open = newActivity.open;
+        return previous;
+      }
+      return previous.dataset.historyContent === next.dataset.historyContent ? previous : next;
+    });
+    // Reconcile in place; appending all existing nodes would restart CSS
+    // animations and discard focus on every history poll.
+    for (const [index, item] of reconciled.entries()) {
+      if (messages.children[index] !== item) messages.insertBefore(item, messages.children[index] ?? null);
+    }
+    while (messages.children.length > reconciled.length) messages.lastElementChild.remove();
+    if (enteringChat) {
+      messages.classList.remove('project-chat-enter');
+      void messages.offsetWidth;
+      messages.classList.add('project-chat-enter');
+    }
     if (atEnd || scrollToEnd) reading.scrollTop = reading.scrollHeight;
   }
 

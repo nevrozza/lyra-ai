@@ -7,6 +7,9 @@
   --muted: #a0ada3;
   --accent: #c4ec92;
   --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
+  --motion-ease: cubic-bezier(.2, .7, .25, 1);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -129,7 +132,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-progress p { display: flex; align-items: center; gap: 8px; }
 .project-spinner { flex: 0 0 13px; width: 13px; height: 13px; border: 2px solid #536453; border-top-color: var(--accent); border-radius: 50%; animation: project-spin .8s linear infinite; }
 @keyframes project-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .project-spinner { animation: none; } }
+
 #project-messages { display: grid; gap: 12px; width: min(100%, 740px); margin: 0 auto; padding: 0; list-style: none; }
 #project-messages > li { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 5px; max-width: 90%; overflow-wrap: anywhere; position: relative; }
 #project-messages .project-message-time { order: 1; justify-self: end; padding: 0 4px; font-size: .68rem; color: var(--muted); opacity: 0; transition: opacity .12s; }
@@ -530,3 +533,81 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 #group-context-brief { resize: vertical; min-height: 5rem; font-family: var(--mono); }
 .group-context-preview { min-width: 0; max-height: min(45vh, 420px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-wrap: anywhere; line-height: 1.5; background: #141b17; }
 .group-context-preview .project-markdown-plain { white-space: pre-wrap; }
+
+/* Shared motion primitives. Avoid animating layout on hover or replaying
+   entrance animations when polling replaces unchanged data. */
+button, .project-composer, .project-system-link, .group-context-entry {
+  transition: background-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease);
+}
+.connection span, .metrics-freshness::before {
+  transition: background-color var(--motion-normal) var(--motion-ease);
+}
+.project-tree-branch {
+  display: grid; grid-template-rows: 1fr; min-width: 0;
+  transition: grid-template-rows var(--motion-normal) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease);
+}
+.project-tree-branch[data-collapsed="true"] { grid-template-rows: 0fr; opacity: 0; }
+.project-tree-branch > div { min-height: 0; min-width: 0; overflow: hidden; }
+#project-tree .project-group-chevron {
+  transition: transform var(--motion-normal) var(--motion-ease);
+}
+#project-tree [aria-expanded="true"] > .project-group-chevron { transform: rotate(90deg); }
+.project-activity > summary::before, .project-tool > summary::before {
+  transition: transform var(--motion-normal) var(--motion-ease);
+}
+.project-activity[open] > summary::before, .project-tool[open] > summary::before {
+  content: '▸'; transform: rotate(90deg);
+}
+/* Native disclosures retain keyboard and accessibility behavior. Older
+   browsers simply use instant native opening/closing. */
+@supports selector(details::details-content) {
+  @supports (interpolate-size: allow-keywords) {
+    :is(.project-thinking, .project-tool, .project-activity) { interpolate-size: allow-keywords; }
+    :is(.project-thinking, .project-tool, .project-activity)::details-content {
+      block-size: 0; overflow: clip;
+      transition: block-size var(--motion-normal) var(--motion-ease),
+        content-visibility var(--motion-normal) allow-discrete;
+    }
+    :is(.project-thinking, .project-tool, .project-activity)[open]::details-content { block-size: auto; }
+  }
+}
+:is(.terminal-popover, .project-action-menu, .project-dialog, .ram-dialog) {
+  opacity: 0; transform: translateY(4px);
+  transition: opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+:is(.terminal-popover, .project-action-menu):popover-open,
+:is(.project-dialog, .ram-dialog)[open] { opacity: 1; transform: translateY(0); }
+@supports (transition-behavior: allow-discrete) {
+  :is(.terminal-popover, .project-action-menu, .project-dialog, .ram-dialog) {
+    transition: opacity var(--motion-fast) var(--motion-ease),
+      transform var(--motion-fast) var(--motion-ease),
+      display var(--motion-fast) allow-discrete, overlay var(--motion-fast) allow-discrete;
+  }
+}
+@starting-style {
+  :is(.terminal-popover, .project-action-menu):popover-open,
+  :is(.project-dialog, .ram-dialog)[open] { opacity: 0; transform: translateY(4px); }
+}
+@keyframes lyra-message-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes lyra-chat-in { from { opacity: 0; } to { opacity: 1; } }
+.project-message-enter { animation: lyra-message-in var(--motion-normal) var(--motion-ease) both; }
+.project-chat-enter { animation: lyra-chat-in var(--motion-normal) var(--motion-ease) both; }
+@property --meter-fill { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+meter[data-motion-meter] {
+  border: 0; border-radius: 7px;
+  background: linear-gradient(to right, #b6d99a var(--meter-fill), #2c382e var(--meter-fill));
+  transition: --meter-fill var(--motion-normal) var(--motion-ease);
+}
+meter[data-motion-meter]::-webkit-meter-bar,
+meter[data-motion-meter]::-webkit-meter-optimum-value,
+meter[data-motion-meter]::-webkit-meter-suboptimum-value,
+meter[data-motion-meter]::-webkit-meter-even-less-good-value { background: transparent; border: 0; }
+meter[data-motion-meter]::-moz-meter-bar { background: transparent; }
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-fast: 0ms; --motion-normal: 0ms; }
+  .project-spinner, .project-message-enter, .project-chat-enter { animation: none; }
+  #project-messages .project-message-time { transition: none; }
+}
