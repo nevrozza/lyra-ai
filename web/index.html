@@ -50,15 +50,6 @@
             <div class="project-controls">
               <button id="new-project-chat" class="unload" type="button" hidden>＋ Новый чат</button>
               <button id="new-project-task" class="unload" type="button" hidden>＋ Задача</button>
-              <details id="project-actions" class="project-actions">
-                <summary>Действия</summary>
-                <div class="project-action-menu">
-                  <button id="edit-project" type="button">Настройки проекта</button>
-                  <button id="edit-project-chat-folders" type="button">Папки чата</button>
-                  <button id="archive-project" type="button">В архив проект</button>
-                  <button id="archive-project-chat" type="button">В архив чат</button>
-                </div>
-              </details>
             </div>
           </header>
           <div class="project-reading">
@@ -147,6 +138,19 @@
           <p id="project-form-message" class="secondary project-feedback" role="status"></p>
           <div class="project-controls project-dialog-actions">
             <button id="cancel-project" class="unload" type="button">Отмена</button>
+            <button type="submit">Сохранить</button>
+          </div>
+        </form>
+      </dialog>
+      <div id="project-entry-menu" class="project-action-menu" popover="auto"></div>
+      <dialog id="project-group-dialog" class="project-dialog" aria-labelledby="project-group-dialog-title">
+        <form id="project-group-form" class="project-form">
+          <h3 id="project-group-dialog-title">Настройки группы</h3>
+          <label for="project-group-name">Название группы</label>
+          <input id="project-group-name" type="text" maxlength="120" required autofocus>
+          <p id="project-group-form-message" class="secondary project-feedback" role="status"></p>
+          <div class="project-controls project-dialog-actions">
+            <button id="cancel-project-group" class="unload" type="button">Отмена</button>
             <button type="submit">Сохранить</button>
           </div>
         </form>
