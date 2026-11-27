@@ -20,6 +20,7 @@ use crate::{benchmark, context, run::CHAT_THINKING_LIMIT};
 use super::App;
 
 mod folder_picker;
+pub(super) mod group_context;
 pub(super) mod queue;
 pub(super) mod write_scope;
 
@@ -36,6 +37,8 @@ pub(super) struct Catalog {
     next_id: u64,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     user_stops: HashMap<u64, Vec<u64>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    group_memory: HashMap<u64, group_context::GroupMemory>,
     pub(super) projects: Vec<Project>,
 }
 
@@ -101,6 +104,7 @@ pub(super) struct NewSession {
     project_id: u64,
     group_id: Option<u64>,
     group_name: Option<String>,
+    group_brief: Option<String>,
     name: String,
     #[serde(default)]
     mode: ChatMode,
@@ -204,6 +208,7 @@ pub(super) struct Task {
     pub(super) folders: Vec<PathBuf>,
     pub(super) session_file: Option<PathBuf>,
     pub(super) mode: Option<ChatMode>,
+    pub(super) session_id: Option<u64>,
 }
 
 pub(super) fn routes() -> Router<Arc<App>> {
@@ -215,11 +220,33 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects/sessions/mode", post(update_session_mode))
         .route("/projects/archive", post(archive))
         .route("/projects/groups/settings", post(update_group))
+        .route("/projects/{project_id}/groups/{group_id}/context", get(read_group_context))
+        .route("/projects/groups/context", post(update_group_context))
         .route("/projects/{project_id}/sessions/{session_id}", get(history))
         .route("/projects/run", post(super::mcp::run_project_chat))
         .route("/projects/run/stop", post(super::mcp::stop_project_chat))
         .route("/projects/tasks", post(queue::enqueue_http))
         .route("/projects/tasks/cancel", post(queue::cancel_http))
+}
+
+async fn read_group_context(
+    State(app): State<Arc<App>>,
+    RoutePath((project_id, group_id)): RoutePath<(u64, u64)>,
+) -> Result<Json<group_context::Document>> {
+    work(app, move |app| app.projects.group_context(group_context::GroupKey { project_id, group_id })).await.map(Json)
+}
+
+async fn update_group_context(
+    State(app): State<Arc<App>>,
+    Json(input): Json<group_context::UpdateBrief>,
+) -> Result<Json<group_context::Document>> {
+    work(app, move |app| set_group_context(app, input)).await.map(Json)
+}
+
+pub(super) fn set_group_context(app: &App, input: group_context::UpdateBrief) -> Result<group_context::Document> {
+    let document = app.projects.update_group_brief(input)?;
+    app.task.send_modify(crate::run::Snapshot::projects_changed);
+    Ok(document)
 }
 
 async fn list(State(app): State<Arc<App>>) -> Result<Json<Catalog>> {
@@ -370,6 +397,7 @@ impl Store {
     pub(super) fn catalog_summary(&self) -> Result<Catalog> {
         let mut catalog = self.list()?;
         catalog.projects = catalog.projects.into_iter().map(Project::summary).collect();
+        catalog.group_memory.clear();
         Ok(catalog)
     }
 
@@ -438,6 +466,7 @@ impl Store {
             project.ensure_active()?;
             let folder = project.workspace(None)?;
             let group = choose_group(project, &mut catalog.next_id, input.group_id, input.group_name)?;
+            group_context::initialize_brief(&mut catalog.group_memory, group.as_ref(), input.group_id, input.group_brief)?;
             catalog.next_id += 1;
             let session = Session {
                 id: catalog.next_id,
@@ -640,6 +669,7 @@ impl Store {
             folders,
             session_file,
             mode,
+            session_id,
         })
     }
 

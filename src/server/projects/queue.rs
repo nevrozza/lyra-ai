@@ -94,6 +94,7 @@ pub(in crate::server) struct Enqueue {
     project_id: u64,
     group_id: Option<u64>,
     group_name: Option<String>,
+    group_brief: Option<String>,
     batch_id: Option<String>,
     tasks: Vec<NewJob>,
 }
@@ -222,6 +223,26 @@ impl Project {
 }
 
 impl Job {
+    pub(super) fn prerequisites(&self) -> &[u64] { &self.after }
+
+    pub(super) fn workflow_root(&self) -> Option<u64> {
+        self.workflow.as_ref().map(workflow::Workflow::root_id)
+    }
+
+    pub(super) fn handoff(&self) -> (&'static str, Option<&JobResult>) {
+        let status = match self.status {
+            Status::Queued => "queued",
+            Status::Running => "running",
+            Status::ContextFull => "context_full",
+            Status::Completed => "completed",
+            Status::Failed => "failed",
+            Status::Cancelled => "cancelled",
+            Status::Interrupted => "interrupted",
+            Status::Blocked => "blocked",
+        };
+        (status, self.result.as_ref())
+    }
+
     pub(super) fn pending(&self) -> bool {
         matches!(
             self.status,
@@ -1068,13 +1089,14 @@ impl Store {
             }
             // A multi-step batch or automatic workflow is one group by default.
             let group_name = if input.group_id.is_none() && input.group_name.is_none()
-                && (input.tasks.len() > 1 || input.tasks.iter().any(|task| task.follow_up.is_some()))
+                && (input.group_brief.is_some() || input.tasks.len() > 1 || input.tasks.iter().any(|task| task.follow_up.is_some()))
             {
                 input.tasks.first().map(|task| task.name.clone())
             } else {
                 input.group_name
             };
             let group = choose_group(project, &mut catalog.next_id, input.group_id, group_name)?;
+            super::group_context::initialize_brief(&mut catalog.group_memory, group.as_ref(), input.group_id, input.group_brief)?;
             let mut tasks = Vec::with_capacity(input.tasks.len());
             let mut keys = HashMap::new();
             for new in input.tasks {
@@ -1340,6 +1362,41 @@ impl Project {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dependency_text_is_available_before_consumer_dispatch_without_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": project.id, "group_name": "API",
+            "group_brief": "Keep the API stable",
+            "tasks": [
+                {"name":"Design","key":"design","external":true,"prompt":"Define the API"},
+                {"name":"Backend","model":"local","prompt":"Implement design","after":["design"]},
+                {"name":"Frontend","model":"local","prompt":"Use design","after":["design"]}
+            ]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        let design = tasks[0].project_session_id;
+        let backend = tasks[1].project_session_id;
+        assert!(store.ready_tasks().unwrap().is_empty());
+        assert!(!store.handoff_for(project.id, backend).unwrap().unwrap().markdown().contains("GET /items"));
+        store.complete_external(serde_json::from_value(json!({
+            "project_id": project.id, "project_session_id": design, "succeeded": true,
+            "summary": "GET /items returns an array", "artifacts": []
+        })).unwrap()).unwrap();
+        assert_eq!(store.ready_tasks().unwrap().len(), 2);
+        for task in &tasks[1..] {
+            let snapshot = store.handoff_for(project.id, task.project_session_id).unwrap().unwrap();
+            let markdown = snapshot.markdown();
+            assert!(markdown.contains("Keep the API stable"));
+            assert!(markdown.contains("GET /items returns an array"));
+            assert!(markdown.contains("completed; prerequisite"));
+            assert!(snapshot.excerpt(4096).contains("GET /items returns an array"));
+        }
+    }
 
     #[test]
     fn groups_can_span_batches_and_are_project_scoped() {

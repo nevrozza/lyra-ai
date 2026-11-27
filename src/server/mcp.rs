@@ -88,6 +88,8 @@ async fn handle(
                     | "get_project_session_mode"
                     | "set_project_session_mode"
                     | "read_project_session"
+                    | "get_group_context"
+                    | "set_group_context"
                     | "archive_project"
                     | "enqueue_project_tasks"
                     | "get_project_tasks"
@@ -313,6 +315,7 @@ fn tools() -> Value {
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing group in this project."},
                 "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a named group; mutually exclusive with group_id."},
+                "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared Markdown goal and constraints for a new group; requires group_name."},
                 "mode": {"enum": ["chat", "work"], "default": "work", "description": "Initial saved mode."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
         },
@@ -333,6 +336,7 @@ fn tools() -> Value {
                 "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
                 "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing task group in this project across batches."},
                 "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a group named for the overall task. Mutually exclusive with group_id."},
+                "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared goal and constraints, saved atomically before any new group task starts. For an existing group use set_group_context instead."},
                 "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": queue_task}
             }, "required": ["project_id", "tasks"], "additionalProperties": false}
         },
@@ -354,6 +358,25 @@ fn tools() -> Value {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1}
             }, "required": ["project_id", "project_session_id"], "additionalProperties": false}
+        },
+        {
+            "name": "get_group_context",
+            "description": "Read a group's generated CONTEXT.md, including the shared brief, committed chat/queue results and statuses. Read before editing the brief or planning dependent work.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "group_id": {"type": "integer", "minimum": 1}
+            }, "required": ["project_id", "group_id"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "set_group_context",
+            "description": "Replace only the shared Markdown goal and constraints; automatic worker results are retained. Use brief_revision from get_group_context; stale edits are rejected.",
+            "inputSchema": {"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "group_id": {"type": "integer", "minimum": 1},
+                "brief": {"type": "string", "maxLength": 8000},
+                "brief_revision": {"type": "integer", "minimum": 0}
+            }, "required": ["project_id", "group_id", "brief", "brief_revision"], "additionalProperties": false}
         },
         {
             "name": "read_project_session",
@@ -590,6 +613,14 @@ async fn call(
         "set_project_session_mode" => {
             let input = arguments(args)?;
             project_result(projects::work(app, |app| projects::set_session_mode(app, input)).await)
+        }
+        "get_group_context" => {
+            let input = arguments(args)?;
+            project_result(projects::work(app, move |app| app.projects.group_context(input)).await)
+        }
+        "set_group_context" => {
+            let input = arguments(args)?;
+            project_result(projects::work(app, move |app| projects::set_group_context(app, input)).await)
         }
         "read_project_session" => {
             let input = arguments(args)?;
@@ -1039,6 +1070,24 @@ async fn run_pi(
     }
     let reply = result?;
     let is_error = reply.error.is_some();
+    if reserved.is_none() && !is_error && !reply.text.trim().is_empty()
+        && !matches!(reply.stop_reason.as_deref(), Some("aborted" | "error"))
+        && let Some(project) = &project
+        && let Some(session_id) = project.session_id
+    {
+        let project_id = project.project.id;
+        let text = reply.text.clone();
+        let truncated = reply.truncated;
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis() as u64;
+        match projects::work(app.clone(), move |app| app.projects.record_group_answer(
+            project_id, session_id, &text, truncated, timestamp
+        )).await {
+            Ok(true) => app.task.send_modify(crate::run::Snapshot::projects_changed),
+            Ok(false) => {},
+            Err((_, error)) => trace.event(Kind::Pi, "Group context", &error, Some("error")),
+        }
+    }
     let status = if reply.stop_reason.as_deref() == Some("length") {
         " (output limit reached)"
     } else if reply.truncated {

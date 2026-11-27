@@ -438,3 +438,11 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 .role-skills summary:hover { color: var(--accent); }
 .role-skills[open] summary { margin-bottom: 8px; }
 .role-skills summary .secondary { margin-left: 3px; }
+
+#project-tree .group-context-entry { color: var(--muted); font: .74rem var(--mono); padding-left: 10px; }
+#project-tree .group-context-entry:hover { color: var(--accent); }
+.group-context-dialog { width: min(760px, calc(100% - 26px)); }
+.group-context-dialog h4 { margin: 8px 0 0; }
+#group-context-brief { resize: vertical; min-height: 5rem; font-family: var(--mono); }
+.group-context-preview { min-width: 0; max-height: min(45vh, 420px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-wrap: anywhere; line-height: 1.5; background: #141b17; }
+.group-context-preview .project-markdown-plain { white-space: pre-wrap; }

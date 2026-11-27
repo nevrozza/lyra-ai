@@ -141,6 +141,25 @@
         </form>
       </dialog>
       <div id="project-entry-menu" class="project-action-menu" popover="auto"></div>
+      <dialog id="group-context-dialog" class="project-dialog group-context-dialog" aria-labelledby="group-context-title">
+        <form id="group-context-form" class="project-form">
+          <h3 id="group-context-title">CONTEXT.md</h3>
+          <p class="secondary">Общая цель и ограничения передаются всем агентам группы. Результаты чатов добавляются автоматически.</p>
+          <label for="group-context-brief">Общая цель и ограничения (Markdown)</label>
+          <textarea id="group-context-brief" rows="5" maxlength="8000" readonly></textarea>
+          <div class="project-controls">
+            <button id="group-context-save" type="submit" disabled>Сохранить цель</button>
+            <button id="group-context-reload" class="unload" type="button">Обновить</button>
+          </div>
+          <p id="group-context-message" class="secondary project-feedback" role="status"></p>
+          <h4>Общий контекст группы</h4>
+          <div id="group-context-preview" class="group-context-preview"></div>
+          <div class="project-controls project-dialog-actions">
+            <button id="group-context-download" class="unload" type="button" disabled>Скачать .md</button>
+            <button id="group-context-close" class="unload" type="button">Закрыть</button>
+          </div>
+        </form>
+      </dialog>
       <dialog id="project-group-dialog" class="project-dialog" aria-labelledby="project-group-dialog-title">
         <form id="project-group-form" class="project-form">
           <h3 id="project-group-dialog-title">Настройки группы</h3>
