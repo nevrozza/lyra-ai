@@ -6,7 +6,7 @@ Choose one pipeline before dispatching any delegated code change. Record each wo
 
 | Pipeline | Use when | Sequence |
 | --- | --- | --- |
-| Fine-grained implementation | Contracts are clear and the change divides into small mechanical or otherwise independently verifiable steps. | Send each implementation leaf to Medium or High in its own chat. Low is reserved for trivial mechanical fixes. Overlap independent write scopes when possible. Assemble the result, then run the required final review with the strongest eligible independent local reviewer. Delegate confirmed fixes and repeat the review with a model that did not make those edits. |
+| Fine-grained implementation | Contracts are clear and the change divides into small mechanical or otherwise independently verifiable steps. | Send each implementation leaf to Medium or High in its own chat. Low is reserved for trivial mechanical fixes. Overlap independent tasks when possible. Assemble the result, then run the required final review with the strongest eligible independent local reviewer. Delegate confirmed fixes and repeat the review with a model that did not make those edits. |
 | Coherent implementation | The change requires coupled design or edits that benefit from one owner per coherent slice. | Assign a capable medium or stronger local model directly to each slice. Start a fresh chat for the next slice when it can proceed from a clean handoff. Run the required final review on the assembled result with the strongest eligible independent local reviewer. Delegate confirmed fixes and repeat the review with a model that did not make those edits. |
 
 Final review is required in both pipelines. Select the strongest locally installed model that can review the full assembled change in the available context and memory, is eligible for Pi, and did not implement or fix the changes under review. Reserve that reviewer before dispatch, including when several workers contribute. Schedule it after the writers if the models cannot coexist in memory. If a suitable independent reviewer is unavailable, report the limitation and use a fallback only when the user authorizes it. The original worker can run focused checks, and the orchestrator can inspect the final outcome in addition to this review.
@@ -18,23 +18,23 @@ Plan fresh chats early where a step can work from a short handoff. Use shared pr
 When the user delegates creation or explicitly forbids the orchestrator from writing code, the orchestrator learns the requirements, schedules work, and verifies results. It does not author the deliverable or silently finish a worker's partial edit. Give each worker the requested behavior and acceptance checks. Leave room for the worker to design details the user delegated. Preserve the requested file layout and restrictions on deployment or external actions independently of model choice.
 
 1. **Resolve the destination.** If the user names a chat, find it with `list_projects` and verify the registered working folder and shared Chat or Work mode. Use `read_project_session` for the relevant history when the user refers to earlier work. For sequential work in that chat, use `run_pi` with its project and chat IDs and `mode: work` as the expected mode. If concurrent execution is requested and separate step chats are acceptable, queue the steps in the same project. Scope all steps to the user's requested folder.
-2. **Constrain writes.** With `run_pi` or `enqueue_project_tasks`, pass exact relative filenames in `write_paths`, such as `["index.html"]`. Use the project's default folder, or select another registered folder with `workspace` on the run or queued step. `write_paths` are relative to that execution root. All chats inherit the project folders. Pass `index.html` as plain text in the write tool's path value, without Markdown backticks, closing punctuation, or an appended Windows backslash. The orchestrator sets the allowlist itself. Lyra checks each write/edit against it; shell commands must not modify unreserved files. This works with a single file and with `parallel` omitted.
+2. **Describe intended changes.** Select the project's default folder or another registered folder using `workspace`. Tell the agent which files or features it should change in its prompt. Use exact file paths without backticks or punctuation. Lyra locks files on first mutation and checks the version observed by `read`; no static list of paths is required.
 3. **Run the independent review.** Choose an eligible local reviewer according to the required pipeline. Use `run_pi` with `role: review` in a fresh chat for direct work, unless the user explicitly requires all turns in one chat. In the queue, make the review depend on every implementation step, or attach `follow_up.review` to the final implementation step. Pass the original acceptance criteria. Ask the reviewer to inspect the actual directory and read the exact expected files. A worker's file path or completion claim alone is insufficient.
 4. **Close the loop.** If an expected file is missing, misnamed, or fails a check, delegate a bounded fix using the same exact allowed paths and repeat the relevant review. If an unexpected file already exists, report it and preserve it unless removal is authorized. State which checks actually ran. Maintain the no-deploy rule during verification.
 
 ### Example with parallel implementation
 
-For a static page with a settled HTML contract and where separate files fit the request, run styling and behavior in parallel with `write_paths: ["styles.css"]` and `write_paths: ["timer.js"]`. Give them shared IDs or interface details, then queue an integration step with `write_paths: ["index.html"]` and `after` pointing to both. Review the assembled page against the user's requirements. When the deliverable must stay in one HTML file, use the sequential workflow below. If the user requests multiple distinct local workers, explain how each will contribute and report which models ran.
+For a static page with a settled HTML contract and where separate files fit the request, run styling and behavior in parallel in separate tasks for `styles.css` and `timer.js`. Give them shared IDs or interface details, then queue an integration step for `index.html` and `after` pointing to both. Review the assembled page against the user's requirements. When the deliverable must stay in one HTML file, use the sequential workflow below. If the user requests multiple distinct local workers, explain how each will contribute and report which models ran.
 
 ## Split work on a single file
 
 Split a substantial single-file deliverable into implementation passes when the requirements have clear handoffs. Use separate task keys and chats for those passes. The file constraint determines which paths may be written and which passes must run in sequence. As a dispatch check, verify that each implementation pass has one outcome and its own task ID or chat ID. A request that hands all the requirements to one worker and then queues a review has one implementation pass.
 
-Queue same-file writers with a complete `write_paths` list and explicit `after` dependencies. For a new file, the first writer creates it and establishes the shared IDs and structure. Each successor reads the current file, makes targeted edits for its pass, and reads the saved result. Pass the contract and short acceptance checks to each chat. Keep earlier contributions in place. Use the strongest eligible independent model for final review and repeat the review after any fixes.
+Queue same-file writers with explicit `after` dependencies. For a new file, the first writer creates it and establishes the shared IDs and structure. Each successor reads the current file, makes targeted edits for its pass, and reads the saved result. Pass the contract and short acceptance checks to each chat. Keep earlier contributions in place. Use the strongest eligible independent model for final review and repeat the review after any fixes.
 
 ### Worked example with one self-contained landing page
 
-Register the requested folder and scope each writer to `write_paths: ["landing.html"]`. Carry the requested limits on file writes, external resources, deployment, and servers into every step. In this example the page works as a directly opened file, including useful content and navigation with JavaScript disabled.
+Register the requested folder and instruct each writer to modify `landing.html`. Carry the requested limits on file writes, external resources, deployment, and servers into every step. In this example the page works as a directly opened file, including useful content and navigation with JavaScript disabled.
 
 | Step key | Deliverable for this chat | `after` | Write paths |
 | --- | --- | --- | --- |
@@ -69,8 +69,7 @@ Replace model placeholders with exact inspected catalog tags and choose the proj
       "role": "implement",
       "model": "<worker-tag>",
       "prompt": "Implement the agreed GET /status contract in src/api.rs. Return {ready: boolean}. Report changed paths.",
-      "parallel": true,
-      "write_paths": ["src/api.rs"]
+      "parallel": true
     },
     {
       "key": "client",
@@ -78,8 +77,7 @@ Replace model placeholders with exact inspected catalog tags and choose the proj
       "role": "fix",
       "model": "<worker-tag>",
       "prompt": "Render the ready flag in web/status.js using the agreed GET /status response {ready: boolean}. Report changed paths.",
-      "parallel": true,
-      "write_paths": ["web/status.js"]
+      "parallel": true
     },
     {
       "key": "review",
@@ -107,7 +105,7 @@ Use groups when the requested work has several coherent outcomes, or when one im
 
 Lyra accepts steps with dependencies inside a named chat group. Use `group_name` for the first batch, then pass its returned `group.id` as `group_id` for all later batches and direct chats belonging to the same task. Automatic review and fix chats inherit the group. Use globally unique task IDs, not the display numbering, for dependencies. Translate the group plan into named keys such as `storage-schema` and `ui-bind`. List prerequisites first and use `after` to link the steps.
 
-1. **Implement the group.** Run independent leaves together when their `write_paths` are disjoint and the model limits allow it. Order leaves that share files or depend on each other's results.
+1. **Implement the group.** Run independent leaves together when they are independent and the model limits allow it. Order leaves that share files or depend on each other's results.
 2. **Integrate and review the group.** Use the real step that assembles the group, such as wiring its components or adding its integration checks. Give it `after` dependencies for every group branch it needs and attach `follow_up.review`. The review prompt identifies the group's complete change, shared interfaces, and acceptance checks. Ask the reviewer to inspect that scope in the working diff and attribute findings before scheduling fixes. Lyra applies the fixes and repeats the group review within its review limit. If there's no integration edit, either attach the loop to a real final implementation step with the required dependencies or use `role: review` for a standalone check and coordinate its fixes and re-review explicitly.
 3. **Release dependent groups after verification.** Point a consumer that needs a finished group at its integration step. Lyra's `after` waits for that step and its automatic follow-up, so the consumer also waits for group fixes and the successful repeat review. For a manually coordinated loop, queue consumers only when the group passes. Independent groups may overlap at the leaf level.
 4. **Verify the whole task.** Make the final integration or review depend on every group result. Give the combined change to the strongest eligible independent local reviewer. Check the original acceptance criteria, cross-group interfaces, and the relevant build and integration tests or startup. If this round needs cross-group fixes, scope them explicitly and repeat the assembled check. Attach an automatic cycle to a real final integration step when appropriate.
@@ -123,7 +121,7 @@ Lyra accepts steps with dependencies inside a named chat group. Use `group_name`
 | `ui-bind` | Connect the view to verified storage and add integration coverage | `ui-view`, `storage-integrate` | `follow_up.review` for UI |
 | `whole-task-review` | Check storage and UI together against the original request | `storage-integrate`, `ui-bind` | Standalone `role: review` |
 
-With a stable interface, `ui-view` can start with the storage leaves. `ui-bind` waits through the Storage review and fixes. Apply `write_paths` and the shell rules to each executable step.
+With a stable interface, `ui-view` can start with the storage leaves. `ui-bind` waits through the Storage review and fixes. Apply the file-lock and shell rules to each executable step.
 
 A batch accepts up to 16 steps and each step accepts up to 16 direct dependencies. For a larger plan, submit batches in dependency order and keep the returned task IDs. Use those IDs in `after` across batches. Use group integration results to join multiple branches. If a group fails, follow its blocked branches and recover the affected work while independent groups continue.
 
@@ -151,3 +149,7 @@ A group is a shared work context, not just a visual folder. Create it with `grou
 Declare every data dependency with `after` (task keys in the same batch or task IDs from an earlier batch in the same project). For example, a design step that produces an API contract without editing a file must be a prerequisite of both backend and frontend steps. File scopes being disjoint does not make these steps independent. Do not run a consumer in parallel with its producer. Queue results and external-step summaries are committed before the dependent step becomes ready; Lyra passes their text and existing artifact paths. Group chats additionally receive a bounded excerpt of other results, with a full generated CONTEXT.md snapshot available to Work agents via read. Chat-mode workers receive only the excerpt. A snapshot reflects completed work at dispatch, not a live message stream. Every included excerpt section identifies its source line range in CONTEXT.md; shortened sections and overall omission counts are explicit. Work agents should read relevant missing ranges on demand when the excerpt is insufficient, using read with offset and limit. Chat-mode agents must ask for missing details if needed. A saved result incomplete marker means the stored answer itself was truncated; reading the snapshot cannot recover missing original text.
 
 Ask workers to finish with actionable decisions, interfaces, paths, checks and blockers. The orchestrator must inspect the shared context before the next batch and ensure omitted or truncated details are read or supplied when needed. A failed, stopped, or partial result is not a verified decision. Do not write CONTEXT.md into the project repository or ask workers to overwrite shared group memory. Lyra assembles results from separate persisted records.
+
+## Dynamic file coordination
+
+`write` and `edit` automatically claim files until the worker ends. Existing files require a successful current `read`; a changed version requires a fresh read and adapted change. FILE_LOCKED is non-blocking: continue independent work and report essential conflicts instead of waiting or retrying indefinitely. Use `after` for shared-file and information dependencies. NEVER bypass locks or version checks through `run_command`, scripts, shell redirection, generators, patch tools, or Git operations. Shell can inspect, build and test without changing source files. This is a model instruction, not an OS sandbox.
