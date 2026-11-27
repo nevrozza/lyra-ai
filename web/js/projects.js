@@ -319,6 +319,7 @@ export function createProjects() {
       const item = element('li', '');
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
+      appendMessageTime(item, message);
       if (message.tool) {
         const tool = message.tool;
         const details = element('details', '');
@@ -680,7 +681,7 @@ export function createProjects() {
     const text = prompt.value;
     const model = refreshModels();
     const requestId = crypto.randomUUID();
-    sending.set(chat.id, { role: 'user', origin: 'dashboard', text, request_id: requestId });
+    sending.set(chat.id, { role: 'user', origin: 'dashboard', text, request_id: requestId, timestamp: Date.now() });
     drafts.delete(chat.id);
     prompt.value = '';
     report();
@@ -736,6 +737,22 @@ export function createProjects() {
       }
     },
   };
+}
+
+function appendMessageTime(item, message) {
+  if (message.timestamp == null) return;
+  const date = new Date(message.timestamp);
+  if (Number.isNaN(date.getTime())) return;
+  const time = element('time', date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }));
+  time.className = 'project-message-time';
+  time.dateTime = date.toISOString();
+  const full = date.toLocaleString('ru-RU');
+  const end = message.tool?.finished_at == null ? null : new Date(message.tool.finished_at);
+  time.title = end && !Number.isNaN(end.getTime())
+    ? `Вызов: ${full}\nРезультат: ${end.toLocaleString('ru-RU')}`
+    : full;
+  time.setAttribute('aria-label', time.title);
+  item.append(time);
 }
 
 function setOptions(select, pairs, selected) {
