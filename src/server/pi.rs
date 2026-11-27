@@ -368,7 +368,6 @@ pub(super) async fn run(
                     Some("input")
                         if ready
                             && !text_only
-                            && writes.is_empty()
                             && event["title"] == "lyra:run-command" =>
                     {
                         let id = event["id"]
@@ -724,7 +723,7 @@ async fn write_project_instructions(
         }
         let _ = writeln!(
             text,
-            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are unavailable. The list can include new files. If another path is needed, report its exact relative path.",
+            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are available for reading, testing and other tasks, but never use them (including scripts, subprocesses or generated outputs) to modify files outside the reserved paths. Use write/edit for source changes. If a command would modify unreserved files, do not run it. The list can include new files. If another path is needed, report its exact relative path.",
             json!(paths),
         );
     }
@@ -862,7 +861,7 @@ fn spawn_pi(
             let tools = if reviewing {
                 "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
             } else if scoped_write {
-                "read,grep,find,ls"
+                "read,grep,find,ls,run_command"
             } else if extension.is_some() {
                 "read,grep,find,ls,write,edit,run_command"
             } else {

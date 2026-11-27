@@ -115,8 +115,19 @@ impl Mutation {
 
 pub(in crate::server) fn mutate(root: &Path, allowed: &[PathBuf], request: &str) -> io::Result<()> {
     let change: Mutation = serde_json::from_str(request)?;
-    let target = resolve(root, change.path())?;
-    if !allowed.contains(&target) {
+    let canonical_root = root.canonicalize()?;
+    let path = change.path();
+    // Pi may return an absolute path from its read tool. Accept it only
+    // when it is lexically under the project root, then validate every component.
+    let relative = if path.is_absolute() {
+        path.strip_prefix(root)
+            .or_else(|_| path.strip_prefix(&canonical_root))
+            .map_err(|_| invalid("Absolute path is outside the project root."))?
+    } else {
+        path
+    };
+    let target = resolve(root, relative)?;
+    if !allowed.iter().any(|path| crate::run::path_key(path) == crate::run::path_key(&target)) {
         return Err(invalid(format!(
             "Этот файл не зарезервирован для задачи: {}",
             change.path().display()
@@ -232,6 +243,20 @@ mod tests {
         );
         assert!(mutate(root, &allowed, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"one","newText":"changed"},{"oldText":"absent","newText":"bad"}]}"#).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "one\r\ntwo\r\nthree\r\n");
+    }
+
+    #[test]
+    fn accepts_absolute_reserved_paths_but_not_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let allowed = resolve_paths(root, &["new.txt".into()]).unwrap();
+        let request = serde_json::json!({"tool":"write","path":root.join("new.txt"),"content":"old"});
+        mutate(root, &allowed, &request.to_string()).unwrap();
+        let request = serde_json::json!({"tool":"edit","path":root.join("new.txt"),"edits":[{"oldText":"old","newText":"new"}]});
+        mutate(root, &allowed, &request.to_string()).unwrap();
+        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "new");
+        let request = serde_json::json!({"tool":"write","path":root.join("other.txt"),"content":"no"});
+        assert!(mutate(root, &allowed, &request.to_string()).is_err());
     }
 
     #[test]
