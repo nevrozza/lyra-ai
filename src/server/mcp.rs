@@ -357,7 +357,7 @@ fn tools() -> Value {
         },
         {
             "name": "read_project_session",
-            "description": "Read recent user and assistant messages from a saved Pi chat.",
+            "description": "Read recent saved chat messages, including intentional user-stop notices. Never automatically resume a user-stopped task.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1}
@@ -614,7 +614,7 @@ async fn call(
             project_result(projects::queue::complete_external(app, arguments(args)?).await)
         }
         "cancel_project_task" => {
-            projects::queue::cancel(app, arguments(args)?)
+            projects::queue::cancel(app, arguments(args)?, false)
                 .await
                 .map_err(|(_, error)| error)?;
             Ok("Task cancelled".into())
@@ -997,13 +997,13 @@ async fn run_pi(
     };
     let Some(result) = result else {
         finish_delegation(&app, delegation, false, false).await;
-        let text = "Генерация остановлена.";
+        let text = projects::USER_STOP_TEXT;
         trace.event(Kind::Pi, "Pi", text, Some("ok"));
         return Ok(ToolOutput {
             text: text.into(),
             is_error: false,
             generation: Some(GenerationInfo {
-                stop_reason: Some("aborted".into()),
+                stop_reason: Some(projects::USER_STOP_REASON.into()),
                 truncated: false,
                 max_output_tokens: limit,
                 text_only: None,
@@ -1125,7 +1125,7 @@ pub(super) async fn run_queued(
                     (details.stop_reason, details.truncated, details.context)
                 });
             let status = match stop_reason.as_deref() {
-                Some("aborted") => Status::Cancelled,
+                Some(projects::USER_STOP_REASON) => Status::Cancelled,
                 Some("context_full") => Status::ContextFull,
                 _ if reply.is_error => Status::Failed,
                 _ => Status::Completed,
@@ -1147,8 +1147,8 @@ pub(super) async fn run_queued(
                 Status::Failed
             },
             JobResult {
-                text,
-                stop_reason: None,
+                text: if pending == Some(true) { projects::USER_STOP_TEXT.into() } else { text },
+                stop_reason: (pending == Some(true)).then(|| projects::USER_STOP_REASON.into()),
                 truncated: false,
                 context: None,
             },
@@ -1203,6 +1203,14 @@ pub(super) async fn stop_project_chat(
     if app.task.send_if_modified(|snapshot| {
         snapshot.stop_project_delegation(request.delegation_id, request.project_session_id)
     }) {
+        let session_id = request.project_session_id;
+        if let Err((_, error)) = projects::work(app.clone(), move |app| {
+            app.projects.record_user_stop(session_id)
+        }).await {
+            eprintln!("Could not persist user stop: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        app.task.send_modify(crate::run::Snapshot::projects_changed);
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
