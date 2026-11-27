@@ -994,7 +994,7 @@ impl Store {
             let next = if status == Status::Completed
                 && let Some(workflow) = &job.workflow
             {
-                match workflow.advance(&result, candidates, &session.folder) {
+                match workflow.advance(&result, candidates) {
                     Ok(next) => next,
                     Err(reason) => {
                         status = Status::Failed;
