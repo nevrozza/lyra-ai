@@ -6,17 +6,20 @@ export default function (pi) {
     const guardedWrite = process.env.LYRA_PI_GUARDED_WRITE === "1" && !textOnly && !review;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
-    if (effort) {
-        pi.on("before_provider_request", ({ payload }) => {
-            // Ollama levels can differ from Pi's built-in thinking presets.
-            const request = { ...payload, reasoning_effort: effort };
+    pi.on("before_provider_request", ({ payload }) => {
+        // Lyra only registers the Ollama OpenAI-compatible provider. Override
+        // Pi's provider-generated max token fields even for default thinking.
+        // Ollama maps max_tokens=-1 to unlimited num_predict (no finite cap).
+        const request = { ...payload, max_tokens: -1 };
+        delete request.max_completion_tokens;
+        if (effort) {
+            request.reasoning_effort = effort;
             if (request.reasoning) request.reasoning = { ...request.reasoning, effort };
-            return request;
-        });
-    }
+        }
+        return request;
+    });
     let earlierMessages = [];
     let promptTimestamp;
-    let completionFollowUp = false;
     const guardedDescriptions = new Map();
     if (guardedWrite) {
         const path = Type.String({ description: "Exact file path, relative to the primary working folder or absolute" });
@@ -58,24 +61,6 @@ export default function (pi) {
         }
     }
     if (!textOnly) {
-        const completionDescription = "Record the checked outcome of the assignment: completed or blocked. Call as the last tool.";
-        guardedDescriptions.set("finish_task", completionDescription);
-        pi.registerTool({
-            name: "finish_task", label: "Confirm task outcome", description: completionDescription,
-            parameters: Type.Object({
-                status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")]),
-                summary: Type.String({ minLength: 1, maxLength: 2000, description: "Concise confirmed changes, actual checks, and any remaining or unverified requirements." }),
-            }),
-            promptSnippet: "Record the verified task outcome before the final answer.",
-            executionMode: "sequential",
-            async execute(_id, args, signal, _onUpdate, ctx) {
-                const value = await ctx.ui.input("lyra:finish-task", JSON.stringify(args), { signal });
-                if (value === undefined) throw new Error("Lyra did not return a completion result");
-                const result = JSON.parse(value);
-                if (!result.ok) throw new Error(result.message);
-                return { content: [{ type: "text", text: "Outcome recorded. Return your final handoff now, using the requested format. If more tools are needed, confirm the outcome again afterward." }], details: result };
-            },
-        });
         const description = "Load the instructions of an available Lyra skill by exact name, without guessing its file path. Returns SKILL.md text and the real package directory for referenced resources.";
         guardedDescriptions.set("load_skill", description);
         pi.registerTool({
@@ -147,7 +132,7 @@ export default function (pi) {
             });
         }
     }
-    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill", "finish_task"];
+    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill"];
     const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir"] : [])];
     async function verifyTools() {
         await pi.setActiveTools(expected);
@@ -179,12 +164,11 @@ export default function (pi) {
             if (message.role === "user") {
                 promptTimestamp = message.timestamp;
                 pi.appendEntry("lyra-message-origin", {
-                    origin: completionFollowUp ? "lyra" : origin,
+                    origin,
                     messageTimestamp: message.timestamp,
-                    requestId: completionFollowUp ? undefined : process.env.LYRA_MESSAGE_REQUEST_ID,
+                    requestId: process.env.LYRA_MESSAGE_REQUEST_ID,
                     model: process.env.LYRA_CHAT_MODEL,
                 });
-                completionFollowUp = false;
             }
         });
         let reportedNearLimit = false;
@@ -211,18 +195,9 @@ export default function (pi) {
             return { messages: conversationContext(messages, promptTimestamp, textOnly) };
         });
     }
-    pi.on("agent_end", async (_event, ctx) => {
-        if (textOnly) { ctx.shutdown(); return; }
-        // Rust owns the completion decision and retry budget. Only keep Pi
-        // alive if the host explicitly requests a continuation.
-        const decision = await ctx.ui.input("lyra:completion-check", "");
-        if (decision !== "continue") {
-            ctx.shutdown();
-            ctx.ui.notify("lyra:completion-terminal");
-        } else {
-            completionFollowUp = true;
-            ctx.ui.notify("lyra:completion-continue");
-        }
+    pi.on("agent_end", (_event, ctx) => {
+        // Finish the original agent run. No completion-check message or extra generation.
+        ctx.shutdown();
     });
 }
 
