@@ -82,16 +82,14 @@ impl ChatReply {
             .filter(|text| !text.is_empty())
     }
 
-    pub(crate) fn into_text(self, limit: u32) -> Result<(String, bool), String> {
+    pub(crate) fn into_text(self) -> Result<(String, bool), String> {
         if !self.done {
             return Err("Ollama returned an incomplete reply".into());
         }
         let truncated = self.done_reason.as_deref() == Some("length");
         if self.message.content.trim().is_empty() {
             if truncated && self.thinking().is_some() {
-                return Err(format!(
-                    "Thinking used the {limit}-token max_output_tokens budget before the model answered. Increase the budget or pass think=false if the model supports disabling thinking."
-                ));
+                return Err("The provider stopped at a generation/context limit before returning text after thinking.".into());
             }
             return Err(if truncated {
                 "The model reached its output limit before returning text"
@@ -107,7 +105,6 @@ impl ChatReply {
 pub(crate) fn chat(
     model: &str,
     prompt: &str,
-    max_output_tokens: u32,
     saved_context: Option<u32>,
     requested_context: Option<u32>,
     require_loaded: bool,
@@ -150,7 +147,7 @@ pub(crate) fn chat(
         "model": backend,
         "messages": [{"role": "user", "content": prompt}],
         "stream": false,
-        "options": {"num_predict": max_output_tokens}
+        "options": {"num_predict": -1}
     });
     if let Some(tokens) = context_tokens {
         request["options"]["num_ctx"] = json!(tokens);
