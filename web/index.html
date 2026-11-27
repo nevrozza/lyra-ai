@@ -44,12 +44,21 @@
         <div class="project-main">
           <header id="project-selection" class="project-selection" hidden>
             <div class="project-heading">
-              <p id="project-breadcrumb" class="secondary" hidden></p>
               <h3 id="current-project-title"></h3>
-              <p id="project-chat-workspace" class="secondary" hidden></p>
-              <p id="project-job-status" class="secondary" role="status" hidden></p>
-              <div id="project-working-model" class="project-working-model" role="status" hidden>
-                <span class="project-working-dot" aria-hidden="true"></span><span id="project-working-model-name"></span>
+              <div id="project-header-meta" class="project-header-meta" hidden>
+                <span id="project-breadcrumb" hidden></span>
+                <span id="project-job-status" class="project-job-status" role="status" hidden></span>
+                <span id="project-working-model" class="project-working-model" role="status" hidden>
+                  <span class="project-working-dot" aria-hidden="true"></span><span id="project-working-model-name"></span>
+                </span>
+                <button id="project-chat-workspace" class="project-workspace-button" type="button" aria-expanded="false" aria-controls="project-workspace-popover" aria-label="Рабочие папки и зависимости" title="Рабочие папки и зависимости" hidden>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                </button>
+                <div id="project-workspace-popover" class="terminal-popover project-workspace-popover" popover="auto" role="group" aria-label="Рабочие папки и зависимости">
+                  <p class="secondary">Рабочие папки</p>
+                  <div id="project-workspace-paths"></div>
+                  <p id="project-workspace-dependencies" class="secondary" hidden></p>
+                </div>
               </div>
             </div>
             <div class="project-controls">
