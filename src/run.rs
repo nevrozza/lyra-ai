@@ -50,6 +50,7 @@ struct Delegation {
     context_notice: Option<ContextNotice>,
     #[serde(skip_serializing_if = "String::is_empty")]
     thinking: String,
+    history_revision: u64,
     #[serde(skip)]
     project: bool,
     #[serde(skip)]
@@ -221,6 +222,7 @@ impl Snapshot {
                 stopping: false,
                 context_notice: None,
                 thinking: String::new(),
+                history_revision: 0,
                 project,
                 exclusive,
                 writes,
@@ -293,6 +295,18 @@ impl Snapshot {
             return false;
         }
         active.context_notice = Some(notice);
+        true
+    }
+
+    pub fn chat_history_changed(&mut self, id: u64) -> bool {
+        let Some(active) = self
+            .delegations
+            .get_mut(&id)
+            .filter(|active| active.project_session_id.is_some())
+        else {
+            return false;
+        };
+        active.history_revision += 1;
         true
     }
 
@@ -420,6 +434,22 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::{DelegationScope, Snapshot};
+
+    #[test]
+    fn chat_history_revisions_are_scoped_to_the_delegation() {
+        let mut snapshot = Snapshot::new(None);
+        let id = snapshot
+            .begin_delegation("one", DelegationScope::Project {
+                session_id: Some(1),
+                work: true,
+            })
+            .unwrap();
+        assert_eq!(snapshot.delegations[&id].history_revision, 0);
+        assert!(snapshot.chat_history_changed(id));
+        assert!(snapshot.chat_history_changed(id));
+        assert_eq!(snapshot.delegations[&id].history_revision, 2);
+        assert!(!snapshot.chat_history_changed(id + 1));
+    }
 
     #[test]
     fn scoped_jobs_reserve_all_files_and_obey_task_and_model_limits() {
