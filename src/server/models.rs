@@ -9,7 +9,7 @@ use axum::{
 
 use crate::{benchmark, context, model_name, ollama, run};
 
-use super::{App, pi};
+use super::{App, mcp, pi};
 
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
@@ -158,15 +158,18 @@ struct ContextRequest {
 }
 
 async fn context_estimate(
+    State(app): State<Arc<App>>,
     Query(request): Query<SelectRequest>,
-) -> Result<Json<context::Estimate>, StatusCode> {
-    model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let estimate = tokio::task::spawn_blocking(move || context::estimate(&request.model))
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    Ok(Json(estimate))
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let model = model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let source = model.clone();
+    let estimate = tokio::task::spawn_blocking(move || context::estimate(&source))
+        .await.ok().flatten().unwrap_or_default();
+    let metrics = app.metrics.lock().await.sample().await;
+    let auto = mcp::auto_context_estimate(&metrics, &model, &estimate, 1, 1, !app.task.borrow().busy());
+    let mut result = serde_json::to_value(estimate).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    result["auto_context_tokens"] = serde_json::json!(auto);
+    Ok(Json(result))
 }
 async fn set_model_context(
     State(app): State<Arc<App>>,
@@ -403,9 +406,15 @@ pub(super) fn execute_model_action(
 ) -> tokio::task::JoinHandle<Result<bool, String>> {
     tokio::spawn(async move {
         let store = app.clone();
+        let metrics = if action.uses_context() {
+            Some(mcp::fresh_metrics(&app).await)
+        } else { None };
         let result = tokio::task::spawn_blocking(move || {
             let tokens = if action.uses_context() {
-                model_context(&store, &model)?
+                model_context(&store, &model)?.or_else(|| {
+                    let estimate = context::estimate(&model)?;
+                    mcp::auto_context_estimate(metrics.as_ref()?, &model, &estimate, 1, 1, true)
+                })
             } else {
                 None
             };
