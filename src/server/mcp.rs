@@ -193,7 +193,6 @@ fn tools() -> Value {
         "required": ["review"],
         "additionalProperties": false
     });
-    let pi_output_limit = json!({"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional Pi generation cap. Omit to use Pi's default."});
     let worker_role = json!({"enum": ["implement", "fix", "review"], "description": "Local worker role. Review uses read-only file tools."});
     let mut queue_task = json!({"type": "object", "properties": {
         "name": {"type": "string"}, "prompt": {"type": "string", "description": "Actionable technical specification for the step: goal, verified code context, concrete implementation or review plan, constraints, dependencies, acceptance checks and handoff."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
@@ -205,8 +204,7 @@ fn tools() -> Value {
         "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder."},
         "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional enabled skill names. Omit for enabled non-role skills; disabled or removed names are rejected."},
         "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
-        "follow_up": follow_up,
-        "max_output_tokens": pi_output_limit
+        "follow_up": follow_up
     }, "required": ["name", "prompt"], "additionalProperties": false});
     queue_task["properties"]["role"]["default"] = json!("implement");
     let enqueue_schema = json!({"type": "object", "properties": {
@@ -303,12 +301,11 @@ fn tools() -> Value {
         },
         {
             "name": "run_model",
-            "description": "Generate a bounded text response with an installed Ollama model.",
+            "description": "Generate a text response with an installed Ollama model without a Lyra output token cap.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name from Lyra inspect"},
                 "prompt": {"type": "string", "minLength": 1, "description": "Text prompt."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or Ollama default."},
-                "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens, "description": "Generation budget. On reasoning models it can include thinking tokens and run out before any visible text."},
                 "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional Thinking override. Pass false for Off, true for On, or a model-supported level. Omit to use the Lyra model setting or the Ollama default."},
                 "require_loaded": {"type": "boolean", "description": "Use only a model already loaded with the requested or configured context"}
             }, "required": ["model", "prompt"], "additionalProperties": false},
@@ -426,8 +423,7 @@ fn tools() -> Value {
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to enabled Lyra skill names. Omit for enabled non-role skills, or pass [] to run without optional skills. Disabled or removed names are rejected."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
-                "role": worker_role,
-                "max_output_tokens": pi_output_limit
+                "role": worker_role
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
         }
@@ -451,7 +447,7 @@ fn tools() -> Value {
                 "properties": {
                     "stop_reason": {"type": ["string", "null"]},
                     "truncated": {"type": "boolean"},
-                    "work_progress": {"type": "object", "description": "Work execution evidence, worker confirmation and final handoff status; not proof of task acceptance.", "properties": {
+                    "work_progress": {"type": "object", "description": "Work execution evidence and received handoff status; not proof of task acceptance. Confirmation and continuation fields are retained for legacy results; new runs do not request confirmation or automatic continuation.", "properties": {
                         "generation_stop_reason": {"type": ["string", "null"]},
                         "confirmation_status": {"enum": ["unconfirmed", "completed", "blocked"]},
                         "confirmation_summary": {"type": "string"},
@@ -460,7 +456,6 @@ fn tools() -> Value {
                         "confirmed_mutation_count": {"type": "integer"},
                         "recent_mutations": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string"}, "path": {"type": "string"}}, "required": ["tool", "path"]}}
                     }, "required": ["generation_stop_reason", "confirmation_status", "handoff_complete", "continuation_attempts", "confirmed_mutation_count", "recent_mutations"]},
-                    "max_output_tokens": {"type": "integer"},
                     "context": {"type": "object", "properties": {
                         "context_tokens": {"type": "integer"},
                         "notice": {"enum": ["near_limit", "compacting", "compacted", "full"]}
@@ -468,12 +463,6 @@ fn tools() -> Value {
                 },
                 "required": ["stop_reason", "truncated"]
             });
-            if tool["name"] == "run_model" {
-                tool["outputSchema"]["required"]
-                    .as_array_mut()
-                    .expect("required output fields")
-                    .push(json!("max_output_tokens"));
-            }
         }
     }
     tools
@@ -515,7 +504,6 @@ struct RunModel {
     model: String,
     prompt: String,
     context_tokens: Option<NonZeroU32>,
-    max_output_tokens: Option<u32>,
     think: Option<ollama::Think>,
     #[serde(default)]
     require_loaded: bool,
@@ -534,7 +522,6 @@ pub(super) struct RunPi {
     #[serde(skip)]
     chat_session_id: Option<u64>,
     prompt: String,
-    max_output_tokens: Option<u32>,
     skills: Option<Vec<String>>,
     #[serde(rename = "allow_commands")]
     _allow_commands: Option<bool>,
@@ -552,8 +539,6 @@ pub(super) struct PiContext {
 struct GenerationInfo {
     stop_reason: Option<String>,
     truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -758,26 +743,9 @@ async fn manage_model(app: Arc<App>, request: ManageModel) -> Result<String, Str
     Ok(format!("model={model} action={action} ok"))
 }
 
-fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
-    let limit = requested.unwrap_or(AI_SETTINGS.default_output_tokens);
-    if !(AI_SETTINGS.minimum_output_tokens..=AI_SETTINGS.maximum_output_tokens).contains(&limit) {
-        return Err(format!(
-            "max_output_tokens must be between {} and {}",
-            AI_SETTINGS.minimum_output_tokens, AI_SETTINGS.maximum_output_tokens
-        ));
-    }
+pub(super) fn validate_pi_generation(prompt: &str) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Err("Prompt is empty".into());
-    }
-    Ok(limit)
-}
-
-pub(super) fn validate_pi_generation(prompt: &str, limit: Option<u32>) -> Result<(), String> {
-    if prompt.trim().is_empty() {
-        return Err("Prompt is empty".into());
-    }
-    if limit == Some(0) {
-        return Err("max_output_tokens must be positive when supplied".into());
     }
     Ok(())
 }
@@ -787,13 +755,12 @@ async fn run_model(
     request: RunModel,
     trace: &mut Call,
 ) -> Result<ToolOutput, String> {
-    let limit = output_limit(&request.prompt, request.max_output_tokens)?;
+    validate_pi_generation(&request.prompt)?;
     if matches!(&request.think, Some(ollama::Think::Level(level)) if level.trim().is_empty()) {
         return Err("think must be a boolean or a non-empty supported level".into());
     }
     let model = installed_model(&request.model).await?;
     let delegation = begin_delegation(&app, &model, DelegationScope::Standalone)?;
-    trace.record_token_usage(limit, None, None, None);
     let store = app.clone();
     let source = model.clone();
     let execution = tokio::task::spawn_blocking(move || {
@@ -803,7 +770,6 @@ async fn run_model(
         let reply = ollama::chat(
             &source,
             &request.prompt,
-            limit,
             tokens,
             requested,
             request.require_loaded,
@@ -828,7 +794,6 @@ async fn run_model(
     finish_delegation(&app, delegation, execution.is_ok(), context_changed).await;
     let (reply, saved) = execution?;
     trace.record_token_usage(
-        limit,
         reply.prompt_eval_count,
         reply.eval_count,
         reply.stop_reason(),
@@ -841,7 +806,6 @@ async fn run_model(
     let generation = Some(GenerationInfo {
         truncated: stop_reason.as_deref() == Some("length") || !reply.completed(),
         stop_reason,
-        max_output_tokens: Some(limit),
         text_only: None,
         context: None,
         work_progress: None,
@@ -849,7 +813,7 @@ async fn run_model(
     if let Some(thinking) = reply.thinking() {
         trace.event(Kind::Thinking, "Ollama", thinking, None);
     }
-    let (text, truncated) = match reply.into_text(limit) {
+    let (text, truncated) = match reply.into_text() {
         Ok(answer) => answer,
         Err(error) => {
             return Ok(ToolOutput {
@@ -861,7 +825,7 @@ async fn run_model(
     };
     trace.event(Kind::Answer, "Ollama", &text, None);
     let status = if truncated && had_thinking {
-        " (output limit reached; the budget includes thinking)"
+        " (provider stopped at a generation/context limit after thinking)"
     } else if truncated {
         " (output limit reached)"
     } else {
@@ -881,8 +845,7 @@ async fn run_pi(
     origin: projects::MessageOrigin,
     reserved: Option<u64>,
 ) -> Result<ToolOutput, String> {
-    let limit = request.max_output_tokens;
-    validate_pi_generation(&request.prompt, limit)?;
+    validate_pi_generation(&request.prompt)?;
     let session_id = request.project_session_id;
     let (project, workspace) = if let Some(id) = request.project_id {
         let workspace = request.workspace;
@@ -1003,7 +966,7 @@ async fn run_pi(
         result => {
             if reserved.is_none() {
                 if finish_delegation(&app, delegation, false, false).await {
-                    return Ok(user_cancelled_output(trace, context_window, limit));
+                    return Ok(user_cancelled_output(trace, context_window));
                 }
             }
             return Err(match result {
@@ -1046,7 +1009,7 @@ async fn run_pi(
             },
             result = tokio::time::timeout(
                 Duration::from_secs(900),
-                AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)))
+                AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, Some(task)))
                     .catch_unwind(),
             ) => Some(match result {
                 Ok(Ok(reply)) => reply,
@@ -1057,7 +1020,7 @@ async fn run_pi(
     };
     let Some(result) = result else {
         finish_delegation(&app, delegation, false, false).await;
-        return Ok(user_cancelled_output(trace, context_window, limit));
+        return Ok(user_cancelled_output(trace, context_window));
     };
     let error = match &result {
         Ok(reply) => reply.error.as_deref(),
@@ -1078,7 +1041,7 @@ async fn run_pi(
         notice: app.task.borrow().context_notice(delegation),
     });
     if finish_delegation(&app, delegation, !context_full && error.is_none(), false).await {
-        return Ok(user_cancelled_output(trace, context_window, limit));
+        return Ok(user_cancelled_output(trace, context_window));
     }
     if context_full {
         let work_progress = result.as_ref().ok().and_then(|reply| reply.work_progress.clone());
@@ -1091,8 +1054,7 @@ async fn run_pi(
             generation: Some(GenerationInfo {
                 stop_reason: Some("context_full".into()),
                 truncated: true,
-                max_output_tokens: limit,
-                text_only: text_only.then_some(true),
+                                text_only: text_only.then_some(true),
                 context,
                 work_progress,
             }),
@@ -1135,8 +1097,7 @@ async fn run_pi(
         generation: Some(GenerationInfo {
             stop_reason: reply.stop_reason,
             truncated: reply.truncated,
-            max_output_tokens: limit,
-            text_only: text_only.then_some(true),
+                        text_only: text_only.then_some(true),
             context,
             work_progress: reply.work_progress,
         }),
@@ -1153,7 +1114,6 @@ pub(super) fn queued_request(
     RunPi {
         model,
         prompt: input.prompt,
-        max_output_tokens: input.max_output_tokens,
         skills: input.skills,
         context_tokens: input.context_tokens,
         chat_session_id,
@@ -1304,7 +1264,7 @@ fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u6
     })
 }
 
-fn user_cancelled_output(trace: &Call, context_window: u32, limit: Option<u32>) -> ToolOutput {
+fn user_cancelled_output(trace: &Call, context_window: u32) -> ToolOutput {
     let text = projects::USER_STOP_TEXT;
     trace.event(Kind::Pi, "Остановлено пользователем", text, Some("ok"));
     ToolOutput {
@@ -1313,8 +1273,7 @@ fn user_cancelled_output(trace: &Call, context_window: u32, limit: Option<u32>) 
         generation: Some(GenerationInfo {
             stop_reason: Some(projects::USER_STOP_REASON.into()),
             truncated: false,
-            max_output_tokens: limit,
-            text_only: None,
+                        text_only: None,
             context: Some(PiContext { context_tokens: context_window, notice: None }),
             work_progress: None,
         }),
@@ -1426,8 +1385,7 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                 },
                 "thinking": {
                     "supported": thinking_supported,
-                    "controls": estimate.thinking,
-                    "counts_toward_max_output_tokens": thinking_supported
+                    "controls": estimate.thinking
                 }
             })
         )
