@@ -296,6 +296,7 @@ pub(super) async fn run(
     let mut legacy_rpc = false;
     let mut background = None::<BackgroundCommand>;
     let mut first_thinking_delta = true;
+    let mut history_dirty = false;
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
     loop {
@@ -311,7 +312,31 @@ pub(super) async fn run(
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        match event["type"].as_str() {
+        // Pi can emit message_end before appending the message to its session.
+        // The next lifecycle event is emitted after that append has completed.
+        let event_type = event["type"].as_str();
+        if history_dirty
+            && matches!(
+                event_type,
+                Some("message_start" | "tool_execution_start" | "turn_end" | "agent_end")
+            )
+        {
+            history_dirty = false;
+            if let Some(task) = &task {
+                task.trace.app().task.send_if_modified(|snapshot| {
+                    snapshot.chat_history_changed(task.delegation)
+                });
+            }
+        }
+        if event_type == Some("message_end")
+            && matches!(
+                event["message"]["role"].as_str(),
+                Some("user" | "assistant" | "toolResult")
+            )
+        {
+            history_dirty = true;
+        }
+        match event_type {
             Some("auto_compaction_start") => {
                 report_context(task.as_ref(), ContextNotice::Compacting)
             }
