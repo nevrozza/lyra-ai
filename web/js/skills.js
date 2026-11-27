@@ -13,9 +13,9 @@ export function createSkills() {
   const result = get('skill-result');
   const message = get('skill-catalog-message');
   const list = get('skill-catalog');
-  const builtinDetails = get('builtin-skills');
-  const builtinList = get('builtin-skill-catalog');
-  const builtinCount = get('builtin-skill-count');
+  const roleDetails = get('role-skills');
+  const roleList = get('role-skill-catalog');
+  const roleCount = get('role-skill-count');
   let saving = false;
   let online = false;
   let running = false;
@@ -25,7 +25,7 @@ export function createSkills() {
   function updateControls() {
     pickFolder.disabled = pickFile.disabled = saving || !online;
     button.disabled = saving || !online || !files.length;
-    for (const control of [...list.querySelectorAll('button, input'), ...builtinList.querySelectorAll('button, input')]) {
+    for (const control of [...list.querySelectorAll('button, input'), ...roleList.querySelectorAll('button, input')]) {
       control.disabled = saving || !online || (running && control.dataset.remove === 'true');
     }
   }
@@ -61,11 +61,11 @@ export function createSkills() {
       if (!response.ok) throw new Error();
       const skills = await response.json();
       if (request !== revision) return;
-      const custom = skills.filter(skill => !skill.builtin);
-      const builtins = skills.filter(skill => skill.builtin);
-      message.textContent = custom.length ? '' : 'Пока нет пользовательских скиллов.';
-      builtinDetails.hidden = !builtins.length;
-      builtinCount.textContent = '· ' + builtins.length;
+      const general = skills.filter(skill => !skill.role_template);
+      const roles = skills.filter(skill => skill.role_template);
+      message.textContent = general.length ? '' : 'Пока нет обычных скиллов.';
+      roleDetails.hidden = !roles.length;
+      roleCount.textContent = '· ' + roles.length;
       const renderSkill = skill => {
         const entry = element('li', '');
         const description = element('p', skill.description);
@@ -105,8 +105,8 @@ export function createSkills() {
         }
         return entry;
       };
-      list.replaceChildren(...custom.map(renderSkill));
-      builtinList.replaceChildren(...builtins.map(renderSkill));
+      list.replaceChildren(...general.map(renderSkill));
+      roleList.replaceChildren(...roles.map(renderSkill));
       updateControls();
     } catch {
       if (request === revision) message.textContent = 'Не удалось загрузить список скиллов.';
