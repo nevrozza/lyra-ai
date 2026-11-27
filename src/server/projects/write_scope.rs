@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 pub(super) const MAX_PATHS: usize = 32;
 
-pub(super) fn resolve_paths(root: &Path, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+pub(in crate::server) fn resolve_paths(root: &Path, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     if paths.is_empty() || paths.len() > MAX_PATHS {
         return Err(invalid("Укажите от 1 до 32 файлов в write_paths."));
     }

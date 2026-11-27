@@ -184,20 +184,23 @@ fn tools() -> Value {
         "required": ["review"],
         "additionalProperties": false
     });
-    let queue_task = json!({"type": "object", "properties": {
+    let write_paths = json!({"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Allowed write paths relative to the primary folder. Disables shell access."});
+    let worker_role = json!({"enum": ["implement", "fix", "review"], "description": "Local worker role. Review uses read-only file tools."});
+    let mut queue_task = json!({"type": "object", "properties": {
         "name": {"type": "string"}, "prompt": {"type": "string", "description": "Instructions for the step."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
         "key": {"type": "string", "description": "Unique key for this task within the batch."},
         "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
         "external": {"type": "boolean", "default": false, "description": "Step completed outside Lyra with complete_project_step."},
         "parallel": {"type": "boolean", "default": false, "description": "Allow this step to overlap other steps. Requires write_paths."},
-        "write_paths": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Allowed write paths relative to the primary folder. Disables shell access."},
-        "role": {"enum": ["implement", "fix", "review"], "default": "implement", "description": "Local worker role. Review uses read-only file tools."},
+        "write_paths": write_paths,
+        "role": worker_role,
         "folders": {"type": "array", "items": {"type": "string"}, "description": "Optional registered project folders, primary first. Defaults to the project's folders."},
         "skills": {"type": "array", "items": {"type": "string"}},
         "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
         "follow_up": follow_up,
         "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens}
     }, "required": ["name", "prompt"], "additionalProperties": false});
+    queue_task["properties"]["role"]["default"] = json!("implement");
     let retry_task = json!({
         "name": "retry_project_task",
         "description": "Resume a task paused on context_full while preserving its task ID and dependencies.",
@@ -344,6 +347,8 @@ fn tools() -> Value {
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to the given installed Lyra skill names. Omit to make all installed Lyra skills available, or pass [] to run without skills."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
+                "role": worker_role,
+                "write_paths": write_paths,
                 "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens}
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
@@ -436,8 +441,8 @@ pub(super) struct RunPi {
     skills: Option<Vec<String>>,
     #[serde(rename = "allow_commands")]
     _allow_commands: Option<bool>,
-    #[serde(skip)]
     role: Option<pi::Role>,
+    write_paths: Option<Vec<PathBuf>>,
     #[serde(skip)]
     writes: Vec<PathBuf>,
 }
@@ -797,6 +802,21 @@ async fn run_pi(
     let store = app.clone();
     let source = model.clone();
     let text_only = mode == ChatMode::Chat;
+    if text_only && (request.write_paths.is_some() || request.role.is_some()) {
+        return Err("role and write_paths require Work mode".into());
+    }
+    let writes = if let Some(paths) = request.write_paths {
+        if matches!(request.role, Some(pi::Role::Review)) {
+            return Err("Review runs do not accept write_paths".into());
+        }
+        let root = workspace.clone();
+        tokio::task::spawn_blocking(move || projects::write_scope::resolve_paths(&root, &paths))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+    } else {
+        request.writes
+    };
     let requested_context = request.context_tokens.map(NonZeroU32::get);
     let (tokens, context_window, think) = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
@@ -903,7 +923,7 @@ async fn run_pi(
             context_window: Some(context_window),
             think: think.as_ref(),
             role: request.role,
-            writes: &request.writes,
+            writes: &writes,
             request_id: (dashboard || reserved.is_some())
                 .then_some(request.request_id.as_deref())
                 .flatten(),
@@ -1022,6 +1042,7 @@ pub(super) fn queued_request(
         mode: Some(ChatMode::Work),
         _allow_commands: None,
         role,
+        write_paths: None,
         writes,
     }
 }

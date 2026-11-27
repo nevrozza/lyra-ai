@@ -1,5 +1,18 @@
 # Project pipelines
 
+## Delegated delivery and exact file paths
+
+When the user delegates creation or explicitly forbids the orchestrator from writing code, the orchestrator learns the requirements, schedules work, and verifies results. It does not author the deliverable or silently finish a worker's partial edit. Give each worker the requested behavior and acceptance checks. Leave room for the worker to design details the user delegated. Preserve the requested file layout and restrictions on deployment or external actions independently of model choice.
+
+1. **Resolve the destination.** If the user names a chat, find it with `list_projects` and verify the registered working folder. Use `read_project_session` for the relevant history when the user refers to earlier work. For sequential work in that chat, use `run_pi` with its project and chat IDs. If concurrent execution is requested and separate step chats are acceptable, queue the steps in the same project. Scope all steps to the user's requested folder.
+2. **Constrain writes.** With `run_pi` or `enqueue_project_tasks`, pass exact relative filenames in `write_paths`, such as `["index.html"]`. Keep the folder in `folders`, the chat's working folder, or `workspace` as appropriate. Pass `index.html` as plain text in the write tool's path value, without Markdown backticks, closing punctuation, or an appended Windows backslash. The orchestrator sets the allowlist itself. Lyra checks each write against it and disables shell access for that step. This works with a single file and with `parallel` omitted.
+3. **Pick implementation and review separately.** Use the configured model preferences and eligibility for each role. Reuse a model when it fits both roles, unless the user requested different models. In a named chat, use a separate `run_pi` call with `role: review` after the implementation. In the queue, make the review depend on every implementation step, or attach `follow_up.review` to the final implementation step. Pass the original acceptance criteria. Ask the reviewer to inspect the actual directory and read the exact expected files. A worker's file path or completion claim alone is insufficient.
+4. **Close the loop.** If an expected file is missing, misnamed, or fails a check, delegate a bounded fix using the same exact allowed paths and repeat the relevant review. If an unexpected file already exists, report it and preserve it unless removal is authorized. State which checks actually ran. Maintain the no-deploy rule during verification.
+
+### Example with parallel implementation
+
+For a static page with a settled HTML contract and where separate files fit the request, run styling and behavior in parallel with `write_paths: ["styles.css"]` and `write_paths: ["timer.js"]`. Give them shared IDs or interface details, then queue an integration step with `write_paths: ["index.html"]` and `after` pointing to both. Review the assembled page against the user's requirements. If the user requires a single HTML file, use one writer for that file and a separate review. Independent analysis may overlap without multiple writers editing the HTML. If the user requests multiple distinct local workers, explain how each will contribute and report which models ran.
+
 ## Plan and submit
 
 Start from the acceptance criteria and existing code boundaries. Give each shallow implementation or fix step a specific file set and a checkable result. Group coupled work when an interface still needs to be designed, a change spans both producer and consumer, or each checkpoint must build. Respect the user's preferred task granularity.

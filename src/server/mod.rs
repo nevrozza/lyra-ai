@@ -45,6 +45,8 @@ struct App {
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     std::sync::LazyLock::force(&ai_settings::AI_SETTINGS);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, options.port)).await?;
+    let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
     let data = std::path::absolute(crate::data_directory())?;
     let skills = skills::Store::new(data.join("skills"));
     let agents_file = data.join("AGENTS.md");
@@ -67,8 +69,6 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
             .cloned(),
         None => options.model,
     };
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, options.port)).await?;
-    let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
     let app = Arc::new(App {
         origin: format!("http://{host}"),
         host,

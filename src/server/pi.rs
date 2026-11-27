@@ -719,7 +719,7 @@ async fn write_project_instructions(
         }
         let _ = writeln!(
             text,
-            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are unavailable. If a change outside the reserved files is required, report the blocker.",
+            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are unavailable. The list can include new files. If another path is needed, report its exact relative path.",
             json!(paths),
         );
     }

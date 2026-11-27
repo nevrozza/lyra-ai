@@ -109,19 +109,25 @@ impl Store {
     }
 
     pub(super) fn install_defaults(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.directory)?;
         for &(name, manifest) in BUILT_IN_SKILLS {
-            match fs::symlink_metadata(self.directory.join(name)) {
-                Ok(_) => continue,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            let directory = self.directory.join(name);
+            match fs::create_dir(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let metadata = fs::symlink_metadata(&directory)?;
+                    if is_link(&metadata) || !metadata.is_dir() {
+                        return Err(invalid(format!(
+                            "Недопустимая папка встроенного скилла: {}",
+                            directory.display()
+                        )));
+                    }
+                }
                 Err(error) => return Err(error),
             }
-            match self.upload(vec![UploadedFile {
-                path: MANIFEST.into(),
-                data: STANDARD.encode(manifest),
-            }]) {
-                Ok(_) | Err((StatusCode::CONFLICT, _)) => {}
-                Err((_, message)) => return Err(io::Error::other(message)),
-            }
+            let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+            io::Write::write_all(&mut file, manifest.as_bytes())?;
+            file.persist(directory.join(MANIFEST))?;
         }
         Ok(())
     }
@@ -438,7 +444,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn installs_new_built_in_skills_with_existing_local_versions() {
+    fn refreshes_built_in_skills_alongside_imported_skills() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::new(temp.path().join("installed"));
         let ast_index = store.directory.join("ast-index");
@@ -446,13 +452,24 @@ mod tests {
         let custom = "---\nname: ast-index\ndescription: Local version\n---\n";
         fs::write(ast_index.join(MANIFEST), custom).unwrap();
 
+        let imported = store.directory.join("custom");
+        fs::create_dir(&imported).unwrap();
+        let imported_manifest = "---\nname: custom\ndescription: Imported skill\n---\n";
+        fs::write(imported.join(MANIFEST), imported_manifest).unwrap();
+
         store.install_defaults().unwrap();
         store.install_defaults().unwrap();
 
         let skills = store.list().unwrap();
-        assert_eq!(skills.len(), BUILT_IN_SKILLS.len());
-        assert_eq!(skills[0].name, "ast-index");
-        assert_eq!(skills[0].description, "Local version");
+        assert_eq!(skills.len(), BUILT_IN_SKILLS.len() + 1);
+        assert_eq!(
+            fs::read_to_string(ast_index.join(MANIFEST)).unwrap(),
+            BUILT_IN_SKILLS[0].1
+        );
+        assert_eq!(
+            fs::read_to_string(imported.join(MANIFEST)).unwrap(),
+            imported_manifest
+        );
         assert!(skills.iter().any(|skill| skill.name == "post-code-review"));
         assert!(store.paths(None).unwrap().iter().all(|path| {
             !is_role_skill(
