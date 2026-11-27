@@ -17,7 +17,7 @@ export default function (pi) {
     let earlierMessages = [];
     let promptTimestamp;
     if (scopedWrite) {
-        const path = Type.String({ description: "Reserved file path relative to the primary working folder" });
+        const path = Type.String({ description: "Reserved file path relative to the primary working folder (use the exact reserved path)" });
         for (const [name, description, parameters] of [
             ["write", "Create or replace one reserved file.", Type.Object({ path, content: Type.String() })],
             ["edit", "Replace exact, unique, non-overlapping text in one reserved file.", Type.Object({
@@ -38,12 +38,12 @@ export default function (pi) {
             });
         }
     }
-    if (!textOnly && !scopedWrite) {
+    if (!textOnly) {
         const shell = process.platform === "win32" ? "Windows PowerShell" : "/bin/sh";
         pi.registerTool({
             name: "run_command",
             label: "Run project command",
-            description: `Request a non-interactive ${shell} command in the project root. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
+            description: `${scopedWrite ? "Never modify files outside your reserved write_paths through shell commands or scripts. " : ""}Request a non-interactive ${shell} command in the project root. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
             promptSnippet: "Run a project command such as a test or build through Lyra.",
             parameters: Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }) }),
             executionMode: "sequential",
@@ -89,7 +89,7 @@ export default function (pi) {
     }
     pi.on("session_start", (_event, ctx) => {
         const tools = ["read", "grep", "find", "ls"];
-        if (!scopedWrite) tools.push("run_command");
+        tools.push("run_command");
         pi.setActiveTools(textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit"]);
         if (origin) earlierMessages = savedMessages(ctx.sessionManager);
         ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");
