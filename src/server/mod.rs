@@ -3,6 +3,7 @@ mod ai_settings;
 mod assets;
 mod commands;
 mod mcp;
+mod mcp_servers;
 mod models;
 mod pi;
 mod projects;
@@ -40,6 +41,7 @@ struct App {
     commands: std::sync::Mutex<commands::State>,
     skills: skills::Store,
     project_models: ai_settings::ProjectModelStore,
+    mcp_servers: mcp_servers::Store,
     agents_file: PathBuf,
     projects: projects::Store,
     folder_picker: Mutex<()>,
@@ -96,6 +98,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         )),
         skills,
         project_models: ai_settings::ProjectModelStore::load(data.join("project-models.json"))?,
+        mcp_servers: mcp_servers::Store::new(data.join("mcp-servers.json")),
         agents_file,
         projects: projects::Store::new(data.join("projects")),
         folder_picker: Mutex::default(),
@@ -112,6 +115,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .merge(models::routes())
         .merge(ai_settings::routes())
         .merge(mcp::routes())
+        .merge(mcp_servers::routes())
         .merge(sessions::routes())
         .merge(commands::routes())
         .merge(skills::routes())

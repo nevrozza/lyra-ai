@@ -18,6 +18,26 @@ If Lyra is already configured with another server name, URL, or headers, keep th
 
 Restart/reconnect Codex after the change and verify the server with `codex mcp list` or the MCP tool list in the client. Use the Lyra orchestrator skill at [.agents/skills/lyra/SKILL.md](.agents/skills/lyra/SKILL.md); open this repository as the Codex workspace or install/copy the updated skill into the skill directory of the workspace you use.
 
+### Connect MCP servers to Lyra Work
+
+Open **Серверы MCP** in the local dashboard and save a JSON configuration. Pi takes a fresh snapshot for each Work run, including queued Work. Compatible Pi builds must provide the built-in `builtin:mcp` extension.
+
+```json
+{
+  "mcpServers": {
+    "time": { "command": "uvx", "args": ["mcp-server-time"], "enabled": false },
+    "docs": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" },
+      "toolExposure": { "write_document": "hidden" },
+      "enabled": false
+    }
+  }
+}
+```
+
+Set `enabled` to `true` for servers you want Pi to connect to, or remove an entry to delete it. Local servers use an executable and separate arguments. Remote servers use Streamable HTTP. Put secrets in the Lyra process environment and reference them as `${NAME}`. The dashboard supports header-based authentication. Tool exposure defaults to `direct`; use `hidden` with selected `direct` tool overrides for an allowlist. Check Pi activity for discovery and connection errors. Chat, read-only Review, and the unauthenticated LAN mode do not load these servers.
+
 The MCP timeout defaults to 60 seconds in Codex. Lyra's new waits default to 3300 seconds (55 minutes), leaving room for the enqueue and response within the recommended 3600-second client timeout. This does not change the timeout of a single local Pi run. If an HTTP proxy or client has a shorter request timeout, configure it accordingly or use an explicit `timeout_seconds` below the effective limit. The tools require a client that permits long-running MCP requests.
 
 See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#other-configuration-options). Lyra defaults to loopback; its optional LAN mode is unauthenticated and should only be used on a trusted network.

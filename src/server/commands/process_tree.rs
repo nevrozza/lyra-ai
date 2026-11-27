@@ -120,4 +120,5 @@ mod platform {
     }
 }
 
-pub(super) use platform::{SHELL, Tree, shell, start};
+pub(super) use platform::{SHELL, shell, start};
+pub(in crate::server) use platform::Tree;

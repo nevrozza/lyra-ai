@@ -296,6 +296,10 @@ h2 { font-size: .96rem; font-weight: 650; }
 .pin input:disabled { opacity: .65; }
 .unload { background: transparent; border: 1px solid #536453; color: #d7e9cf; padding: 6px 10px; font-size: .78rem; }
 .unload:hover:not(:disabled) { background: #2c382e; }
+.mcp-servers-form { display: grid; gap: 8px; }
+.mcp-servers-form textarea { width: 100%; min-height: 9rem; resize: vertical; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: .8rem/1.45 var(--mono); }
+.mcp-servers-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#mcp-servers-status[data-error="true"] { color: #f0cd91; }
 .unload:disabled { background: transparent; border-color: var(--line); color: var(--muted); opacity: .6; }
 .model-roles { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); }
 .model-roles summary { cursor: pointer; font-size: .9rem; }

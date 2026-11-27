@@ -293,6 +293,32 @@ impl Drop for TemporaryDirectory {
     }
 }
 
+#[cfg(unix)]
+struct McpProcess {
+    child: Option<tokio::process::Child>,
+    enabled: bool,
+}
+
+#[cfg(unix)]
+impl Drop for McpProcess {
+    fn drop(&mut self) {
+        if !self.enabled { return; }
+        if let Some(mut child) = self.child.take()
+            && let Some(pid) = child.id()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            // Pi handles SIGTERM in RPC mode and closes its MCP connections.
+            // Its stdio servers may be in process groups of their own.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+            runtime.spawn(async move {
+                if tokio::time::timeout(Duration::from_secs(3), child.wait()).await.is_err() {
+                    let _ = child.kill().await;
+                }
+            });
+        }
+    }
+}
+
 pub(super) async fn run(
     workspace: &Path,
     model: &str,
@@ -302,7 +328,19 @@ pub(super) async fn run(
     task: Option<Task<'_>>,
 ) -> Result<Reply, String> {
     let project = task.as_ref().and_then(|task| task.project);
-    let project_run = project
+    let mcp_snapshot = if let Some(task) = task.as_ref().filter(|task|
+        !task.text_only && !matches!(task.role, Some(Role::Review)) && task.trace.app().lan_host.is_none())
+    {
+        match task.trace.app().mcp_servers.enabled_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                task.trace.event(Kind::Pi, "MCP", "Не удалось прочитать настройки серверов MCP.", Some("error"));
+                None
+            }
+        }
+    } else { None };
+    let mcp_enabled = mcp_snapshot.is_some();
+    let project_run = (project.is_some() || mcp_enabled).then_some(())
         .map(|_| TemporaryDirectory::new("project", nonce()))
         .transpose()
         .map_err(|error| format!("Could not prepare Pi project: {error}"))?;
@@ -323,6 +361,10 @@ pub(super) async fn run(
         None => None,
     };
     let config = runtime_config.as_deref().unwrap_or(config);
+    if let Some(snapshot) = mcp_snapshot {
+        tokio::fs::write(config.join("mcp.json"), snapshot).await
+            .map_err(|error| format!("Could not prepare Pi MCP settings: {error}"))?;
+    }
     let source = model.to_owned();
     let backend =
         tokio::task::spawn_blocking(move || context::backend_model(&source, context_tokens))
@@ -428,7 +470,7 @@ pub(super) async fn run(
         tokio::fs::write(path, instructions).await.map_err(|error| error.to_string())?;
     }
     let agents_file = catalog_instructions.as_deref().or(agents_file);
-    let mut child = spawn_pi(
+    let child = spawn_pi(
         workspace,
         &backend,
         config,
@@ -436,8 +478,18 @@ pub(super) async fn run(
         skills,
         agents_file,
         task.as_ref(),
+        mcp_enabled,
     )
     .map_err(|error| format!("Could not start Pi: {error}"))?;
+    #[cfg(windows)]
+    let _mcp_process_tree = mcp_enabled.then(|| super::commands::process_tree::Tree::attach(&child))
+        .transpose().map_err(|error| format!("Could not supervise Pi MCP subprocesses: {error}"))?;
+    #[cfg(unix)]
+    let mut process = McpProcess { child: Some(child), enabled: mcp_enabled };
+    #[cfg(unix)]
+    let child = process.child.as_mut().expect("Pi child");
+    #[cfg(not(unix))]
+    let mut child = child;
     let log = |kind, title: &str, text: &str, status| {
         if let Some(trace) = trace {
             trace.event(kind, title, text, status);
@@ -532,6 +584,20 @@ pub(super) async fn run(
             Some("extension_ui_request") if commands.is_some() => {
                 let stdin = stdin.as_mut().expect("Pi RPC input");
                 match event["method"].as_str() {
+                    Some("notify") if mcp_enabled && event["message"].as_str().is_some_and(|message|
+                        message.starts_with("MCP servers need attention:") || message.starts_with("MCP failed to load:")) =>
+                    {
+                        log(Kind::Pi, "MCP", "Не удалось подключить один или несколько серверов MCP. Проверьте настройки сервера.", Some("error"));
+                    }
+                    Some("notify") if mcp_enabled && event["message"] == "MCP servers are still connecting; their tools become available once connected." =>
+                    {
+                        log(Kind::Pi, "MCP", "Серверы MCP ещё подключаются.", Some("running"));
+                    }
+                    Some("notify") if mcp_enabled && event["message"].as_str().is_some_and(|message| message.starts_with("lyra:mcp-tools:")) =>
+                    {
+                        let names = event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:mcp-tools:");
+                        log(Kind::Pi, "MCP", names, Some("ok"));
+                    }
                     Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:tools-error:")) => {
                         return Err(event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:tools-error:").to_owned());
                     }
@@ -1102,6 +1168,7 @@ fn spawn_pi(
     skills: &[PathBuf],
     agents_file: Option<&Path>,
     task: Option<&Task<'_>>,
+    mcp_enabled: bool,
 ) -> io::Result<tokio::process::Child> {
     let session = task.and_then(|task| {
         task.project?
@@ -1136,6 +1203,11 @@ fn spawn_pi(
         command.env_remove("LYRA_PI_TEXT_ONLY");
         command.env_remove("LYRA_PI_REVIEW");
         command.env_remove("LYRA_PI_GUARDED_WRITE");
+        command.env_remove("LYRA_PI_MCP");
+        if mcp_enabled {
+            command.env("LYRA_PI_MCP", "1")
+                .args(["--no-approve", "--extension", "builtin:mcp"]);
+        }
         let guarded_write = task.is_some_and(|task| !task.text_only && !matches!(task.role, Some(Role::Review)));
         if guarded_write {
             command.env("LYRA_PI_GUARDED_WRITE", "1");
@@ -1157,7 +1229,11 @@ fn spawn_pi(
             } else {
                 "read,grep,find,ls,write,edit"
             };
-            command.args(["--tools", tools]);
+            if mcp_enabled {
+                command.arg("--tools").arg(format!("{tools},mcp__*,list_mcp_resources,list_mcp_resource_templates,read_mcp_resource"));
+            } else {
+                command.args(["--tools", tools]);
+            }
         }
         command.env_remove("LYRA_MESSAGE_REQUEST_ID");
         if let Some((path, task)) = session {

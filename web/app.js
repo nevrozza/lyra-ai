@@ -1,6 +1,7 @@
 import { createSessions } from './js/sessions.js';
 import { createCommands } from './js/commands.js';
 import { createSkills } from './js/skills.js';
+import { createMcpServers } from './js/mcp-servers.js';
 import { createProjects } from './js/projects.js';
 import { initLayout } from './js/layout.js';
 import { createModels } from './js/models.js';
@@ -21,6 +22,7 @@ const models = createModels(session, {
 const sessions = createSessions();
 const commands = createCommands();
 const skills = createSkills();
+const mcpServers = createMcpServers();
 const projects = createProjects();
 const telemetry = createTelemetry(session, {
   beginSample: models.beginMemorySample,
@@ -36,6 +38,7 @@ function updateControls() {
   telemetry.updateControls();
   commands.setOnline(session.online && !session.closed);
   skills.setOnline(session.online && !session.closed, Boolean(session.run?.delegated_model || session.run?.model_action || session.run?.benchmark_running));
+  mcpServers.setOnline(session.online && !session.closed);
   projects.update(session.online && !session.closed, session.run, session.metrics?.installed_models);
 }
 

@@ -112,6 +112,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         JAVASCRIPT,
         include_str!("../../web/js/skills.js"),
     ),
+    (
+        "/js/mcp-servers.js",
+        JAVASCRIPT,
+        include_str!("../../web/js/mcp-servers.js"),
+    ),
 ];
 
 static UI_REVISION: LazyLock<String> = LazyLock::new(|| {

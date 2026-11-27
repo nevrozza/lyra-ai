@@ -24,7 +24,7 @@ use super::{
     sessions::{Call, Kind},
 };
 
-mod process_tree;
+pub(super) mod process_tree;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);

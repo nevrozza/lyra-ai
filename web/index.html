@@ -326,6 +326,22 @@
             </div>
           </div>
         </section>
+        <section class="panel" aria-labelledby="mcp-servers-title">
+          <header class="panel-header"><h2 id="mcp-servers-title">Серверы MCP</h2></header>
+          <div class="panel-body">
+            <form id="mcp-servers-form" class="mcp-servers-form">
+              <label for="mcp-servers-config">Конфигурация JSON</label>
+              <p id="mcp-servers-help" class="secondary">В <code>mcpServers</code> укажите <code>command</code> и <code>args</code> для локального сервера или <code>url</code> для Streamable HTTP. Изменения применятся в следующем запуске Work.</p>
+              <textarea id="mcp-servers-config" spellcheck="false" aria-describedby="mcp-servers-help mcp-servers-status" rows="8" disabled></textarea>
+              <div class="mcp-servers-actions">
+                <button id="mcp-servers-save" type="submit" disabled>Сохранить</button>
+                <button id="mcp-servers-reload" class="unload" type="button" disabled>Перечитать</button>
+              </div>
+              <p id="mcp-servers-status" class="secondary" role="status"></p>
+            </form>
+          </div>
+        </section>
+
         <section class="panel" aria-labelledby="skills-title">
           <header class="panel-header"><h2 id="skills-title">Скиллы Pi</h2></header>
           <div class="panel-body skills-body">

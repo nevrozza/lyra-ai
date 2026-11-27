@@ -6,7 +6,16 @@ export default function (pi) {
     const guardedWrite = process.env.LYRA_PI_GUARDED_WRITE === "1" && !textOnly && !review;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
+    const mcpEnabled = process.env.LYRA_PI_MCP === "1" && !textOnly && !review;
+    const mcpResources = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+    const isMcpTool = (name) => mcpEnabled && (name.startsWith("mcp__") || mcpResources.has(name));
+    let reportedMcpTools = "";
     pi.on("before_provider_request", ({ payload }, ctx) => {
+        if (mcpEnabled) {
+            const active = pi.getActiveTools().filter(isMcpTool).sort().join(", ");
+            if (active && active !== reportedMcpTools) ctx.ui.notify("lyra:mcp-tools:" + active);
+            reportedMcpTools = active;
+        }
         // Lyra only registers the Ollama OpenAI-compatible provider. Override
         // Pi's provider-generated max token fields even for default thinking.
         // Ollama maps max_tokens=-1 to unlimited num_predict (no finite cap).
@@ -162,10 +171,10 @@ export default function (pi) {
     const tools = ["read", "grep", "find", "ls", "run_command", "load_skill", "finish_task"];
     const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir"] : [])];
     async function verifyTools() {
-        await pi.setActiveTools(expected);
+        await pi.setActiveTools([...expected, ...pi.getActiveTools().filter(isMcpTool)]);
         const active = pi.getActiveTools();
         const missing = expected.filter(name => !active.includes(name));
-        const unexpected = active.filter(name => !expected.includes(name));
+        const unexpected = active.filter(name => !expected.includes(name) && !isMcpTool(name));
         const all = pi.getAllTools();
         const unguarded = [...guardedDescriptions].filter(([name, description]) =>
             !all.some(tool => tool.name === name && tool.description === description)).map(([name]) => name);
