@@ -25,9 +25,12 @@ pub(super) struct AiSettings {
 #[derive(Clone, Default, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ProjectModels {
-    pub(super) implement: Option<String>,
-    pub(super) fix: Option<String>,
-    pub(super) review: Option<String>,
+    #[serde(alias = "implement")]
+    pub(super) medium: Option<String>,
+    #[serde(alias = "fix")]
+    pub(super) low: Option<String>,
+    #[serde(alias = "review")]
+    pub(super) high: Option<String>,
 }
 
 pub(super) static AI_SETTINGS: LazyLock<AiSettings> = LazyLock::new(|| {
@@ -81,9 +84,9 @@ impl ProjectModelStore {
         let saved = tokio::task::spawn_blocking(move || {
             let mut requested = requested;
             let changes = [
-                (&previous.implement, &mut requested.implement),
-                (&previous.fix, &mut requested.fix),
-                (&previous.review, &mut requested.review),
+                (&previous.medium, &mut requested.medium),
+                (&previous.low, &mut requested.low),
+                (&previous.high, &mut requested.high),
             ];
             let mut installed = None;
             for (old, new) in changes {
@@ -119,12 +122,12 @@ impl ProjectModelStore {
 fn storage_error(error: impl std::fmt::Display) -> (StatusCode, String) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("Не удалось сохранить роли моделей. {error}"),
+        format!("Не удалось сохранить уровни интеллекта моделей. {error}"),
     )
 }
 
 pub(super) fn routes() -> Router<Arc<App>> {
-    Router::new().route("/model/roles", get(get_roles).post(set_roles))
+    Router::new().route("/model/intelligence", get(get_roles).post(set_roles))
 }
 
 async fn get_roles(State(app): State<Arc<App>>) -> Json<ProjectModels> {
@@ -155,17 +158,17 @@ mod tests {
         )
         .unwrap();
         let store = ProjectModelStore::load(path.clone()).unwrap();
-        assert_eq!(store.get().await.review.as_deref(), Some("reviewer:latest"));
+        assert_eq!(store.get().await.high.as_deref(), Some("reviewer:latest"));
         store
             .save(ProjectModels {
-                implement: Some("worker:latest".into()),
-                fix: None,
-                review: None,
+                medium: Some("worker:latest".into()),
+                low: None,
+                high: None,
             })
             .await
             .unwrap();
         let reopened = ProjectModelStore::load(path).unwrap().get().await;
-        assert_eq!(reopened.implement.as_deref(), Some("worker:latest"));
-        assert!(reopened.review.is_none());
+        assert_eq!(reopened.medium.as_deref(), Some("worker:latest"));
+        assert!(reopened.high.is_none());
     }
 }
