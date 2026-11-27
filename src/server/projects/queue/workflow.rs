@@ -516,7 +516,8 @@ Return only one JSON object as the final answer:
 {{"status":"pass","summary":"checks passed, at most 360 characters"}}
 {{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"observed defect and evidence, at most 360 characters","instructions":"concrete correction steps, relevant code pointers, constraints and edge cases; at most {FIX_INSTRUCTIONS_LIMIT} UTF-8 bytes","check":"focused acceptance check and expected result, at most 240 characters","model":"exact installed model tag","after":[]}}]}}
 {{"status":"blocked","reason":"why the check cannot be completed, at most 360 characters"}}
-For each new finding, provide a self-contained technical assignment in instructions, not just a diagnosis. State verified files/symbols, the correction sequence, expected interfaces and invariants, edge cases and what must stay unchanged. Distinguish verified facts from hypotheses. Low needs exact mechanical before/after instructions; Medium needs concrete implementation steps and contracts; High may choose the implementation within explicit requirements. Never invent paths, APIs or test commands. Name the relevant prior finding if its result is required. The instructions are passed to the selected fix worker. Keep the entire JSON within the review answer limit of 32000 UTF-8 bytes; prioritize actionable detail, not raw source or logs.\nUse after for findings touching the same file or requiring earlier results, referring to earlier findings by one-based position. Independent fixes can run in parallel using dynamic file locks and version checks; review runs after all fixes succeed. Never bypass file tools via run_command. Report a blocked verdict if an essential file is locked.
+For each new finding, provide a self-contained technical assignment in instructions, not just a diagnosis. State verified files/symbols, the correction sequence, expected interfaces and invariants, edge cases and what must stay unchanged. Distinguish verified facts from hypotheses. Low needs exact mechanical before/after instructions; Medium needs concrete implementation steps and contracts; High may choose the implementation within explicit requirements. Never invent paths, APIs or test commands. Name the relevant prior finding if its result is required. The instructions are passed to the selected fix worker. Keep the entire JSON within the review answer limit of 32000 UTF-8 bytes; prioritize actionable detail, not raw source or logs.
+Use after for findings touching the same file or requiring earlier results, referring to earlier findings by one-based position. Independent fixes can run in parallel using dynamic file locks and version checks; review runs after all fixes succeed. Never bypass file tools via run_command. Report a blocked verdict if an essential file is locked.
 Use pass only after covering the full task diff and confirming the acceptance criteria. For each fix, choose from the provided list and honor any model restrictions in the review scope. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability. Prefer a model with a passed Pi check when available. Use blocked if you cannot cover the full change or complete a necessary check. Keep the whole report compact, without source excerpts.
 
 Review scope and acceptance criteria:
@@ -533,4 +534,28 @@ fn launch_prompt(scope: &str) -> String {
 Startup goal:
 {scope}"#
     )
+}
+
+#[cfg(test)]
+mod brief_tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_review_retains_the_full_valid_implementation_brief() {
+        let brief = format!("{}\nFinal acceptance: preserve the original API.", "a".repeat(5_000));
+        let config = Config::for_dashboard("local".into(), &brief);
+        assert_eq!(config.review.prompt, brief);
+        let prompt = review_prompt(&config.review.prompt, 1);
+        assert!(prompt.contains("Final acceptance: preserve the original API."));
+        assert!(prompt.contains("\"instructions\""));
+        assert!(prompt.contains("2000 UTF-8 bytes"));
+    }
+
+    #[test]
+    fn persisted_legacy_findings_remain_readable() {
+        let finding: Finding = serde_json::from_str(
+            r#"{"location":"src/a.rs","issue":"missing guard","check":"guard rejects invalid input","model":"local","write_paths":["src/a.rs"]}"#,
+        ).unwrap();
+        assert!(finding.instructions.is_none());
+    }
 }
