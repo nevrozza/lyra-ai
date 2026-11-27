@@ -47,6 +47,8 @@ Omit `parallel` for the shared-file writes. Check that the queue returns three i
 
 ## Plan and submit
 
+Use the technical specification checklist in [the main skill](../SKILL.md#write-actionable-technical-specifications) for every implementation, fix, review and continuation. The orchestrator should investigate relevant code or obtain an explicit discovery handoff before specifying existing APIs. State known contracts, steps, constraints, failure cases, focused verification and handoff; adapt the level of implementation detail to model intelligence. Keep the shared requirements in the group brief, but do not rely on a vague reference when the task needs a precise contract.
+
 Start from the acceptance criteria and existing code boundaries. Give each shallow implementation or fix step a specific file set and a checkable result. Group coupled work when an interface still needs to be designed, a change spans both producer and consumer, or each checkpoint must build. Respect the user's preferred task granularity.
 
 List known intended files in the task prompt, but do not predeclare an allowlist. Use guarded file tools for every source change. Shell commands remain available for inspection and non-conflicting tests/builds, never for bypassing locks, read-version checks, or review restrictions.
@@ -68,7 +70,7 @@ Replace model placeholders with exact inspected catalog tags and choose the proj
       "name": "Implement the agreed API",
       "role": "implement",
       "model": "<worker-tag>",
-      "prompt": "Implement the agreed GET /status contract in src/api.rs. Return {ready: boolean}. Report changed paths.",
+      "prompt": "Goal: expose GET /status as JSON {ready: boolean}. Inspect src/api.rs and the existing routing/state access first; use the established framework and state source, not a new readiness flag. Register the endpoint and serialize the current boolean. Preserve existing routes and error handling; avoid unrelated edits. Acceptance: both ready=true and ready=false serialize as booleans; add focused coverage using the project test conventions. Run the relevant checks and report route, state source, changed paths, actual results and blockers.",
       "parallel": true
     },
     {
@@ -76,7 +78,7 @@ Replace model placeholders with exact inspected catalog tags and choose the proj
       "name": "Fix status rendering",
       "role": "fix",
       "model": "<worker-tag>",
-      "prompt": "Render the ready flag in web/status.js using the agreed GET /status response {ready: boolean}. Report changed paths.",
+      "prompt": "Goal: render readiness from GET /status returning JSON {ready: boolean}. Inspect web/status.js, its callers and existing status UI. Reuse the current fetch/render flow; handle both boolean values, failed HTTP requests and malformed responses without showing false success. Preserve unrelated controls and markup. Acceptance: both values render correctly and an error is distinguishable from ready. Add or run focused checks using existing conventions. Report changed paths, behavior, checks and blockers.",
       "parallel": true
     },
     {
@@ -84,7 +86,7 @@ Replace model placeholders with exact inspected catalog tags and choose the proj
       "name": "Verify the assembled change",
       "role": "review",
       "model": "<review-tag>",
-      "prompt": "Build the project, check both changes against GET /status returning {ready: boolean}, and report findings and check results.",
+      "prompt": "Review the assembled API and UI against the agreed GET /status contract. Inspect the full relevant diff, including new files; verify routing, true/false serialization, client handling of both booleans, error/malformed-response behavior and preserved existing behavior. Run the standard applicable build and relevant tests. Stay read-only. For each confirmed blocker, specify exact evidence/location, correction steps, preserved contracts, focused acceptance checks and suitable fix model. Report actual check results and blockers; do not claim pass if required checks cannot run.",
       "after": ["api", "client"]
     }
   ]
@@ -97,7 +99,7 @@ The example assumes the response contract is settled and both steps can use the 
 
 Use an exclusive `role: review` step for a standalone verification. For Lyra's automatic review and fix loop, attach `follow_up.review` to the implementation or integration step that completes the slice. Give that step `after` dependencies for all other contributions. Include the full intended change and acceptance criteria in the review prompt. For the automatic loop, give the reviewer the eligible fix tags and exclude the reviewer itself, so the repeat review stays independent. Supply `follow_up.launch` when startup verification is part of the goal.
 
-Lyra reviews the assembled diff, schedules small fixes, and waits for all fixes to succeed before a new round, up to three reviews. Independent fixes may overlap. Order fixes that need the same file or each other's results. If the user asked for a coarse slice and wants stronger fix models, give the reviewer the eligible tags to choose from. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability. Inspect the final diff and checks before delivering the result.
+Lyra reviews the assembled diff, schedules small fixes, and waits for all fixes to succeed before a new round, up to three reviews. In an automatic review verdict, each finding should include compact but actionable `instructions` (verified code pointers, correction steps, constraints and edge cases) in addition to `location`, `issue`, `check`, `model` and `after`. Lyra passes those instructions directly to the fix worker. Make Low fixes exact mechanical operations; give Medium concrete steps and contracts; reserve High for subtle fixes that need judgment. Keep the JSON report within the advertised byte budget and omit raw logs or source dumps. For a standalone review, the orchestrator translates the findings into equivalent technical specifications and schedules the workers itself. Independent fixes may overlap. Order fixes that need the same file or each other's results. If the user asked for a coarse slice and wants stronger fix models, give the reviewer the eligible tags to choose from. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability. Inspect the final diff and checks before delivering the result.
 
 ## Large tasks and group cycles
 
