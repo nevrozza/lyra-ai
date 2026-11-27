@@ -18,6 +18,35 @@ export function compareTreeChats(a, b) {
   return (b.group?.id ?? b.id) - (a.group?.id ?? a.id) || a.id - b.id;
 }
 
+// Preserve chronological order: tool runs, thinking-only turns and skill
+// notices can share a compact activity block, but never cross visible messages.
+function isActivity(message) {
+  return Boolean(message.tool || (message.role === 'assistant' && !message.text && message.thinking)
+    || (message.role === 'notice' && message.text?.startsWith('Использован скилл: ')));
+}
+
+export function groupChatHistory(entries) {
+  const blocks = [];
+  let activity;
+  for (const message of entries) {
+    if (isActivity(message)) {
+      if (!activity) {
+        activity = { kind: 'activity', entries: [] };
+        blocks.push(activity);
+      }
+      activity.entries.push(message);
+    } else {
+      activity = undefined;
+      blocks.push({ kind: 'message', message });
+    }
+  }
+  return blocks;
+}
+
+export function activityOpen(active, manual) {
+  return manual ?? active;
+}
+
 export function createProjects({ onSelection = () => {} } = {}) {
   const tree = get('project-tree');
   const projectDialog = get('project-dialog');
@@ -71,7 +100,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
   let history = [];
   let thinkingDelegation;
   let renderedChatId;
-  const expandedTools = new Set();
+  const expandedDetails = new Set();
+  const activityOverrides = new Map();
 
   const selectedProject = () => catalog?.projects.find(project => project.id === projectId);
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
@@ -150,6 +180,11 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const recoveryPaused = contextPaused || outputPaused;
     const taskPending = pendingTask(owner);
     const active = chat && (sending.has(chat.id) || delegation || taskPending);
+    const workingModel = delegation?.[1].model ?? sending.get(chat?.id)?.model;
+    const workingModelNode = get('project-working-model');
+    const workingName = get('project-working-model-name');
+    workingModelNode.hidden = !workingModel;
+    if (workingName.textContent !== (workingModel ?? '')) workingName.textContent = workingModel ?? '';
     const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
     const contextNotice = delegation?.[1].context_notice ?? run?.chat_context?.[chat?.id] ?? run?.chat_context?.[owner?.id];
     const contextStatus = {
@@ -634,6 +669,112 @@ export function createProjects({ onSelection = () => {} } = {}) {
     return refreshHistory();
   }
 
+  function detail(key, className, summary) {
+    const node = element('details', '');
+    node.className = className;
+    node.dataset.detailKey = key;
+    node.append(summary);
+    node.open = expandedDetails.has(key);
+    return node;
+  }
+
+  function thinkingDetail(message, key) {
+    const summary = element('summary', message.model ? `Размышления · ${message.model}` : 'Размышления модели');
+    const node = detail(key, 'project-thinking', summary);
+    node.append(element('p', message.thinking));
+    return node;
+  }
+
+  function toolDetail(message) {
+    const tool = message.tool;
+    const summary = element('summary', '');
+    const label = element('span', '');
+    label.className = 'project-tool-label';
+    const name = element('span', tool.name);
+    name.className = 'project-tool-name';
+    label.append(name);
+    if (tool.target) {
+      const target = element('span', tool.target);
+      target.className = 'project-tool-target';
+      target.title = tool.target;
+      label.append(target);
+    }
+    const statuses = {
+      pending: ['…', 'Ожидает результата'], ok: ['✓', 'Готово'],
+      error: ['×', 'Ошибка'], cancelled: ['–', 'Остановлено'], unknown: ['?', 'Неизвестно'],
+    };
+    const [mark, status] = statuses[tool.status] ?? statuses.unknown;
+    const indicator = element('span', mark);
+    indicator.className = 'project-tool-indicator';
+    indicator.title = status;
+    indicator.setAttribute('aria-label', status);
+    indicator.setAttribute('role', 'img');
+    summary.append(label, indicator);
+    const node = detail('tool:' + tool.id, 'project-tool', summary);
+    node.dataset.status = tool.status;
+    // Do not create large argument/result DOM nodes until this action is opened.
+    const populate = () => {
+      if (!node.open || node.querySelector('.project-tool-body')) return;
+      const body = element('div', '');
+      body.className = 'project-tool-body';
+      appendMessageTime(body, message);
+      body.append(element('h4', 'Аргументы'), element('pre', tool.arguments || '{}'));
+      if (tool.result != null) {
+        body.append(element('h4', 'Результат'), element('pre', tool.result || '(пусто)'));
+      }
+      node.append(body);
+    };
+    node.addEventListener('toggle', populate);
+    populate();
+    return node;
+  }
+
+  function renderActivity(block, index, active) {
+    const item = element('li', '');
+    item.dataset.role = 'activity';
+    const entries = block.entries;
+    const tools = entries.filter(entry => entry.tool);
+    const skills = entries.filter(entry => entry.role === 'notice');
+    const count = tools.length + skills.length;
+    const first = entries[0];
+    const key = 'activity:' + (first.tool?.id ?? `${first.timestamp ?? 'unknown'}:${index}`);
+    if (!count) {
+      for (const [i, message] of entries.entries()) {
+        item.append(thinkingDetail(message, key + ':thinking:' + i));
+      }
+      return item;
+    }
+    const summary = element('summary', '');
+    const name = element('span', `Действия · ${count}`);
+    name.className = 'project-activity-label';
+    summary.append(name);
+    const pending = tools.filter(entry => entry.tool.status === 'pending').length;
+    const errors = tools.filter(entry => entry.tool.status === 'error').length;
+    if (pending || errors) {
+      const status = element('span', [pending && `В работе: ${pending}`, errors && `Ошибки: ${errors}`].filter(Boolean).join(' · '));
+      status.className = 'project-activity-status';
+      if (errors) status.dataset.error = 'true';
+      summary.append(status);
+    }
+    const node = detail(key, 'project-activity', summary);
+    node.open = activityOpen(active, activityOverrides.get(key));
+    node.dataset.initialOpen = String(node.open);
+    const rows = element('div', '');
+    rows.className = 'project-activity-rows';
+    for (const [i, message] of entries.entries()) {
+      if (message.tool) rows.append(toolDetail(message));
+      else if (message.thinking) rows.append(thinkingDetail(message, key + ':thinking:' + i));
+      else {
+        const skill = element('p', message.text);
+        skill.className = 'project-activity-skill';
+        rows.append(skill);
+      }
+    }
+    node.append(rows);
+    item.append(node);
+    return item;
+  }
+
   function renderHistory(scrollToEnd = false) {
     const pending = sending.get(chatId);
     const entries = pending && !history.some(message => message.request_id === pending.request_id)
@@ -646,44 +787,36 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const reading = messages.parentElement;
     const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
     messages.hidden = !entries.length;
-    if (renderedChatId !== chatId) {
-      expandedTools.clear();
-      renderedChatId = chatId;
+    // Snapshot open states before replacing history. Keep the outer and inner
+    // disclosures independent even while tool results stream in.
+    expandedDetails.clear();
+    if (renderedChatId === chatId) {
+      for (const node of messages.querySelectorAll('details[data-detail-key]')) {
+        const key = node.dataset.detailKey;
+        if (node.classList.contains('project-activity')) {
+          // Only a user change becomes an override; an automatic open
+          // must not keep a finished batch expanded on the next render.
+          if (String(node.open) !== node.dataset.initialOpen) activityOverrides.set(key, node.open);
+        } else if (node.open) expandedDetails.add(key);
+      }
+    } else {
+      activityOverrides.clear();
     }
-    messages.replaceChildren(...entries.map(message => {
+    renderedChatId = chatId;
+    const blocks = groupChatHistory(entries);
+    const working = Boolean(chatRun(chatId));
+    messages.replaceChildren(...blocks.map((block, index) => {
+      if (block.kind === 'activity') return renderActivity(block, index, working && index === blocks.length - 1);
+      const message = block.message;
       const item = element('li', '');
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
       appendMessageTime(item, message);
-      if (message.tool) {
-        const tool = message.tool;
-        const details = element('details', '');
-        details.className = 'project-tool';
-        details.open = expandedTools.has(tool.id);
-        details.addEventListener('toggle', () => {
-          if (!details.isConnected) return;
-          if (details.open) expandedTools.add(tool.id);
-          else expandedTools.delete(tool.id);
-        });
-        const summary = element('summary', '');
-        const status = { pending: 'Ожидает результата', ok: 'Готово', error: 'Ошибка', cancelled: 'Остановлено' }[tool.status] ?? '';
-        summary.append(element('span', tool.name), element('small', status));
-        details.dataset.status = tool.status;
-        details.append(summary, element('h4', 'Аргументы'), element('pre', tool.arguments || '{}'));
-        if (tool.result != null) {
-          details.append(element('h4', 'Результат'), element('pre', tool.result || '(пусто)'));
-        }
-        item.append(details);
-        return item;
-      }
       const label = message.role === 'assistant' ? (message.model || 'Lyra')
         : { orchestrator: 'Оркестратор', lyra: 'Lyra · Следующий шаг' }[message.origin] ?? '';
       if (label) item.append(element('strong', label));
       if (message.thinking) {
-        const details = element('details', '');
-        details.className = 'project-thinking';
-        details.append(element('summary', 'Размышления модели'), element('p', message.thinking));
-        item.append(details);
+        item.append(thinkingDetail(message, `message:${message.timestamp ?? 'unknown'}:${index}`));
       }
       if (message.text) item.append(message.role === 'assistant' || message.role === 'user'
         ? renderMarkdown(message.text) : element('p', message.text));
@@ -695,15 +828,18 @@ export function createProjects({ onSelection = () => {} } = {}) {
   function renderLiveThinking(delegation) {
     const [id, task] = delegation ?? [];
     const text = task?.thinking ?? '';
+    const label = task?.model ? `Размышления · ${task.model}` : 'Размышления модели';
+    const summary = get('project-live-thinking-label');
+    if (summary.textContent !== label) summary.textContent = label;
     if (thinkingDelegation !== id) {
       thinkingDelegation = id;
-      liveThinking.open = true;
+      liveThinking.open = false;
     }
+    liveThinking.hidden = !text.trim();
     if (liveThinkingText.textContent === text) return;
     const reading = messages.parentElement;
     const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
     liveThinkingText.textContent = text;
-    liveThinking.hidden = !text.trim();
     if (atEnd) reading.scrollTop = reading.scrollHeight;
   }
 
@@ -984,7 +1120,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const text = prompt.value;
     const model = refreshModels();
     const requestId = crypto.randomUUID();
-    sending.set(chat.id, { role: 'user', origin: 'dashboard', text, request_id: requestId, timestamp: Date.now() });
+    sending.set(chat.id, { role: 'user', origin: 'dashboard', model, text, request_id: requestId, timestamp: Date.now() });
     drafts.delete(chat.id);
     prompt.value = '';
     report();
@@ -1050,10 +1186,13 @@ export function createProjects({ onSelection = () => {} } = {}) {
       installedModels = models ?? [];
       updateControls();
       const current = chatRun(chatId);
-      if (current && (
+      if (Boolean(previous) !== Boolean(current) || (current && current[0] !== previous?.[0])) {
+        renderHistory();
+      }
+      if ((previous && !current && connected) || (current && (
         current[0] !== previous?.[0] ||
         current[1].history_revision !== previous?.[1].history_revision
-      )) {
+      ))) {
         void refreshHistory();
       }
     },

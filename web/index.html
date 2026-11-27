@@ -48,6 +48,9 @@
               <h3 id="current-project-title"></h3>
               <p id="project-chat-workspace" class="secondary" hidden></p>
               <p id="project-job-status" class="secondary" role="status" hidden></p>
+              <div id="project-working-model" class="project-working-model" role="status" hidden>
+                <span class="project-working-dot" aria-hidden="true"></span><span id="project-working-model-name"></span>
+              </div>
             </div>
             <div class="project-controls">
               <div id="project-mode-control" class="project-filters project-mode" hidden role="group" aria-label="Режим чата">
@@ -62,7 +65,7 @@
             <p id="project-empty" class="project-empty secondary">Выбери проект или создай новый.</p>
             <ol id="project-messages" aria-label="Сообщения чата" hidden></ol>
             <details id="project-live-thinking" class="project-thinking" hidden>
-              <summary>Размышления модели</summary>
+              <summary><span id="project-live-thinking-label">Размышления модели</span></summary>
               <p></p>
             </details>
             <div id="command-chat-host" class="command-chat-host" hidden>

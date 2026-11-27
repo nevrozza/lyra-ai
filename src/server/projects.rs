@@ -1079,6 +1079,8 @@ struct ToolTrace {
     id: String,
     name: String,
     arguments: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     finished_at: Option<u64>,
@@ -1130,6 +1132,28 @@ fn compact_tool_arguments(arguments: &Value) -> String {
     compact_tool_preview(serde_json::to_string(&compact).unwrap_or_default())
 }
 
+// Extract the useful label before preview truncation can make argument JSON
+// invalid. Do not use file contents, edit bodies or arbitrary argument values.
+fn tool_target(name: &str, arguments: &Value) -> Option<String> {
+    let field = |key: &str| arguments.get(key).and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let value = match name {
+        "read" | "write" | "edit" | "mkdir" | "ls" => field("path"),
+        "grep" | "find" => field("pattern").or_else(|| field("path")),
+        "run_command" | "start_background_command" | "bash" => field("command"),
+        "load_skill" => field("name"),
+        "finish_task" => field("status"),
+        _ => ["path", "file", "file_path", "name", "query", "pattern", "url", "uri", "command"]
+            .into_iter().find_map(field),
+    }?;
+    let mut target: String = value.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect();
+    if target.len() > 240 {
+        target.truncate(target.floor_char_boundary(240));
+        target.push('…');
+    }
+    Some(target)
+}
+
 fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestamp: Option<u64>, dashboard: bool) {
     for part in content.as_array().into_iter().flatten() {
         if part["type"] != "toolCall" || (dashboard && part["name"] == "read" && skill_read_name(part).is_some()) {
@@ -1150,6 +1174,7 @@ fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestam
                 arguments: if dashboard {
                     tool_preview(serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default())
                 } else { compact_tool_arguments(&part["arguments"]) },
+                target: if dashboard { tool_target(name, &part["arguments"]) } else { None },
                 status: "pending",
                 finished_at: None,
                 result: None,
@@ -1570,6 +1595,19 @@ mod tests {
         assert_eq!(entry_timestamp(&serde_json::json!({"message":{"timestamp":1234}})), Some(1234));
         assert_eq!(entry_timestamp(&serde_json::json!({"timestamp":"1970-01-01T00:00:02Z"})), Some(2000));
         assert_eq!(entry_timestamp(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn tool_labels_survive_truncated_arguments_without_file_contents() {
+        let mut messages = VecDeque::new();
+        append_tool_calls(&mut messages, &serde_json::json!([
+            {"type":"toolCall","id":"a","name":"write","arguments":{"content":"x".repeat(10_000),"path":"src/main.rs"}},
+            {"type":"toolCall","id":"b","name":"run_command","arguments":{"command":"cargo test"}},
+            {"type":"toolCall","id":"c","name":"grep","arguments":{"pattern":"TODO"}}
+        ]), Some(1000), true);
+        assert_eq!(messages[0].tool.as_ref().unwrap().target.as_deref(), Some("src/main.rs"));
+        assert_eq!(messages[1].tool.as_ref().unwrap().target.as_deref(), Some("cargo test"));
+        assert_eq!(messages[2].tool.as_ref().unwrap().target.as_deref(), Some("TODO"));
     }
 
     #[test]
