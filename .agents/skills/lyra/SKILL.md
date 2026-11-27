@@ -37,6 +37,8 @@ Use the Lyra tools already connected to this agent. Read only the schemas for th
 
 ## Plan and schedule implementation steps
 
+- For a task split into several chats, create a named group with `group_name` on the first `enqueue_project_tasks` or `create_project_session` call. Use the returned `group.id` as `group_id` on every later batch or direct chat belonging to that task, including independent review and fixes. Automatic follow-ups inherit the group. Do not use the display number as a task ID. Use `get_project_tasks(group_id: ...)` for the group's queue; use `batch_id` separately for submission retries. Ordinary standalone conversations do not need a group.
+
 - Split a task where the contract is already known and the results can be produced independently. You can batch several `implement` or `fix` steps from different tasks or from one larger task.
 - Batch independent steps in `enqueue_project_tasks`. Give each step a `key`. Set `parallel: true` only with a complete, disjoint `write_paths` list relative to the first working folder. Use forward slashes. Scoped steps can only edit reserved files and have no shell. Run work with an unknown write scope or a shell requirement exclusively.
 - Separate requirements into executable steps even when they share one output file. Queue same-file steps in distinct chats with `after`, so each writer starts from the saved result of the previous one. A detailed checklist inside one worker prompt still counts as one step. See [split work on a single file](references/project-pipelines.md#split-work-on-a-single-file).

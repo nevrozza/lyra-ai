@@ -49,8 +49,16 @@ pub(super) struct Project {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+pub(super) struct ChatGroup {
+    id: u64,
+    name: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Session {
     pub(super) id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<ChatGroup>,
     name: String,
     folder: PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -93,6 +101,8 @@ pub(super) struct SaveProject {
 #[serde(deny_unknown_fields)]
 pub(super) struct NewSession {
     project_id: u64,
+    group_id: Option<u64>,
+    group_name: Option<String>,
     name: String,
     folder: Option<PathBuf>,
     folders: Option<Vec<PathBuf>>,
@@ -320,7 +330,13 @@ impl Store {
 
     pub(super) fn list(&self) -> Result<Catalog> {
         match fs::read(self.directory.join("projects.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(storage),
+            Ok(bytes) => {
+                let mut catalog: Catalog = serde_json::from_slice(&bytes).map_err(storage)?;
+                for project in &mut catalog.projects {
+                    project.restore_legacy_groups();
+                }
+                Ok(catalog)
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Catalog::default()),
             Err(error) => Err(storage(error)),
         }
@@ -403,9 +419,11 @@ impl Store {
                 let folder = project.workspace(input.folder.as_deref())?;
                 project.folders_with_primary(&folder)
             };
+            let group = choose_group(project, &mut catalog.next_id, input.group_id, input.group_name)?;
             catalog.next_id += 1;
             let session = Session {
                 id: catalog.next_id,
+                group,
                 name,
                 folder: folders[0].clone(),
                 folders,
@@ -1005,6 +1023,29 @@ fn canonical_folder(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(folder)
+}
+
+fn choose_group(
+    project: &Project,
+    next_id: &mut u64,
+    id: Option<u64>,
+    name: Option<String>,
+) -> Result<Option<ChatGroup>> {
+    match (id, name) {
+        (Some(_), Some(_)) => Err(invalid("Укажите group_id или group_name, но не оба.")),
+        (Some(id), None) => project.sessions.iter()
+            .filter_map(|session| session.group.as_ref())
+            .find(|group| group.id == id)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| missing("Group")),
+        (None, Some(name)) => {
+            let name = checked_name(name)?;
+            *next_id += 1;
+            Ok(Some(ChatGroup { id: *next_id, name }))
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 fn checked_name(name: String) -> Result<String> {
