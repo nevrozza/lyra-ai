@@ -458,6 +458,34 @@ impl Store {
     }
 }
 
+// The selected manifest paths, not Pi's discovery rules, define this run's catalog.
+pub(super) fn prompt_catalog(paths: &[PathBuf]) -> io::Result<String> {
+    use std::fmt::Write;
+    let mut text = String::from("\n\n# Available Lyra skills\nUse load_skill with the exact skill name when it matches the task or the user requests it. Only the names below are available to this run. The tool resolves the actual SKILL.md location; do not guess a path. Its response includes the package directory for any referenced resources. If a requested skill is absent, report that fact. Do not claim a skill was loaded unless the tool succeeded.\n");
+    if paths.is_empty() {
+        text.push_str("No additional skills selected.\n");
+    }
+    for path in paths {
+        let directory = path.parent().ok_or_else(|| invalid("Missing skill directory"))?;
+        let skill = manifest(directory)?;
+        let description = skill.description.replace(['\r', '\n'], " ");
+        let _ = writeln!(text, "- {}: {}", skill.name, description);
+    }
+    Ok(text)
+}
+
+pub(super) fn selected_manifest<'a>(paths: &'a [PathBuf], name: &str) -> Result<&'a Path, String> {
+    paths.iter().find(|path|
+        path.parent().and_then(Path::file_name).and_then(|part| part.to_str()) == Some(name)
+    ).map(PathBuf::as_path).ok_or_else(|| {
+        let available = paths.iter().filter_map(|path|
+            path.parent()?.file_name()?.to_str()
+        ).collect::<Vec<_>>().join(", ");
+        format!("SKILL_NOT_AVAILABLE: {name}. Available skills: {}",
+            if available.is_empty() { "(none)" } else { &available })
+    })
+}
+
 fn staging(root: &Path) -> Result<tempfile::TempDir, HttpError> {
     tempfile::Builder::new()
         .prefix(".install-")
@@ -838,5 +866,25 @@ mod tests {
         let store = Store::new(temp.path().join("installed"));
         assert!(store.install(&source).is_err());
         assert_eq!(fs::read_dir(&store.directory).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod selected_skill_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_and_loader_use_only_selected_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("canvas-design");
+        fs::create_dir(&package).unwrap();
+        let path = package.join("SKILL.md");
+        fs::write(&path, "---\nname: canvas-design\ndescription: Compose original visual designs\n---\nUse an original composition.").unwrap();
+        let paths = [path.clone()];
+        let catalog = prompt_catalog(&paths).unwrap();
+        assert!(catalog.contains("canvas-design: Compose original visual designs"));
+        assert_eq!(selected_manifest(&paths, "canvas-design").unwrap(), path.as_path());
+        assert!(selected_manifest(&paths, "../canvas-design").is_err());
+        assert!(selected_manifest(&[], "canvas-design").unwrap_err().contains("SKILL_NOT_AVAILABLE"));
     }
 }

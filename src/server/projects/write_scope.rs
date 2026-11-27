@@ -11,7 +11,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-fn resolve(root: &Path, path: &Path) -> io::Result<PathBuf> {
+fn resolve(root: &Path, path: &Path, directory: bool) -> io::Result<PathBuf> {
     let invalid_path = || invalid(format!("Недопустимый путь для записи: {}", path.display()));
     if path.as_os_str().is_empty()
         || path.components().any(|part| match part {
@@ -34,7 +34,7 @@ fn resolve(root: &Path, path: &Path) -> io::Result<PathBuf> {
         target.push(part);
         let last = parts.peek().is_none();
         match fs::symlink_metadata(&target) {
-            Ok(metadata) if (last && metadata.is_file()) || (!last && metadata.is_dir()) => {
+            Ok(metadata) if (last && !directory && metadata.is_file()) || ((!last || directory) && metadata.is_dir()) => {
                 let resolved = target.canonicalize()?;
                 // Windows also exposes junctions and reparse points as directories.
                 if resolved.parent() != target.parent()
@@ -87,6 +87,7 @@ struct Replacement {
 #[derive(Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 enum Mutation {
+    Mkdir { path: PathBuf },
     Write {
         path: PathBuf,
         content: String,
@@ -100,7 +101,7 @@ enum Mutation {
 impl Mutation {
     fn path(&self) -> &Path {
         match self {
-            Self::Write { path, .. } | Self::Edit { path, .. } => path,
+            Self::Write { path, .. } | Self::Edit { path, .. } | Self::Mkdir { path } => path,
         }
     }
 }
@@ -240,14 +241,14 @@ fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn target_path(roots: &[PathBuf], root: &Path, path: &Path) -> io::Result<PathBuf> {
+fn target_path(roots: &[PathBuf], root: &Path, path: &Path, directory: bool) -> io::Result<PathBuf> {
     if !path.is_absolute() {
-        return resolve(root, path);
+        return resolve(root, path, directory);
     }
     for folder in std::iter::once(root).chain(roots.iter().map(PathBuf::as_path)) {
         let canonical = folder.canonicalize()?;
         if let Ok(relative) = path.strip_prefix(folder).or_else(|_| path.strip_prefix(&canonical)) {
-            return resolve(folder, relative);
+            return resolve(folder, relative, directory);
         }
     }
     Err(invalid("Absolute path is outside the registered project folders."))
@@ -262,12 +263,27 @@ pub(in crate::server) fn mutate(
     release: impl FnOnce(&Path),
 ) -> io::Result<()> {
     let change: Mutation = serde_json::from_str(request)?;
-    let target = target_path(roots, root, change.path())?;
+    let directory = matches!(&change, Mutation::Mkdir { .. });
+    let target = target_path(roots, root, change.path(), directory)?;
+    // An existing directory is a no-op, not an exclusive reservation of its subtree.
+    if directory && target.is_dir() {
+        versions.conflicts.remove(&crate::run::path_key(&target));
+        return Ok(());
+    }
     // All cooperating Lyra writers acquire this lock before the version check.
     let newly_claimed = match claim(&target) {
         Ok(claimed) => claimed,
         Err(error) => { versions.conflict(&target, &error); return Err(error); }
     };
+    if directory {
+        // Coordinate creation with file mutations, but release this transient
+        // directory claim immediately; unrelated children remain independent.
+        let result = fs::create_dir_all(&target);
+        if newly_claimed { release(&target); }
+        if let Err(error) = &result { versions.conflict(&target, error); }
+        else { versions.conflicts.remove(&crate::run::path_key(&target)); }
+        return result;
+    }
     let result = (|| {
         let current = match read_bytes(&target) {
             Ok(bytes) => Some(bytes),
@@ -278,6 +294,7 @@ pub(in crate::server) fn mutate(
         versions.validate(&target, current.as_deref(), replacing)?;
         let full = replacing || versions.seen.get(&crate::run::path_key(&target)).is_some_and(|old| old.full);
         let content = match change {
+            Mutation::Mkdir { .. } => unreachable!("directory handled above"),
             Mutation::Write { content, .. } => content,
             Mutation::Edit { edits, .. } => edited_content(
                 std::str::from_utf8(current.as_deref().ok_or_else(|| invalid("File does not exist"))?)
@@ -401,6 +418,37 @@ mod tests {
         change(root, &mut versions, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"first\nsecond","newText":"one\ntwo"},{"oldText":"third","newText":"three"}]}"#).unwrap();
         assert_eq!(fs::read_to_string(root.join("src/new.txt")).unwrap(), "one\r\ntwo\r\nthree\r\n");
         assert!(change(root, &mut versions, r#"{"tool":"write","path":"../outside","content":"no"}"#).is_err());
+    }
+
+    #[test]
+    fn mkdir_creates_nested_empty_directories_without_retaining_a_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut versions = FileVersions::default();
+        let released = std::cell::Cell::new(false);
+        mutate(root, &[], &mut versions, r#"{"tool":"mkdir","path":"src/assets/empty"}"#,
+            |_| Ok(true), |_| released.set(true)).unwrap();
+        assert!(root.join("src/assets/empty").is_dir());
+        assert!(released.get());
+        mutate(root, &[], &mut versions, r#"{"tool":"mkdir","path":"src/assets/empty"}"#,
+            |_| panic!("existing directory needs no claim"), |_| {}).unwrap();
+        assert!(change(root, &mut versions, r#"{"tool":"mkdir","path":"../escape"}"#).is_err());
+        fs::write(root.join("file"), "keep").unwrap();
+        assert!(change(root, &mut versions, r#"{"tool":"mkdir","path":"file"}"#).is_err());
+        assert_eq!(fs::read_to_string(root.join("file")).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_rejects_symlink_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        assert!(change(&root, &mut FileVersions::default(), r#"{"tool":"mkdir","path":"link/escape"}"#).is_err());
+        assert!(!outside.join("escape").exists());
     }
 
     #[test]

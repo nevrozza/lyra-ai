@@ -773,6 +773,11 @@ impl Store {
             }
             let message = &entry["message"];
             if dashboard && let Some(skill) = skill_reads.observe(message) {
+                // Keep failed explicit loads visible as tool cards; successful loads become notices.
+                if message["toolName"] == "load_skill" {
+                    messages.retain(|entry| !entry.tool.as_ref().is_some_and(|tool|
+                        tool.name == "load_skill" && message["toolCallId"].as_str() == Some(tool.id.as_str())));
+                }
                 if messages.len() == 100 {
                     messages.pop_front();
                 }
@@ -947,6 +952,9 @@ fn tool_preview(mut text: String) -> String {
 }
 
 fn skill_read_name(part: &Value) -> Option<&str> {
+    if part["name"] == "load_skill" {
+        return part["arguments"]["name"].as_str().filter(|name| !name.is_empty());
+    }
     if part["name"] != "read" {
         return None;
     }
@@ -960,7 +968,7 @@ fn skill_read_name(part: &Value) -> Option<&str> {
 
 fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestamp: Option<u64>) {
     for part in content.as_array().into_iter().flatten() {
-        if part["type"] != "toolCall" || skill_read_name(part).is_some() {
+        if part["type"] != "toolCall" || (part["name"] == "read" && skill_read_name(part).is_some()) {
             continue;
         }
         let (Some(id), Some(name)) = (part["id"].as_str(), part["name"].as_str()) else {
@@ -1012,8 +1020,7 @@ fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Opt
     tool.finished_at = timestamp;
 }
 
-// Pi exposes skill descriptions in its prompt and reads the actual SKILL.md
-// through its normal read tool. Match the persisted call to its successful result
+// Match explicit skill loads or direct SKILL.md reads to their successful results
 // so failed reads and mere mentions never create a dashboard notice.
 #[derive(Default)]
 struct SkillReads {
@@ -1026,7 +1033,7 @@ impl SkillReads {
             "user" => self.pending.clear(),
             "assistant" => {
                 for part in message["content"].as_array().into_iter().flatten() {
-                    if part["type"] != "toolCall" || part["name"] != "read" {
+                    if part["type"] != "toolCall" || !matches!(part["name"].as_str(), Some("read" | "load_skill")) {
                         continue;
                     }
                     let Some(id) = part["id"].as_str() else { continue };
@@ -1037,7 +1044,7 @@ impl SkillReads {
             }
             "toolResult" => {
                 let skill = self.pending.remove(message["toolCallId"].as_str()?)?;
-                if message["toolName"] == "read" && message["isError"] == false {
+                if matches!(message["toolName"].as_str(), Some("read" | "load_skill")) && message["isError"] == false {
                     return Some(skill);
                 }
             }
@@ -1341,6 +1348,21 @@ mod tests {
         assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
         assert_eq!(messages[0].tool.as_ref().unwrap().finished_at, Some(2000));
         assert_eq!(messages[0].tool.as_ref().unwrap().result.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn explicit_skill_load_notices_require_success() {
+        let mut reads = SkillReads::default();
+        let call = serde_json::json!({"role":"assistant","content":[
+            {"type":"toolCall","id":"a","name":"load_skill","arguments":{"name":"canvas-design"}},
+            {"type":"toolCall","id":"b","name":"load_skill","arguments":{"name":"missing"}}
+        ]});
+        assert_eq!(reads.observe(&call), None);
+        let result = |id: &str, error: bool| serde_json::json!({
+            "role":"toolResult","toolCallId":id,"toolName":"load_skill","isError":error
+        });
+        assert_eq!(reads.observe(&result("b", true)), None);
+        assert_eq!(reads.observe(&result("a", false)).as_deref(), Some("canvas-design"));
     }
 
     #[test]

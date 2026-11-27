@@ -294,6 +294,20 @@ pub(super) async fn run(
             .await
             .map_err(|error| format!("Could not prepare Pi command extension: {error}"))?;
     }
+    // Use the selected catalog explicitly instead of depending on Pi's skill
+    // discovery/formatting. Keep the original global instructions untouched.
+    let catalog_instructions = command_directory.as_ref().filter(|_| !text_only)
+        .map(|dir| dir.0.join("system.md"));
+    if let Some(path) = &catalog_instructions {
+        let mut instructions = match agents_file {
+            Some(path) => tokio::fs::read_to_string(path).await.map_err(|error| error.to_string())?,
+            None => String::new(),
+        };
+        instructions.push_str(&super::skills::prompt_catalog(skills)
+            .map_err(|error| format!("Could not prepare skill catalog: {error}"))?);
+        tokio::fs::write(path, instructions).await.map_err(|error| error.to_string())?;
+    }
+    let agents_file = catalog_instructions.as_deref().or(agents_file);
     let mut child = spawn_pi(
         workspace,
         &backend,
@@ -420,6 +434,35 @@ pub(super) async fn run(
                         )
                         .await?;
                         ready = true;
+                    }
+                    Some("input")
+                        if ready && !text_only && event["title"] == "lyra:load-skill" =>
+                    {
+                        let id = event["id"].as_str().ok_or("Missing Pi skill request ID")?;
+                        let request = event["placeholder"].as_str().ok_or("Missing Pi skill request")?;
+                        let result = (|| -> Result<Value, String> {
+                            let args: Value = serde_json::from_str(request).map_err(|error| error.to_string())?;
+                            let name = args["name"].as_str().ok_or("Use the exact skill name")?;
+                            let path = super::skills::selected_manifest(skills, name)?;
+                            let read_request = json!({
+                                "path": path,
+                                "offset": args["offset"],
+                                "limit": args["limit"],
+                            });
+                            let mut data = file_versions.read(workspace, &read_request.to_string())
+                                .map_err(|error| error.to_string())?;
+                            data["name"] = json!(name);
+                            data["path"] = json!(path);
+                            data["directory"] = json!(path.parent());
+                            Ok(data)
+                        })();
+                        let result = match result {
+                            Ok(mut data) => { data["ok"] = json!(true); data },
+                            Err(error) => json!({"ok": false, "message": error}),
+                        };
+                        rpc_send(stdin, json!({
+                            "type": "extension_ui_response", "id": id, "value": result.to_string()
+                        })).await?;
                     }
                     Some("input")
                         if ready && !text_only && !reviewing
@@ -805,9 +848,9 @@ async fn write_project_instructions(
     if task.text_only {
         text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
     } else if matches!(task.role, Some(Role::Review)) {
-        text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write and edit tools are intentionally unavailable. Report fixes instead of editing.\n");
+        text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write, edit and mkdir tools are intentionally unavailable. Report fixes instead of editing.\n");
     } else {
-        text.push_str("\nWork mode: use read before editing existing files, write for creating new files or replacing fully read files, and edit for targeted changes. Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
+        text.push_str("\nWork mode: use read before editing existing files, write for creating new files or replacing fully read files, and edit for targeted changes. Write creates missing parent directories automatically (e.g. write path src/ui/View.kt). Use mkdir only to create directories explicitly, including empty directories. Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
@@ -938,12 +981,12 @@ fn spawn_pi(
             command.env("LYRA_PI_TEXT_ONLY", "1").arg("--no-tools");
         } else {
             let tools = if reviewing {
-                "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
+                "read,grep,find,ls,run_command,load_skill,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
             } else if extension.is_some() {
                 // Pi's --tools is an allowlist for extension tools as well as built-ins.
                 // For Work runs the extension overrides read/write/edit with guarded tools
                 // and verifies the overrides before accepting the prompt.
-                "read,grep,find,ls,write,edit,run_command"
+                "read,grep,find,ls,write,edit,mkdir,load_skill,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
             };
@@ -971,8 +1014,11 @@ fn spawn_pi(
         if let Some(path) = agents_file {
             command.arg("--append-system-prompt").arg(path);
         }
-        for skill in skills {
-            command.arg("--skill").arg(skill);
+        // Extension runs use the explicit Lyra catalog and load_skill tool.
+        if extension.is_none() {
+            for skill in skills {
+                command.arg("--skill").arg(skill);
+            }
         }
         command
             .current_dir(workspace)
