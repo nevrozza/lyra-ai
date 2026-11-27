@@ -105,7 +105,7 @@ struct NewJob {
     #[serde(default)]
     model: String,
     prompt: String,
-    folders: Option<Vec<PathBuf>>,
+    workspace: Option<PathBuf>,
     max_output_tokens: Option<u32>,
     context_tokens: Option<NonZeroU32>,
     skills: Option<Vec<String>>,
@@ -777,7 +777,6 @@ impl Store {
                     group: session.group.clone(),
                     name: format!("Продолжение: {}", session.name),
                     folder: session.folder.clone(),
-                    folders: session.folders.clone(),
                     archived: false,
                     mode: super::ChatMode::Work,
                     job: None,
@@ -1006,7 +1005,6 @@ impl Store {
             job.status = status;
             job.result = Some(result);
             let folder = session.folder.clone();
-            let folders = session.folders.clone();
             let group = session.group.clone();
             let mut ids = Vec::with_capacity(next.len());
             for mut step in next {
@@ -1018,7 +1016,6 @@ impl Store {
                     name: step.name,
                     group: group.clone(),
                     folder: folder.clone(),
-                    folders: folders.clone(),
                     archived: false,
                     mode: super::ChatMode::Work,
                     job: Some(step.job),
@@ -1069,10 +1066,7 @@ impl Store {
             let mut keys = HashMap::new();
             for new in input.tasks {
                 let name = checked_name(new.name)?;
-                let folders = match new.folders {
-                    Some(folders) => project.session_folders(&folders)?,
-                    None => project.folders_with_primary(&project.workspace(None)?),
-                };
+                let folder = project.workspace(new.workspace.as_deref())?;
                 catalog.next_id += 1;
                 let mut after = Vec::new();
                 for dependency in new.after {
@@ -1105,7 +1099,7 @@ impl Store {
                     return Err(invalid(format!("Ключ задачи {key} повторяется в пакете.")));
                 }
                 let write_paths = if let Some(paths) = new.write_paths {
-                    write_scope::resolve_paths(&folders[0], &paths)
+                    write_scope::resolve_paths(&folder, &paths)
                         .map_err(|error| invalid(error.to_string()))?;
                     paths
                 } else {
@@ -1118,8 +1112,7 @@ impl Store {
                     id: catalog.next_id,
                     group: group.clone(),
                     name,
-                    folder: folders[0].clone(),
-                    folders,
+                    folder,
                     archived: false,
                     mode: super::ChatMode::Work,
                     job: Some(Job {
@@ -1341,7 +1334,7 @@ mod tests {
         let store = Store::new(dir.path().join("data"));
         let project = store.save(super::super::SaveProject {
             id: None, name: "Project".into(),
-            folders: vec![dir.path().to_path_buf()], search_skill: None,
+            folders: vec![dir.path().to_path_buf()],
         }).unwrap();
         let input = |group: serde_json::Value| {
             let mut value = json!({
@@ -1371,7 +1364,6 @@ mod tests {
                 id: None,
                 name: "Test project".into(),
                 folders: vec![dir.path().to_path_buf()],
-                search_skill: None,
             })
             .unwrap();
         let id = project.id;
@@ -1457,7 +1449,6 @@ mod tests {
                 id: None,
                 name: "Test project".into(),
                 folders: vec![dir.path().to_path_buf()],
-                search_skill: None,
             })
             .unwrap();
         let id = project.id;
