@@ -27,6 +27,7 @@ pub(in crate::server) enum Status {
     Queued,
     Running,
     ContextFull,
+    OutputLimit,
     Completed,
     Failed,
     Cancelled,
@@ -84,6 +85,8 @@ pub(in crate::server) struct JobResult {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(in crate::server) context: Option<mcp::PiContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::server) work_progress: Option<pi::WorkProgress>,
 }
 
 #[derive(Deserialize)]
@@ -231,6 +234,7 @@ impl Job {
             Status::Queued => "queued",
             Status::Running => "running",
             Status::ContextFull => "context_full",
+            Status::OutputLimit => "output_limit",
             Status::Completed => "completed",
             Status::Failed => "failed",
             Status::Cancelled => "cancelled",
@@ -243,7 +247,7 @@ impl Job {
     pub(super) fn pending(&self) -> bool {
         matches!(
             self.status,
-            Status::Queued | Status::Running | Status::ContextFull
+            Status::Queued | Status::Running | Status::ContextFull | Status::OutputLimit
         )
     }
 
@@ -278,7 +282,7 @@ impl Job {
     pub(super) fn status_message(&self) -> Option<Message> {
         if !matches!(
             self.status,
-            Status::Failed | Status::Blocked | Status::ContextFull | Status::Cancelled
+            Status::Failed | Status::Blocked | Status::ContextFull | Status::OutputLimit | Status::Cancelled
         ) && !(self.external && self.status == Status::Completed)
         {
             return None;
@@ -444,7 +448,7 @@ pub(in crate::server) async fn query(app: Arc<App>, input: Query) -> Result<Vec<
             || state.borrow().closed()
             || tasks
                 .iter()
-                .any(|task| task.job.status == Status::ContextFull)
+                .any(|task| matches!(task.job.status, Status::ContextFull | Status::OutputLimit))
             || tasks.iter().all(|task| !task.job.pending())
             || tokio::time::timeout_at(deadline, state.changed())
                 .await
@@ -462,10 +466,10 @@ pub(in crate::server) async fn query(app: Arc<App>, input: Query) -> Result<Vec<
     }
 }
 
-fn context_retry_conflict() -> (StatusCode, String) {
+fn retry_conflict() -> (StatusCode, String) {
     (
         StatusCode::CONFLICT,
-        "Задача не ожидает восстановления контекста.".into(),
+        "Задача не ожидает восстановления контекста или лимита генерации.".into(),
     )
 }
 
@@ -485,8 +489,8 @@ pub(in crate::server) async fn retry(app: Arc<App>, input: Retry) -> Result<Task
                 .session(input.project_session_id)?
                 .job
                 .as_ref()
-                .filter(|job| job.status == Status::ContextFull)
-                .ok_or_else(context_retry_conflict)?
+                .filter(|job| matches!(job.status, Status::ContextFull | Status::OutputLimit))
+                .ok_or_else(retry_conflict)?
                 .model
                 .clone();
             context::validate_window(&model, tokens.get(), context::estimate(&model).as_ref())
@@ -503,13 +507,14 @@ pub(in crate::server) async fn cancel(app: Arc<App>, key: SessionKey, by_user: b
     work(app, move |app| {
         if !app.projects.set_job(
             &key,
-            &[Status::Queued, Status::ContextFull],
+            &[Status::Queued, Status::ContextFull, Status::OutputLimit],
             Status::Cancelled,
             Some(JobResult {
                 text: if by_user { super::USER_STOP_TEXT.into() } else { "Task intentionally cancelled by request. Do not automatically restart it.".into() },
                 stop_reason: Some(if by_user { super::USER_STOP_REASON } else { "cancelled_by_request" }.into()),
                 truncated: false,
                 context: None,
+                work_progress: None,
             }),
         )? {
             return Err((
@@ -719,6 +724,7 @@ fn fail_dispatch(app: &App, delegation: u64, text: String) -> (Status, JobResult
             stop_reason: stopped.then(|| super::USER_STOP_REASON.into()),
             truncated: false,
             context: None,
+                work_progress: None,
         },
     )
 }
@@ -746,15 +752,15 @@ impl Store {
             let job = session
                 .job
                 .as_mut()
-                .filter(|job| job.status == Status::ContextFull)
-                .ok_or_else(context_retry_conflict)?;
+                .filter(|job| matches!(job.status, Status::ContextFull | Status::OutputLimit))
+                .ok_or_else(retry_conflict)?;
             let previous = job
                 .result
                 .as_ref()
                 .and_then(|result| result.context.as_ref())
                 .ok_or_else(|| invalid("Размер предыдущего окна контекста неизвестен."))?
                 .context_tokens;
-            if !input.fresh_chat
+            if job.status == Status::ContextFull && !input.fresh_chat
                 && !input
                     .context_tokens
                     .is_some_and(|tokens| tokens.get() > previous)
@@ -762,6 +768,9 @@ impl Store {
                 return Err(invalid(format!(
                     "Для продолжения в том же чате укажите контекст больше {previous} токенов."
                 )));
+            }
+            if !input.fresh_chat && input.context_tokens.is_some_and(|tokens| tokens.get() < previous) {
+                return Err(invalid("Для продолжения в том же чате нельзя уменьшать окно контекста."));
             }
             let prompt = job
                 .input
@@ -877,6 +886,7 @@ impl Store {
                 stop_reason: None,
                 truncated: false,
                 context: None,
+                work_progress: None,
             });
             Ok(TaskView::from_session(project.id, session).expect("external task"))
         })
@@ -960,6 +970,7 @@ impl Store {
                             stop_reason: None,
                             truncated: false,
                             context: None,
+                work_progress: None,
                         });
                         changed = true;
                     }
@@ -1299,7 +1310,7 @@ impl Project {
         for job in std::iter::once(root_job).chain(chain) {
             match job.status {
                 Status::Completed => {}
-                Status::Queued | Status::Running | Status::ContextFull => pending = true,
+                Status::Queued | Status::Running | Status::ContextFull | Status::OutputLimit => pending = true,
                 _ => return Dependency::Failed,
             }
         }
@@ -1315,6 +1326,49 @@ impl Project {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn output_limit_pauses_dependents_and_can_resume_same_task_without_larger_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let store = Store::new(data.clone());
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": project.id,
+            "tasks": [
+                {"name":"Implement","key":"impl","model":"local","prompt":"Implement","context_tokens":4096},
+                {"name":"Consumer","model":"local","prompt":"Consume","after":["impl"]}
+            ]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        let original = tasks[0].key();
+        assert!(store.set_job(&original, &[Status::Queued], Status::Running, None).unwrap());
+        let paused = serde_json::from_value(json!({
+            "text":"Partial","stop_reason":"length","truncated":true,
+            "context":{"context_tokens":4096},
+            "work_progress":{"generation_stop_reason":"length","confirmation_status":"unconfirmed",
+                "handoff_complete":false,"continuation_attempts":2,"confirmed_mutation_count":1,
+                "recent_mutations":[{"tool":"write","path":"result.txt"}]}
+        })).unwrap();
+        store.complete_job(&original, Status::OutputLimit, paused, &[]).unwrap();
+        let store = Store::new(data);
+        assert!(!store.block_failed_dependencies().unwrap());
+        assert!(store.ready_tasks().unwrap().is_empty());
+        let catalog = store.list().unwrap();
+        let persisted = catalog.projects[0].sessions[0].job.as_ref().unwrap().result.as_ref().unwrap();
+        assert!(persisted.work_progress.is_some());
+        let retry = store.retry_task(Retry {
+            project_id: project.id, project_session_id: original.project_session_id,
+            context_tokens: None, fresh_chat: false, prompt: "Inspect result.txt and finish remaining work.".into(),
+        }).unwrap();
+        assert_eq!(retry.project_session_id, original.project_session_id);
+        assert_eq!(store.ready_tasks().unwrap().len(), 1);
+        assert!(store.set_job(&original, &[Status::Queued], Status::Running, None).unwrap());
+        assert!(store.set_job(&original, &[Status::Running], Status::Completed, None).unwrap());
+        assert_eq!(store.ready_tasks().unwrap().len(), 1);
+        assert_eq!(store.ready_tasks().unwrap()[0].key().project_session_id, tasks[1].key().project_session_id);
+    }
 
     #[test]
     fn unfinished_worker_does_not_release_dependents_or_automatic_review() {
@@ -1338,6 +1392,7 @@ mod tests {
             stop_reason: Some("task_incomplete".into()),
             truncated: false,
             context: None,
+                work_progress: None,
         }, &[]).unwrap();
         assert!(store.ready_tasks().unwrap().is_empty());
         assert!(store.block_failed_dependencies().unwrap());
@@ -1539,6 +1594,7 @@ mod tests {
                         stop_reason: None,
                         truncated: false,
                         context: None,
+                work_progress: None,
                     },
                     candidates,
                 )
