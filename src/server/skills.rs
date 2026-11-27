@@ -408,6 +408,11 @@ impl Store {
         Ok(skills)
     }
 
+    pub(super) fn enabled(&self, name: &str) -> Result<bool, String> {
+        self.list().map(|skills| skills.iter().any(|skill| skill.name == name && skill.enabled))
+            .map_err(|error| storage_error(error).1)
+    }
+
     pub(super) fn paths(&self, selected: Option<&[String]>) -> Result<Vec<PathBuf>, String> {
         if selected.is_some_and(<[String]>::is_empty) {
             return Ok(Vec::new());
@@ -696,6 +701,10 @@ mod tests {
         assert!(!store.list().unwrap().iter().any(|skill| skill.name == "ast-index"));
         assert!(store.paths(Some(&["ast-index".into()])).is_err());
         assert!(store.remove("../outside").is_err());
+        store.set_enabled("lyra-review", false).unwrap();
+        assert!(!store.enabled("lyra-review").unwrap());
+        store.remove("lyra-review").unwrap();
+        assert!(!store.enabled("lyra-review").unwrap());
         let restored = store.upload(vec![UploadedFile {
             path: MANIFEST.into(), data: STANDARD.encode(BUILT_IN_SKILLS[0].1),
         }]).unwrap();
