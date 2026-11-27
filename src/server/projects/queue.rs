@@ -580,7 +580,7 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
                 &candidates,
                 metrics,
                 &task.job.model,
-                preferred.fix.as_deref(),
+                &preferred,
             );
         }
         let preparation = if let (Some(reviewer), Some(metrics)) = (release, metrics) {
