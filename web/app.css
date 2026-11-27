@@ -118,6 +118,8 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-action-menu:popover-open { display: grid; gap: 2px; }
 .project-action-menu button { padding: 7px 9px; border-radius: 5px; background: transparent; color: #e5ecdf; font-size: .8rem; text-align: left; }
 .project-action-menu button:hover:not(:disabled) { background: #314438; }
+.project-action-menu button.project-delete-action:not(:disabled) { color: #f0ac9c; }
+.project-action-menu button.project-delete-action:hover:not(:disabled) { background: #40302d; }
 .project-reading { flex: 1; display: grid; align-items: start; max-height: 520px; min-height: 185px; overflow: auto; padding: 18px 20px; }
 .project-empty { align-self: center; justify-self: center; text-align: center; }
 .project-reading:has(.project-progress:not([hidden])) { align-content: start; gap: 14px; }

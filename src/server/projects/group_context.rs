@@ -20,6 +20,12 @@ pub(super) struct GroupMemory {
     direct: BTreeMap<u64, DirectResult>,
 }
 
+impl GroupMemory {
+    pub(super) fn remove_chats(&mut self, ids: &std::collections::HashSet<u64>) {
+        self.direct.retain(|id, _| !ids.contains(id));
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct DirectResult {
     text: String,
