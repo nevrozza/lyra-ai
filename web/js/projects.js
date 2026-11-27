@@ -18,18 +18,23 @@ export function compareTreeChats(a, b) {
   return (b.group?.id ?? b.id) - (a.group?.id ?? a.id) || a.id - b.id;
 }
 
-// Group consecutive tool calls only; preserve thinking and notices in place.
+// Group tool calls and intermediate reasoning, but keep skill notices and
+// visible messages as chronological boundaries. Reasoning alone is not a tool batch.
 export function groupChatHistory(entries) {
   const blocks = [];
-  let tools = [];
+  let activity = [];
   const flush = () => {
-    if (tools.length === 1) blocks.push({ kind: 'tool', message: tools[0] });
-    else if (tools.length > 1) blocks.push({ kind: 'activity', entries: tools });
-    tools = [];
+    if (activity.length > 1 && activity.some(message => message.tool)) {
+      blocks.push({ kind: 'activity', entries: activity });
+    } else {
+      for (const message of activity) blocks.push({ kind: message.tool ? 'tool' : 'message', message });
+    }
+    activity = [];
   };
   for (const message of entries) {
-    if (message.tool) tools.push(message);
-    else {
+    if (message.tool || (message.role === 'assistant' && !message.text?.trim() && message.thinking)) {
+      activity.push(message);
+    } else {
       flush();
       blocks.push({ kind: 'message', message });
     }
@@ -746,8 +751,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const item = element('li', '');
     item.dataset.role = 'activity';
     const entries = block.entries;
-    const tools = entries;
-    const count = tools.length;
+    const tools = entries.filter(message => message.tool);
+    const count = entries.length;
     const key = 'activity:' + tools[0].tool.id;
     item.dataset.historyKey = key;
     item.dataset.historyContent = JSON.stringify(entries);
@@ -768,7 +773,10 @@ export function createProjects({ onSelection = () => {} } = {}) {
     node.dataset.initialOpen = String(node.open);
     const rows = element('div', '');
     rows.className = 'project-activity-rows';
-    for (const message of tools) rows.append(toolDetail(message));
+    for (const [index, message] of entries.entries()) {
+      if (message.tool) rows.append(toolDetail(message));
+      else rows.append(thinkingDetail(message, key + ':thinking:' + index));
+    }
     node.append(rows);
     item.append(node);
     return item;
@@ -821,7 +829,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
         item.append(toolDetail(message));
         return item;
       }
-      if (message.role === 'assistant' && !message.text && message.thinking) {
+      if (message.role === 'assistant' && !message.text?.trim() && message.thinking) {
         item.dataset.role = 'thinking';
         item.dataset.historyKey = `thinking:${message.timestamp ?? 'unknown'}:${index}`;
         item.dataset.historyContent = JSON.stringify(message);
