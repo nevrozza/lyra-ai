@@ -80,7 +80,7 @@ export default function (pi) {
                 "Get a current CPU, system RAM, GPU VRAM, and Ollama residency sample. Use it to decide whether to overlap a build with diff review.",
                 Type.Object({}), () => ""],
             ["start_background_command", "lyra:start-background-command",
-                "Submit one background build or check through Lyra's standard command approval. Continue inspecting files or the Git diff while it runs.",
+                "Submit one background build or check through Lyra's standard command approval. NEVER modify source/configuration files or bypass the read-only review or guarded file rules through this command. Continue inspecting files or the Git diff while it runs.",
                 Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }) }), args => args.command],
             ["wait_background_command", "lyra:wait-background-command",
                 "Collect the background command's exit code and bounded logs. Collect the result before giving a review verdict.",
