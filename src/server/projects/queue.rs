@@ -1413,9 +1413,11 @@ mod tests {
         assert_eq!(retried.project_session_id, original.project_session_id);
         let new_chat = retried.job.chat_session_id.unwrap();
         assert_ne!(new_chat, original.project_session_id);
+        assert_eq!(retried.group.as_ref().unwrap().id, tasks[0].group.as_ref().unwrap().id);
         let catalog = store.list().unwrap();
         let project = &catalog.projects[0];
         assert!(project.has_pending_task(new_chat));
+        assert_eq!(project.session(new_chat).unwrap().group.as_ref().unwrap().id, tasks[0].group.as_ref().unwrap().id);
         assert_eq!(
             project.session(new_chat).unwrap().folder,
             project.session(original.project_session_id).unwrap().folder
