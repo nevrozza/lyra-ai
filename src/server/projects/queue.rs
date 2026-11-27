@@ -189,6 +189,7 @@ impl Job {
         let text = &self.input.as_ref()?.prompt;
         Some(Message {
             tool: None,
+            timestamp: None,
             role: "user",
             text: text[..text.floor_char_boundary(24_000)].to_owned(),
             thinking: None,
@@ -208,6 +209,7 @@ impl Job {
         }
         Some(Message {
             tool: None,
+            timestamp: None,
             role: "notice",
             text: if self.artifacts.is_empty() {
                 self.result.as_ref()?.text.clone()
