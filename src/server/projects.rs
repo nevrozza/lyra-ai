@@ -42,7 +42,6 @@ pub(super) struct Project {
     pub(super) id: u64,
     pub(super) name: String,
     pub(super) folders: Vec<PathBuf>,
-    pub(super) search_skill: Option<String>,
     pub(super) sessions: Vec<Session>,
     #[serde(default)]
     archived: bool,
@@ -61,8 +60,6 @@ pub(super) struct Session {
     group: Option<ChatGroup>,
     name: String,
     folder: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    folders: Vec<PathBuf>,
     #[serde(default)]
     archived: bool,
     #[serde(default)]
@@ -94,7 +91,6 @@ pub(super) struct SaveProject {
     id: Option<u64>,
     name: String,
     folders: Vec<PathBuf>,
-    search_skill: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -104,19 +100,16 @@ pub(super) struct NewSession {
     group_id: Option<u64>,
     group_name: Option<String>,
     name: String,
-    folder: Option<PathBuf>,
-    folders: Option<Vec<PathBuf>>,
     #[serde(default)]
     mode: ChatMode,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SessionFolders {
+pub(super) struct SessionSettings {
     project_id: u64,
     project_session_id: u64,
-    folders: Vec<PathBuf>,
-    name: Option<String>,
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -216,7 +209,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects", get(list).post(save))
         .route("/projects/pick-folder", post(folder_picker::pick))
         .route("/projects/sessions", post(create_session))
-        .route("/projects/sessions/folders", post(update_session_folders))
+        .route("/projects/sessions/settings", post(update_session_settings))
         .route("/projects/sessions/mode", post(update_session_mode))
         .route("/projects/archive", post(archive))
         .route("/projects/groups/settings", post(update_group))
@@ -247,11 +240,11 @@ async fn create_session(
     work(app, |app| add_session(app, input)).await.map(Json)
 }
 
-async fn update_session_folders(
+async fn update_session_settings(
     State(app): State<Arc<App>>,
-    Json(input): Json<SessionFolders>,
+    Json(input): Json<SessionSettings>,
 ) -> Result<Json<Session>> {
-    work(app, |app| set_session_folders(app, input))
+    work(app, |app| set_session_settings(app, input))
         .await
         .map(Json)
 }
@@ -305,11 +298,6 @@ pub(super) async fn work<T: Send + 'static>(
 }
 
 pub(super) fn save_project(app: &App, input: SaveProject) -> Result<Project> {
-    if let Some(skill) = &input.search_skill {
-        app.skills
-            .paths(Some(std::slice::from_ref(skill)))
-            .map_err(invalid)?;
-    }
     let project = app.projects.save(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
     Ok(project.summary())
@@ -321,11 +309,11 @@ pub(super) fn add_session(app: &App, input: NewSession) -> Result<Session> {
     Ok(session.summary())
 }
 
-pub(super) fn set_session_folders(app: &App, input: SessionFolders) -> Result<Session> {
+pub(super) fn set_session_settings(app: &App, input: SessionSettings) -> Result<Session> {
     if app.task.borrow().project_chat_active(input.project_session_id) {
         return Err(invalid("Дождитесь завершения ответа перед изменением настроек."));
     }
-    let session = app.projects.set_session_folders(input)?;
+    let session = app.projects.set_session_settings(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
     Ok(session.summary())
 }
@@ -417,9 +405,11 @@ impl Store {
                     .find(|project| project.id == id)
                     .ok_or_else(|| missing("Project"))?;
                 project.ensure_active()?;
+                if project.sessions.iter().any(|session| session.job.as_ref().is_some_and(queue::Job::pending) && !folders.contains(&session.folder)) {
+                    return Err(invalid("Нельзя убрать рабочую папку незавершённой задачи."));
+                }
                 project.name = name;
                 project.folders = folders;
-                project.search_skill = input.search_skill;
                 return Ok(project.clone());
             }
             catalog.next_id += 1;
@@ -427,7 +417,6 @@ impl Store {
                 id: catalog.next_id,
                 name,
                 folders,
-                search_skill: input.search_skill,
                 sessions: Vec::new(),
                 archived: false,
             };
@@ -445,23 +434,14 @@ impl Store {
                 .find(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
             project.ensure_active()?;
-            let folders = if let Some(folders) = input.folders {
-                if input.folder.is_some() {
-                    return Err(invalid("Укажите folders или folder."));
-                }
-                project.session_folders(&folders)?
-            } else {
-                let folder = project.workspace(input.folder.as_deref())?;
-                project.folders_with_primary(&folder)
-            };
+            let folder = project.workspace(None)?;
             let group = choose_group(project, &mut catalog.next_id, input.group_id, input.group_name)?;
             catalog.next_id += 1;
             let session = Session {
                 id: catalog.next_id,
                 group,
                 name,
-                folder: folders[0].clone(),
-                folders,
+                folder,
                 archived: false,
                 mode: input.mode,
                 job: None,
@@ -471,7 +451,7 @@ impl Store {
         })
     }
 
-    fn set_session_folders(&self, input: SessionFolders) -> Result<Session> {
+    fn set_session_settings(&self, input: SessionSettings) -> Result<Session> {
         self.change(|catalog| {
             let project = catalog
                 .projects
@@ -479,9 +459,8 @@ impl Store {
                 .find(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
             project.ensure_active()?;
-            let folders = project.session_folders(&input.folders)?;
             if project.has_pending_task(input.project_session_id) {
-                return Err(invalid("Дождитесь завершения задачи перед сменой папок."));
+                return Err(invalid("Дождитесь завершения задачи перед изменением настроек."));
             }
             let session = project
                 .sessions
@@ -489,15 +468,7 @@ impl Store {
                 .find(|session| session.id == input.project_session_id)
                 .ok_or_else(|| missing("Session"))?;
             session.ensure_active()?;
-            if folders[0] != session.folder {
-                return Err(invalid(
-                    "Основная папка существующего чата остаётся первой.",
-                ));
-            }
-            session.folders = folders;
-            if let Some(name) = input.name {
-                session.name = checked_name(name)?;
-            }
+            session.name = checked_name(input.name)?;
             Ok(session.clone())
         })
     }
@@ -631,19 +602,25 @@ impl Store {
         let (workspace, folders, session_file, mode) = if let Some(id) = session_id {
             let session = project.session(id)?;
             session.ensure_active()?;
-            let folder = &session.folder;
-            if let Some(workspace) = workspace
-                && project.workspace(Some(workspace))? != *folder
-            {
-                return Err(invalid("Use the folder assigned to this session"));
-            }
+            // Ordinary chats inherit the current project folders. Queue steps keep
+            // their execution root so relative reservations and artifacts remain valid.
+            let owner = if session.job.is_some() { Some(session) } else {
+                project.sessions.iter().find(|candidate| candidate.job.as_ref().is_some_and(|job| job.chat_session_id == Some(id)))
+            };
+            let folder = if let Some(owner) = owner.filter(|owner| owner.job.as_ref().is_some_and(queue::Job::pending)) {
+                let folder = project.workspace(Some(&owner.folder))?;
+                if let Some(requested) = workspace
+                    && project.workspace(Some(requested))? != folder
+                {
+                    return Err(invalid("Use the queued task's workspace"));
+                }
+                folder
+            } else {
+                project.workspace(workspace)?
+            };
             (
-                project.workspace(Some(folder))?,
-                if session.folders.is_empty() {
-                    project.folders_with_primary(folder)
-                } else {
-                    project.session_folders(&session.folders)?
-                },
+                folder.clone(),
+                project.folders_with_primary(&folder),
                 Some(self.session_file(id)),
                 Some(session.mode),
             )
@@ -1017,20 +994,6 @@ impl Project {
             .ok_or_else(|| missing("Session"))
     }
 
-    fn session_folders(&self, requested: &[PathBuf]) -> Result<Vec<PathBuf>> {
-        if requested.is_empty() || requested.len() > 16 {
-            return Err(invalid("Выберите от 1 до 16 рабочих папок."));
-        }
-        let mut folders = Vec::new();
-        for path in requested {
-            let folder = self.workspace(Some(path))?;
-            if !folders.contains(&folder) {
-                folders.push(folder);
-            }
-        }
-        Ok(folders)
-    }
-
     fn folders_with_primary(&self, primary: &Path) -> Vec<PathBuf> {
         std::iter::once(primary.to_path_buf())
             .chain(self.folders.iter().filter(|path| *path != primary).cloned())
@@ -1158,7 +1121,7 @@ mod tests {
         let store = Store::new(dir.path().join("data"));
         let project = store.save(SaveProject {
             id: None, name: "Project".into(),
-            folders: vec![dir.path().to_path_buf()], search_skill: None,
+            folders: vec![dir.path().to_path_buf()],
         }).unwrap();
         let create = |name: &str, group: serde_json::Value| {
             let mut input = serde_json::json!({"project_id": project.id, "name": name});
@@ -1185,9 +1148,9 @@ mod tests {
         let restored = store.set_archive(archive(false)).unwrap();
         assert!(!restored.session(first.id).unwrap().archived);
         assert!(!restored.session(second.id).unwrap().archived);
-        let renamed = store.set_session_folders(SessionFolders {
+        let renamed = store.set_session_settings(SessionSettings {
             project_id: project.id, project_session_id: second.id,
-            folders: vec![second.folder.clone()], name: Some("New chat name".into()),
+            name: "New chat name".into(),
         }).unwrap();
         assert_eq!(renamed.name, "New chat name");
         assert_eq!(renamed.group.unwrap().id, group_id);
@@ -1256,7 +1219,6 @@ mod tests {
                 id: None,
                 name: "Project".into(),
                 folders: vec![dir.path().to_path_buf()],
-                search_skill: None,
             })
             .unwrap();
         let create = |name: &str| {
