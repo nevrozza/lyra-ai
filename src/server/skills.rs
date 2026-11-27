@@ -45,7 +45,7 @@ pub(super) struct Store {
 }
 
 #[derive(Deserialize, Serialize)]
-struct Skill {
+pub(super) struct Skill {
     name: String,
     description: String,
     #[serde(default = "enabled_by_default")]
@@ -115,7 +115,10 @@ async fn install(
     tokio::task::spawn_blocking(move || {
         app.skills
             .install(&import.path)
-            .map(|skill| (StatusCode::CREATED, Json(skill)))
+            .map(|skill| {
+                app.task.send_modify(crate::run::Snapshot::skills_changed);
+                (StatusCode::CREATED, Json(skill))
+            })
     })
     .await
     .map_err(storage_error)?
@@ -128,7 +131,10 @@ async fn upload(
     tokio::task::spawn_blocking(move || {
         app.skills
             .upload(files)
-            .map(|skill| (StatusCode::CREATED, Json(skill)))
+            .map(|skill| {
+                app.task.send_modify(crate::run::Snapshot::skills_changed);
+                (StatusCode::CREATED, Json(skill))
+            })
     })
     .await
     .map_err(storage_error)?
@@ -138,7 +144,11 @@ async fn set_enabled(
     State(app): State<Arc<App>>,
     Json(input): Json<SetEnabled>,
 ) -> Result<Json<Skill>, HttpError> {
-    tokio::task::spawn_blocking(move || app.skills.set_enabled(&input.name, input.enabled).map(Json))
+    tokio::task::spawn_blocking(move || {
+        let skill = app.skills.set_enabled(&input.name, input.enabled)?;
+        app.task.send_modify(crate::run::Snapshot::skills_changed);
+        Ok(Json(skill))
+    })
         .await
         .map_err(storage_error)?
 }
@@ -148,10 +158,13 @@ async fn remove(
     Json(input): Json<RemoveSkill>,
 ) -> Result<StatusCode, HttpError> {
     tokio::task::spawn_blocking(move || {
-        if app.task.borrow().busy() {
+        let snapshot = app.task.borrow();
+        if snapshot.busy() {
             return Err((StatusCode::CONFLICT, "Дождитесь завершения активных запусков перед удалением скилла.".into()));
         }
         app.skills.remove(&input.name)?;
+        drop(snapshot);
+        app.task.send_modify(crate::run::Snapshot::skills_changed);
         Ok(StatusCode::NO_CONTENT)
     }).await.map_err(storage_error)?
 }
@@ -355,7 +368,7 @@ impl Store {
         Ok(())
     }
 
-    fn list(&self) -> io::Result<Vec<Skill>> {
+    pub(super) fn list(&self) -> io::Result<Vec<Skill>> {
         let _guard = self.lock.lock().expect("skill store lock");
         self.list_unlocked()
     }
@@ -660,6 +673,36 @@ mod tests {
                 .join("post-code-review")
                 .join(MANIFEST)]
         );
+    }
+
+    #[test]
+    fn enablement_and_removal_survive_default_installation_and_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("installed");
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        store.set_enabled("ast-index", false).unwrap();
+        assert!(store.paths(Some(&["ast-index".into()])).unwrap_err().contains("disabled"));
+        assert!(store.paths(None).unwrap().iter().all(|path| !path.ends_with("ast-index/SKILL.md")));
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        assert!(!store.list().unwrap().iter().find(|skill| skill.name == "ast-index").unwrap().enabled);
+        store.set_enabled("ast-index", true).unwrap();
+        assert_eq!(store.paths(Some(&["ast-index".into()])).unwrap().len(), 1);
+        store.remove("ast-index").unwrap();
+        assert!(!directory.join("ast-index").exists());
+        let store = Store::new(directory);
+        store.install_defaults().unwrap();
+        assert!(!store.list().unwrap().iter().any(|skill| skill.name == "ast-index"));
+        assert!(store.paths(Some(&["ast-index".into()])).is_err());
+        assert!(store.remove("../outside").is_err());
+        let restored = store.upload(vec![UploadedFile {
+            path: MANIFEST.into(), data: STANDARD.encode(BUILT_IN_SKILLS[0].1),
+        }]).unwrap();
+        assert!(restored.enabled);
+        store.install_defaults().unwrap();
+        assert_eq!(store.paths(Some(&["ast-index".into()])).unwrap().len(), 1);
+        store.remove("ast-index").unwrap();
     }
 
     #[test]
