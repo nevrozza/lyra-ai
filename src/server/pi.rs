@@ -517,6 +517,11 @@ pub(super) async fn run(
                 log(Kind::Tool, name, "", Some(status));
             }
             Some("message_end") if event["message"]["role"] == "assistant" => {
+                if let Some(task) = &task {
+                    task.trace.app().task.send_if_modified(|snapshot| {
+                        snapshot.clear_chat_thinking(task.delegation)
+                    });
+                }
                 let message = &event["message"];
                 let reason = message["stopReason"].as_str();
                 stop_reason = reason.map(str::to_owned);
