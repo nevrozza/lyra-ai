@@ -75,11 +75,12 @@ The example intentionally gives the structure, decisions and checks, not full HT
 
 ### Example batch
 
-Replace model placeholders with exact inspected catalog tags and choose the project's actual ID and file paths.
+Replace model placeholders with exact inspected catalog tags and choose the project's actual ID and file paths. The following is the usual batch payload: pass it inside `batch` to `enqueue_and_wait` (with a unique stable `batch_id`), or directly to `enqueue_project_tasks` only when you need to overlap independent work.
 
 ```json
 {
   "project_id": 12,
+  "batch_id": "status-feature-v1",
   "tasks": [
     {
       "key": "api",
@@ -175,7 +176,7 @@ A group is a shared work context, not just a visual folder. Create it with `grou
 
 Declare every data dependency with `after` (task keys in the same batch or task IDs from an earlier batch in the same project). For example, a design step that produces an API contract without editing a file must be a prerequisite of both backend and frontend steps. File scopes being disjoint does not make these steps independent. Do not run a consumer in parallel with its producer. Queue results and external-step summaries are committed before the dependent step becomes ready; Lyra passes their text and existing artifact paths. Group chats additionally receive a bounded excerpt of other results, with a full generated CONTEXT.md snapshot available to Work agents via read. Chat-mode workers receive only the excerpt. A snapshot reflects completed work at dispatch, not a live message stream. Every included excerpt section identifies its source line range in CONTEXT.md; shortened sections and overall omission counts are explicit. Work agents should read relevant missing ranges on demand when the excerpt is insufficient, using read with offset and limit. Chat-mode agents must ask for missing details if needed. A saved result incomplete marker means the stored answer itself was truncated; reading the snapshot cannot recover missing original text.
 
-Ask workers to finish with actionable decisions, interfaces, paths, checks and blockers. The orchestrator must inspect the shared context before the next batch and ensure omitted or truncated details are read or supplied when needed. A failed, stopped, or partial result is not a verified decision. Do not write CONTEXT.md into the project repository or ask workers to overwrite shared group memory. Lyra assembles results from separate persisted records.
+Ask workers to finish with actionable decisions, interfaces, paths, checks and blockers. The orchestrator must inspect the returned handoffs before the next batch and read shared context when omitted or truncated details are needed. A failed, stopped, or partial result is not a verified decision. Do not write CONTEXT.md into the project repository or ask workers to overwrite shared group memory. Lyra assembles results from separate persisted records.
 
 A queue task with `stop_reason: file_conflict` is blocked, not completed. Re-read current files, inspect the worker's final report and the conflicting task, and schedule only the remaining necessary work after its prerequisites. A resolved conflict does not block the task. Do not use shell to force a change.
 
