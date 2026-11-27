@@ -110,11 +110,6 @@
           <label for="project-task-prompt">Что нужно сделать</label>
           <textarea id="project-task-prompt" rows="5" maxlength="8000" required></textarea>
           <label class="pin"><input id="project-task-parallel" type="checkbox"> Можно выполнять параллельно</label>
-          <div id="project-task-write-scope" hidden>
-            <label for="project-task-write-paths">Файлы для записи, по одному пути на строку</label>
-            <textarea id="project-task-write-paths" rows="3" placeholder="src/app.rs"></textarea>
-            <p>Пути относительно основной папки проекта. Команды оболочки будут недоступны.</p>
-          </div>
           <p id="project-task-form-message" class="project-feedback" role="status"></p>
           <div class="project-controls project-dialog-actions">
             <button id="cancel-project-task-form" class="unload" type="button">Отмена</button>
