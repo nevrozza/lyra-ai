@@ -103,6 +103,10 @@ pub struct Measurement {
     #[serde(default)]
     gpu_memory: Vec<GpuMeasurement>,
     #[serde(default)]
+    cold_isolated: bool,
+    #[serde(default)]
+    profile_gpu_bytes: Option<u64>,
+    #[serde(default)]
     token_memory_bytes_f16: Option<u64>,
     #[serde(default)]
     context_memory_bytes_f16: Option<u64>,
@@ -179,6 +183,10 @@ impl MemoryProfile {
         current.as_ref() == Some(&self.identity)
     }
 
+    pub(crate) fn has_verified_points(&self, weights: u64) -> bool {
+        self.points.iter().any(|point| point.verified_gpu_bytes(weights).is_some())
+    }
+
     // Only use measured windows; no extrapolation beyond a real successful
     // run and no partial CPU offload advertised as a GPU fit.
     pub(crate) fn fit(&self, available: u64, weights: u64, maximum: u64) -> Option<u32> {
@@ -194,7 +202,7 @@ impl MemoryProfile {
 
 impl Measurement {
     fn verified_gpu_bytes(&self, weights: u64) -> Option<u64> {
-        if self.was_loaded || weights == 0 || self.context_tokens.map(u64::from) != self.measured_context_tokens
+        if !self.cold_isolated || self.was_loaded || weights == 0 || self.context_tokens.map(u64::from) != self.measured_context_tokens
             || self.measured_context_tokens.is_none() { return None; }
         let total = self.ollama_total_bytes?;
         let vram = self.model_vram_bytes?;
@@ -485,27 +493,47 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
     }
     if loaded.iter().any(same) { ollama::change_model(model, ollama::ModelAction::Unload, None)?; }
     let mut profile = MemoryProfile { identity, points: Vec::new(), stopped_reason: None };
-    for tokens in profile_windows(maximum) {
-        let before = ollama::running_models().ok_or("Cannot verify cold benchmark")?;
-        if !before.is_empty() {
-            profile.stopped_reason = Some("Another model remains loaded; cold isolation lost".into());
-            break;
-        }
-        match measure(model, Some(tokens), &mut on_stage) {
-            Ok(point) => {
-                let fits = point.verified_gpu_bytes(weights).is_some();
-                profile.points.push(point);
-                if !fits {
-                    profile.stopped_reason = Some(format!("At {tokens} tokens full GPU residency or physical sampling could not be verified; larger windows were not attempted"));
-                    break;
-                }
+    let mut lower = None::<u32>;
+    let mut upper = None::<u32>;
+    let mut windows = profile_windows(maximum).into_iter();
+    // After the first unsuccessful doubling, test real intermediate windows
+    // instead of interpolating unobserved memory requirements.
+    loop {
+        let tokens = match (lower, upper) {
+            (Some(low), Some(high)) if high.saturating_sub(low) > 2048 => {
+                let mid = (low + (high - low) / 2) / 1024 * 1024;
+                if mid <= low || mid >= high { break; }
+                mid
             }
-            Err(error) => {
-                profile.stopped_reason = Some(format!("{tokens} tokens: {error}"));
+            (_, Some(_)) => break,
+            (_, None) => match windows.next() { Some(tokens) => tokens, None => break },
+        };
+        match ollama::running_models() {
+            Some(before) if before.is_empty() => {}
+            _ => {
+                profile.stopped_reason = Some("Cannot verify cold isolation: another model remains loaded or Ollama unavailable".into());
                 break;
             }
         }
+        match measure(model, Some(tokens), &mut on_stage) {
+            Ok(mut point) => {
+                point.profile_gpu_bytes = point.verified_gpu_bytes(weights);
+                let fits = point.profile_gpu_bytes.is_some();
+                profile.points.push(point);
+                if fits {
+                    lower = Some(tokens);
+                } else {
+                    upper = Some(tokens);
+                    profile.stopped_reason = Some(format!("At {tokens} tokens full GPU residency or physical sampling could not be verified; Auto uses only verified points"));
+                }
+            }
+            Err(error) => {
+                upper = Some(tokens);
+                profile.stopped_reason = Some(format!("{tokens} tokens: {error}"));
+            }
+        }
     }
+    profile.points.sort_by_key(|point| point.context_tokens);
     Ok(profile)
 }
 
@@ -561,10 +589,11 @@ pub fn measure(
         read_generation(BufReader::new(response.into_reader()), &mut on_stage)
     })();
     on_stage(Stage::MeasuringMemory);
-    let measured_model = ollama::running_models().and_then(|models| {
-        models
-            .into_iter()
-            .find(|entry| ollama::same_model(&entry.name, &backend))
+    let measured_models = ollama::running_models();
+    let cold_isolated = loaded.is_empty() && measured_models.as_ref().is_some_and(|models|
+        models.len() == 1 && ollama::same_model(&models[0].name, &backend));
+    let measured_model = measured_models.and_then(|models| {
+        models.into_iter().find(|entry| ollama::same_model(&entry.name, &backend))
     });
     let gpu_memory = sampler.finish();
     if resident.is_none()
@@ -601,6 +630,8 @@ pub fn measure(
         model_vram_bytes: measured_model.as_ref().and_then(|entry| entry.size_vram),
         ollama_total_bytes: measured_model.as_ref().and_then(|entry| entry.size),
         gpu_memory,
+        cold_isolated,
+        profile_gpu_bytes: None,
         token_memory_bytes_f16: bytes_per_token
             .and_then(|bytes| bytes.checked_mul(occupied_tokens)),
         context_memory_bytes_f16: context_capacity
@@ -670,5 +701,45 @@ mod profile_tests {
         assert_eq!(profile_windows(20_000), vec![4096,8192,16384,20_000]);
         assert_eq!(profile_windows(2048), vec![2048]);
         assert!(profile_windows(0).is_empty());
+    }
+
+    fn point(tokens: u32, peak: u64, reported_total: u64, reported_gpu: u64) -> Measurement {
+        let gib = 1u64 << 30;
+        serde_json::from_value(json!({
+            "measured_at":"test","was_loaded":false,"cold_isolated":true,
+            "context_tokens":tokens,"measured_context_tokens":tokens,
+            "ollama_total_bytes":reported_total,"model_vram_bytes":reported_gpu,
+            "gpu_memory":[{"uuid":"gpu","name":"GPU","total_bytes":12*gib,"baseline_bytes":gib,
+                "sampled_peak_bytes":peak+gib,"final_bytes":peak+gib,"samples":3}],
+            "load_ms":1000,"total_ms":2000,"prompt_ms":200,"generation_ms":800,"prompt_tokens":20,
+            "generated_tokens":128,"prompt":"test","token_limit":128,"seed":42,"temperature":0
+        })).unwrap()
+    }
+
+    #[test]
+    fn physical_delta_disambiguates_underreported_vram_and_partial_offload() {
+        let gib = 1u64 << 30;
+        assert_eq!(point(4096, 9*gib, gib, gib).verified_gpu_bytes(8*gib), Some(9*gib));
+        assert!(point(4096, gib, gib, gib).verified_gpu_bytes(8*gib).is_none());
+        assert!(point(4096, 9*gib, 10*gib, 6*gib).verified_gpu_bytes(8*gib).is_none());
+        let mut warm = point(4096, 9*gib, gib, gib);
+        warm.cold_isolated = false;
+        assert!(warm.verified_gpu_bytes(8*gib).is_none());
+    }
+
+    #[test]
+    fn measured_auto_never_extrapolates_or_uses_unverified_point() {
+        let gib = 1u64 << 30;
+        let profile = MemoryProfile {
+            identity: ProfileIdentity { digest:"model".into(),ollama_version:"version".into(),
+                gpu_uuid:"gpu".into(),driver_version:"driver".into(),gpu_total_bytes:12*gib,
+                environment:BTreeMap::new() },
+            points:vec![point(4096,8*gib,gib,gib),point(8192,9*gib,gib,gib),
+                point(16384,11*gib,12*gib,7*gib)],
+            stopped_reason:None,
+        };
+        assert_eq!(profile.fit(10*gib,8*gib,65536),Some(8192));
+        assert_eq!(profile.fit(12*gib,8*gib,4096),Some(4096));
+        assert_eq!(profile.fit(8*gib,8*gib,65536),None);
     }
 }
