@@ -12,7 +12,7 @@ function taskStatus(job) {
   return taskStatuses[job.status] ?? '';
 }
 
-export function createProjects() {
+export function createProjects({ onSelection = () => {} } = {}) {
   const tree = get('project-tree');
   const projectDialog = get('project-dialog');
   const chatDialog = get('project-chat-dialog');
@@ -217,7 +217,6 @@ export function createProjects() {
     chatModeButton.setAttribute('aria-pressed', String(!working));
     workModeButton.setAttribute('aria-pressed', String(working));
     chatModeButton.disabled = workModeButton.disabled = !ready || composer.hidden || taskPending;
-    get('project-command-link').hidden = !working;
     prompt.placeholder = working ? 'Задача для Lyra…' : 'Спроси модель…';
     const model = refreshModels();
     modelSelect.disabled = !online || !model;
@@ -540,6 +539,7 @@ export function createProjects() {
     const requested = preferred ? preferred.chat : project?.id === projectId ? chatId : chats[0]?.id;
     projectId = project?.id;
     chatId = chats.find(chat => chat.id === requested)?.id;
+    onSelection({ projectId, chatId });
     const chat = selectedChat();
     if (chatId !== previousChat) {
       closeEntryMenu();
@@ -947,6 +947,24 @@ export function createProjects() {
 
   return {
     refresh,
+    async openCommandChat(owner) {
+      const preferred = { project: owner.project_id, chat: owner.chat_id };
+      let project = catalog?.projects.find(project => project.id === preferred.project);
+      let chat = project?.sessions.find(chat => chat.id === preferred.chat);
+      if (!chat) {
+        await refresh();
+        project = catalog?.projects.find(project => project.id === preferred.project);
+        chat = project?.sessions.find(chat => chat.id === preferred.chat);
+      }
+      if (!chat) return false;
+      const archived = Boolean(project.archived || chat.archived);
+      archiveView = archived;
+      get('show-active-projects').setAttribute('aria-pressed', String(!archived));
+      get('show-archived-projects').setAttribute('aria-pressed', String(archived));
+      preferredSelection = undefined;
+      await select(preferred);
+      return projectId === preferred.project && chatId === preferred.chat;
+    },
     update(connected, state, models) {
       const previous = chatRun(chatId);
       online = connected;

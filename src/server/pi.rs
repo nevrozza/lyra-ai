@@ -328,6 +328,10 @@ pub(super) async fn run(
     task: Option<Task<'_>>,
 ) -> Result<Reply, String> {
     let project = task.as_ref().and_then(|task| task.project);
+    let command_owner = project.and_then(|project| project.session_id.map(|chat_id| commands::ChatOwner {
+        project_id: project.project.id,
+        chat_id,
+    }));
     let mcp_snapshot = if let Some(task) = task.as_ref().filter(|task|
         !task.text_only && !matches!(task.role, Some(Role::Review)) && task.trace.app().lan_host.is_none())
     {
@@ -733,7 +737,7 @@ pub(super) async fn run(
                             json!({"status": "busy", "message": "Collect the background command first, or use read_review_diff."})
                         } else {
                             serde_json::to_value(
-                                commands::run(commands.expect("command trace"), workspace, command)
+                                commands::run(commands.expect("command trace"), workspace, command, command_owner)
                                     .await,
                             )
                             .map_err(|error| error.to_string())?
@@ -766,7 +770,7 @@ pub(super) async fn run(
                                 let workspace = workspace.to_path_buf();
                                 let command = argument.to_owned();
                                 background = Some(BackgroundCommand(tokio::spawn(async move {
-                                    commands::run(&trace, &workspace, &command).await
+                                    commands::run(&trace, &workspace, &command, command_owner).await
                                 })));
                                 json!({"status": "pending", "message": "Command submitted through Lyra. Collect the result with wait_background_command."})
                             }

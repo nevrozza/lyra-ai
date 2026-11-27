@@ -20,10 +20,10 @@ const models = createModels(session, {
   requestMetrics: () => telemetry.scheduleMetrics(0),
 });
 const sessions = createSessions();
-const commands = createCommands();
+const commands = createCommands({ openChat: owner => projects.openCommandChat(owner) });
 const skills = createSkills();
 const mcpServers = createMcpServers();
-const projects = createProjects();
+const projects = createProjects({ onSelection: commands.setSelection });
 const telemetry = createTelemetry(session, {
   beginSample: models.beginMemorySample,
   onSample(sample) {
