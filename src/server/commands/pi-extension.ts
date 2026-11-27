@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 export default function (pi) {
     const textOnly = process.env.LYRA_PI_TEXT_ONLY === "1";
     const review = process.env.LYRA_PI_REVIEW === "1" && !textOnly;
-    const scopedWrite = process.env.LYRA_PI_SCOPED_WRITE === "1" && !textOnly && !review;
+    const guardedWrite = process.env.LYRA_PI_GUARDED_WRITE === "1" && !textOnly && !review;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
     if (effort) {
@@ -16,24 +16,24 @@ export default function (pi) {
     }
     let earlierMessages = [];
     let promptTimestamp;
-    const scopedDescriptions = new Map();
-    if (scopedWrite) {
-        const path = Type.String({ description: "Reserved file path relative to the primary working folder (use the exact reserved path)" });
+    const guardedDescriptions = new Map();
+    if (guardedWrite) {
+        const path = Type.String({ description: "Exact file path relative to the primary working folder, or absolute path in a registered folder" });
         for (const [name, description, parameters] of [
-            ["write", "Create or replace one reserved file.", Type.Object({ path, content: Type.String() })],
-            ["edit", "Replace exact, unique, non-overlapping text in one reserved file.", Type.Object({
+            ["write", "Create a new file or replace an existing file after reading its current contents. Lyra locks the file automatically.", Type.Object({ path, content: Type.String() })],
+            ["edit", "Replace exact, unique, non-overlapping text in an existing file after reading it. Lyra locks the file automatically.", Type.Object({
                 path,
                 edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
             })],
         ]) {
-            scopedDescriptions.set(name, description);
+            guardedDescriptions.set(name, description);
             pi.registerTool({
                 name, label: name, description, parameters, executionMode: "sequential",
-                promptSnippet: name === "write" ? "Create or replace a reserved file using path and content." : "Edit a reserved file using path and exact oldText/newText pairs.",
-                promptGuidelines: [name + " can modify only a reserved path. Use the tool's advertised argument schema."],
+                promptSnippet: name === "write" ? "Create a file or replace an existing file after reading it." : "Edit a file after reading it, using exact oldText/newText pairs.",
+                promptGuidelines: ["Read existing files before changing them. FILE_CHANGED/READ_REQUIRED: read the current contents and adapt. FILE_LOCKED: do independent work or report the conflict. Never bypass with run_command."],
                 async execute(_id, args, signal, _onUpdate, ctx) {
                     const request = JSON.stringify({ ...args, tool: name });
-                    const value = await ctx.ui.input("lyra:write-scoped-file", request, { signal });
+                    const value = await ctx.ui.input("lyra:write-locked-file", request, { signal });
                     if (value === undefined) throw new Error("Lyra did not return a file result");
                     const result = JSON.parse(value);
                     if (!result.ok) throw new Error(result.message);
@@ -42,13 +42,35 @@ export default function (pi) {
             });
         }
     }
+    if (guardedWrite) {
+        // Retain Pi's native read tool, including images, line offsets, skills
+        // and external reference files. Observe the workspace version before
+        // execution and authorize writes only after a successful stable read.
+        pi.on("tool_call", async (event, ctx) => {
+            if (event.toolName !== "read") return;
+            const path = event.input?.path;
+            if (typeof path !== "string") return;
+            const response = await ctx.ui.input("lyra:observe-read", JSON.stringify({
+                phase: "begin", callId: event.toolCallId, path: path.replace(/^@/, ""),
+            }));
+            if (response !== "ok") return { block: true, reason: "Lyra could not observe the file version." };
+        });
+        pi.on("tool_result", async (event, ctx) => {
+            if (event.toolName !== "read") return;
+            const response = await ctx.ui.input("lyra:observe-read", JSON.stringify({
+                phase: "finish", callId: event.toolCallId, success: !event.isError,
+            }));
+            if (response !== "ok") throw new Error("Lyra could not confirm the read version.");
+        });
+    }
     if (!textOnly) {
         const shell = process.platform === "win32" ? "Windows PowerShell" : "/bin/sh";
         pi.registerTool({
             name: "run_command",
             label: "Run project command",
-            description: `${scopedWrite ? "Never modify files outside your reserved write_paths through shell commands or scripts. " : ""}Request a non-interactive ${shell} command in the project root. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
-            promptSnippet: "Run a project command such as a test or build through Lyra.",
+            description: `NEVER use shell commands to bypass Lyra file locks or version checks. NEVER create, edit, delete, rename, move, patch, overwrite or restore project source files through shell, scripts, subprocesses, redirects, generators, or Git commands. Use write/edit for all source changes; review must not edit sources. Use commands only for inspection, builds and tests that do not modify source files. Request a non-interactive ${shell} command in the project root. Lyra may wait for user approval. Returns bounded stdout, stderr, and the exit code. Do not retry denied or stopped commands without asking the user.`,
+            promptSnippet: "Run inspection, tests or builds through Lyra. Never bypass file locks or write project source files.",
+            promptGuidelines: ["No shell source mutations, including indirect scripts or git operations. Never bypass a file lock or stale-version error."],
             parameters: Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }) }),
             executionMode: "sequential",
             async execute(_id, { command }, signal, _onUpdate, ctx) {
@@ -99,11 +121,11 @@ export default function (pi) {
         const missing = expected.filter(name => !active.includes(name));
         const unexpected = active.filter(name => !expected.includes(name));
         const all = pi.getAllTools();
-        const unguarded = [...scopedDescriptions].filter(([name, description]) =>
+        const unguarded = [...guardedDescriptions].filter(([name, description]) =>
             !all.some(tool => tool.name === name && tool.description === description)).map(([name]) => name);
         if (missing.length || unexpected.length || unguarded.length) {
             throw new Error("Pi tool configuration mismatch: missing=" + missing.join(",") +
-                "; unexpected=" + unexpected.join(",") + "; unverified scoped=" + unguarded.join(","));
+                "; unexpected=" + unexpected.join(",") + "; unverified guarded=" + unguarded.join(","));
         }
         return active;
     }
