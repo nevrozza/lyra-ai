@@ -26,6 +26,8 @@ namespace LyraTray
 
         private readonly string root, ollamaExecutable, requestedModel, logs, piDirectory, dashboard;
         private readonly int port;
+        private readonly string lanSettings;
+        private readonly string lanIp;
         private readonly string startupDirectory, target, revision;
         private readonly ProcessJob job;
         private readonly System.Windows.Forms.Timer timer;
@@ -89,6 +91,8 @@ namespace LyraTray
             requestedModel = model;
             dashboard = "http://127.0.0.1:" + port + "/";
             var local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LyraAI");
+            lanSettings = Path.Combine(local, "lan-ip.txt");
+            lanIp = File.Exists(lanSettings) ? File.ReadAllText(lanSettings).Trim() : "";
             logs = Path.Combine(local, "logs");
             piDirectory = Path.Combine(local, "pi-agent");
             Directory.CreateDirectory(logs);
@@ -116,6 +120,28 @@ namespace LyraTray
         private void ShowTray()
         {
             menu = new ContextMenuStrip();
+            var lanMenu = new ToolStripMenuItem("LAN access (restart required)");
+            lanMenu.DropDownItems.Add("Disabled", null, delegate { SaveLanIp(""); });
+            foreach (var address in NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up)
+                .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+                .Select(a => a.Address)
+                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .Select(a => a.ToString()).Distinct()
+                .Where(a => IsPrivateIPv4(a)))
+            {
+                string ip = address;
+                var item = new ToolStripMenuItem(ip) { Checked = ip == lanIp };
+                item.Click += delegate { SaveLanIp(ip); };
+                lanMenu.DropDownItems.Add(item);
+            }
+            menu.Items.Add(lanMenu);
+            if (IsPrivateIPv4(lanIp))
+            {
+                string url = "http://" + lanIp + ":" + port;
+                menu.Items.Add("Copy LAN dashboard URL", null, delegate { Clipboard.SetText(url + "/"); });
+                menu.Items.Add("Copy LAN MCP URL", null, delegate { Clipboard.SetText(url + "/mcp"); });
+            }
             updateItem = menu.Items.Add("Update && Restart", null, async delegate { await UpdateAndRestartAsync(); });
             quitItem = menu.Items.Add("Quit", null, async delegate { await QuitAsync(); });
             trayImage = new Icon(Path.Combine(root, "assets", "lyra.ico"));
@@ -125,6 +151,28 @@ namespace LyraTray
                 if (click.Button == MouseButtons.Left) OpenDashboard();
             };
             icon.Visible = true;
+        }
+
+        private static bool IsPrivateIPv4(string value)
+        {
+            System.Net.IPAddress address;
+            if (!System.Net.IPAddress.TryParse(value, out address) ||
+                address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
+            var b = address.GetAddressBytes();
+            return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168);
+        }
+
+        private void SaveLanIp(string ip)
+        {
+            if (ip != "" && MessageBox.Show(
+                "LAN access has no authentication. Anyone who can reach the port may control Lyra and its agents. Enable only on a trusted network. Configure Windows Firewall to restrict clients.",
+                "Lyra AI", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+            try
+            {
+                File.WriteAllText(lanSettings, ip);
+                MessageBox.Show("Setting saved. Quit Lyra and start it again to apply.", "Lyra AI");
+            }
+            catch (Exception error) { MessageBox.Show(error.Message, "Lyra AI"); }
         }
 
         private async Task UpdateAndRestartAsync()
@@ -241,6 +289,7 @@ namespace LyraTray
                     string executable = Path.Combine(target, "release", AgentBinary + ".exe");
                     string modelArgument = string.IsNullOrEmpty(model) ? "" : " --model \"" + model + "\"";
                     lyra = job.Start(executable, "--port " + port + modelArgument +
+                        (IsPrivateIPv4(lanIp) ? " --lan-ip " + lanIp : "") +
                         " --pi-agent-dir \"" + piDirectory + "\"" +
                         " --startup-log \"" + Path.Combine(startupDirectory, "startup.log") + "\"",
                         root, Log("lyra"));
