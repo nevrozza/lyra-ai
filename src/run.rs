@@ -256,6 +256,10 @@ impl Snapshot {
             .is_some_and(|active| active.stopping)
     }
 
+    pub fn project_chat_active(&self, session: u64) -> bool {
+        self.delegations.values().any(|active| active.project_session_id == Some(session))
+    }
+
     pub fn has_delegation(&self, id: u64) -> bool {
         self.delegations.contains_key(&id)
     }
