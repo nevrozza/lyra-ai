@@ -119,6 +119,14 @@ pub(crate) fn chat(
         {
             return Some(entry);
         }
+        // Auto load/pin may have created a context profile rather than
+        // loaded the base tag. require_loaded must be able to reuse it.
+        if require_loaded && context_tokens.is_none() {
+            let base = context::alias(model);
+            return entries.iter()
+                .filter(|entry| context::profile_base(&entry.name) == Some(base.as_str()))
+                .max_by_key(|entry| entry.context_length.unwrap_or(0));
+        }
         let tokens = u64::from(context_tokens?);
         let base = context::alias(model);
         entries.iter().find(|entry| {
