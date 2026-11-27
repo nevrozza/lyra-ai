@@ -61,6 +61,8 @@ struct Delegation {
     #[serde(skip)]
     writes: Vec<PathBuf>,
     #[serde(skip)]
+    parallel_worker: bool,
+    #[serde(skip)]
     context_tokens: Option<u32>,
 }
 
@@ -74,7 +76,7 @@ pub enum ContextNotice {
 }
 
 #[derive(Clone, Copy)]
-pub enum DelegationScope<'a> {
+pub enum DelegationScope {
     Standalone,
     Project {
         session_id: Option<u64>,
@@ -83,7 +85,6 @@ pub enum DelegationScope<'a> {
     Queued {
         session_id: u64,
         parallel: bool,
-        writes: &'a [PathBuf],
         context_tokens: Option<u32>,
         max_tasks: usize,
         max_models: usize,
@@ -160,34 +161,33 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope<'_>) -> Option<u64> {
+    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope) -> Option<u64> {
         if self.closed || self.model_action.is_some() || self.benchmark_running {
             return None;
         }
-        let (project, project_session_id, exclusive, writes, context_tokens) = match scope {
+        let (project, project_session_id, exclusive, parallel_worker, context_tokens) = match scope {
             DelegationScope::Standalone if self.delegations.is_empty() => {
-                (false, None, false, &[][..], None)
+                (false, None, false, false, None)
             }
             DelegationScope::Standalone => return None,
             DelegationScope::Project { session_id, work } => {
-                (true, session_id, work, &[][..], None)
+                (true, session_id, work, false, None)
             }
             DelegationScope::Queued {
                 session_id,
                 parallel,
-                writes,
                 context_tokens,
                 max_tasks,
                 max_models,
             } => {
-                let exclusive = !parallel || writes.is_empty();
+                let exclusive = !parallel;
                 if !exclusive {
                     let mut models = BTreeSet::from([(model, context_tokens)]);
                     let mut active_tasks = 0;
                     for active in self
                         .delegations
                         .values()
-                        .filter(|active| !active.writes.is_empty())
+                        .filter(|active| active.parallel_worker)
                     {
                         active_tasks += 1;
                         models.insert((active.model.as_str(), active.context_tokens));
@@ -196,10 +196,9 @@ impl Snapshot {
                         return None;
                     }
                 }
-                (true, Some(session_id), exclusive, writes, context_tokens)
+                (true, Some(session_id), exclusive, parallel, context_tokens)
             }
         };
-        let writes: Vec<_> = writes.iter().map(|path| path_key(path)).collect();
         if project
             && self.delegations.values().any(|active| {
                 exclusive
@@ -207,10 +206,7 @@ impl Snapshot {
                     || !active.project
                     || project_session_id.is_some()
                         && active.project_session_id == project_session_id
-                    || active
-                        .writes
-                        .iter()
-                        .any(|left| writes.iter().any(|right| paths_overlap(left, right)))
+
             })
         {
             return None;
@@ -233,11 +229,30 @@ impl Snapshot {
                 history_revision: 0,
                 project,
                 exclusive,
-                writes,
+                writes: Vec::new(),
+                parallel_worker,
                 context_tokens,
             },
         );
         Some(self.next_delegation)
+    }
+
+    // Claims last until delegation removal, including cancellation and errors.
+    // No wait: returning a conflict prevents circular waits between workers.
+    pub fn claim_file(&mut self, id: u64, path: &Path) -> Result<(), String> {
+        if self.closed || self.delegations.get(&id).is_none_or(|active| active.stopping) {
+            return Err("TASK_STOPPED: no active file writer".into());
+        }
+        let key = path_key(path);
+        for (&owner, active) in &self.delegations {
+            if owner != id && active.writes.iter().any(|other| paths_overlap(other, &key)) {
+                return Err(format!("FILE_LOCKED: {} belongs to active task #{}. Continue independent work; report an essential conflict. Do not bypass via run_command.",
+                    path.display(), active.project_session_id.unwrap_or(owner)));
+            }
+        }
+        let active = self.delegations.get_mut(&id).expect("active writer");
+        if !active.writes.contains(&key) { active.writes.push(key); }
+        Ok(())
     }
 
     pub fn stop_project_delegation(&mut self, id: u64, session_id: u64) -> bool {
@@ -473,60 +488,28 @@ mod tests {
     }
 
     #[test]
-    fn scoped_jobs_reserve_all_files_and_obey_task_and_model_limits() {
+    fn dynamic_claims_obey_task_and_model_limits_and_release_on_finish() {
         let mut snapshot = Snapshot::new(None);
-        let first = [super::PathBuf::from("src/café.rs")];
-        let conflict = [
-            super::PathBuf::from("src/CAFE\u{301}.rs"),
-            super::PathBuf::from("unused.rs"),
-        ];
-        let second = [super::PathBuf::from("src/other.rs")];
-        let third = [super::PathBuf::from("web/app.js")];
-        let scoped = |session_id, writes| DelegationScope::Queued {
-            session_id,
-            parallel: true,
-            writes,
-            context_tokens: None,
-            max_tasks: 2,
-            max_models: 1,
+        let scope = |session_id| DelegationScope::Queued {
+            session_id, parallel: true, context_tokens: None, max_tasks: 2, max_models: 1,
         };
-        let a = snapshot.begin_delegation("one", scoped(1, &first)).unwrap();
-        assert!(
-            snapshot
-                .begin_delegation("one", scoped(2, &conflict))
-                .is_none()
-        );
-        assert!(
-            snapshot
-                .begin_delegation("two", scoped(3, &second))
-                .is_none()
-        );
-        assert!(
-            snapshot
-                .begin_delegation(
-                    "one",
-                    DelegationScope::Project {
-                        session_id: Some(10),
-                        work: true,
-                    }
-                )
-                .is_none()
-        );
-        let b = snapshot
-            .begin_delegation("one", scoped(3, &second))
-            .unwrap();
-        assert!(
-            snapshot
-                .begin_delegation("one", scoped(4, &third))
-                .is_none()
-        );
+        let a = snapshot.begin_delegation("one", scope(1)).unwrap();
+        assert!(snapshot.begin_delegation("two", scope(2)).is_none());
+        let b = snapshot.begin_delegation("one", scope(2)).unwrap();
+        assert!(snapshot.begin_delegation("one", scope(3)).is_none());
+        let first = super::Path::new("src/café.rs");
+        let conflict = super::Path::new("src/CAFE\u{301}.rs");
+        assert!(snapshot.claim_file(a, first).is_ok());
+        assert!(snapshot.claim_file(a, first).is_ok());
+        assert!(snapshot.claim_file(b, conflict).unwrap_err().contains("FILE_LOCKED"));
+        assert!(snapshot.claim_file(b, super::Path::new("src/new.rs")).is_ok());
         snapshot.finish_delegation(a, true);
-        assert!(
-            snapshot
-                .begin_delegation("one", scoped(2, &conflict))
-                .is_some()
-        );
-        snapshot.finish_delegation(b, true);
+        assert!(snapshot.claim_file(b, conflict).is_ok());
+        assert!(snapshot.stop_project_delegation(b, 2));
+        assert!(snapshot.claim_file(b, first).is_err());
+        snapshot.finish_delegation(b, false);
+        let c = snapshot.begin_delegation("one", scope(3)).unwrap();
+        assert!(snapshot.claim_file(c, first).is_ok());
     }
 
     #[test]
