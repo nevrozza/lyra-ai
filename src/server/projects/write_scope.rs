@@ -1,19 +1,12 @@
 use std::{
+    collections::HashMap,
     fs, io,
-    io::Write,
+    hash::{DefaultHasher, Hash, Hasher},
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
-
-pub(super) const MAX_PATHS: usize = 32;
-
-pub(in crate::server) fn resolve_paths(root: &Path, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
-    if paths.is_empty() || paths.len() > MAX_PATHS {
-        return Err(invalid("Укажите от 1 до 32 файлов в write_paths."));
-    }
-    paths.iter().map(|path| resolve(root, path)).collect()
-}
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -113,33 +106,123 @@ impl Mutation {
     }
 }
 
-pub(in crate::server) fn mutate(root: &Path, allowed: &[PathBuf], request: &str) -> io::Result<()> {
-    let change: Mutation = serde_json::from_str(request)?;
-    let canonical_root = root.canonicalize()?;
-    let path = change.path();
-    // Pi may return an absolute path from its read tool. Accept it only
-    // when it is lexically under the project root, then validate every component.
-    let relative = if path.is_absolute() {
-        path.strip_prefix(root)
-            .or_else(|_| path.strip_prefix(&canonical_root))
-            .map_err(|_| invalid("Absolute path is outside the project root."))?
-    } else {
-        path
+// Fingerprint actual file bytes, not timestamps. Limit version tracking to
+// ordinary files of a reasonable size; untracked existing files cannot be overwritten.
+const MAX_TRACKED_BYTES: u64 = 32 * 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Version {
+    hash: u64,
+    len: u64,
+}
+
+fn fingerprint(path: &Path) -> io::Result<Option<Version>> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
-    let target = resolve(root, relative)?;
-    if !allowed.iter().any(|path| crate::run::path_key(path) == crate::run::path_key(&target)) {
-        return Err(invalid(format!(
-            "Этот файл не зарезервирован для задачи: {}",
-            change.path().display()
-        )));
+    if !file.metadata()?.is_file() {
+        return Err(invalid("Only regular files may be versioned."));
     }
-    let content = match change {
-        Mutation::Write { content, .. } => content,
-        Mutation::Edit { edits, .. } => edited_content(&fs::read_to_string(&target)?, edits)?,
-    };
+    let mut bytes = Vec::new();
+    file.take(MAX_TRACKED_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TRACKED_BYTES {
+        return Err(invalid("File exceeds the 32 MiB version tracking limit."));
+    }
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(Some(Version { hash: hasher.finish(), len: bytes.len() as u64 }))
+}
+
+fn target_in_roots(workspace: &Path, roots: &[PathBuf], path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        for root in roots {
+            let canonical = root.canonicalize()?;
+            if let Ok(relative) = path.strip_prefix(root).or_else(|_| path.strip_prefix(&canonical)) {
+                return resolve(root, relative);
+            }
+        }
+        return Err(invalid("Absolute path is outside the registered working folders."));
+    }
+    resolve(workspace, path)
+}
+
+#[derive(Default)]
+pub(in crate::server) struct Versions {
+    observed: HashMap<PathBuf, Version>,
+    pending: HashMap<String, (PathBuf, Version)>,
+}
+
+impl Versions {
+    // Called before Pi's normal read executes. Reads of skill files, CONTEXT.md,
+    // etc. remain available but never authorize writes outside working folders.
+    pub(in crate::server) fn begin_read(&mut self, workspace: &Path, roots: &[PathBuf], id: String, path: &Path) {
+        self.pending.remove(&id);
+        let Ok(target) = target_in_roots(workspace, roots, path) else { return; };
+        let key = crate::run::path_key(&target);
+        self.observed.remove(&key);
+        if let Ok(Some(version)) = fingerprint(&target) {
+            self.pending.insert(id, (target, version));
+        }
+    }
+
+    pub(in crate::server) fn finish_read(&mut self, id: &str, succeeded: bool) {
+        let Some((target, before)) = self.pending.remove(id) else { return; };
+        let key = crate::run::path_key(&target);
+        if succeeded && fingerprint(&target).is_ok_and(|after| after == Some(before)) {
+            self.observed.insert(key, before);
+        } else {
+            self.observed.remove(&key);
+        }
+    }
+
+    pub(in crate::server) fn mutate(
+        &mut self, workspace: &Path, roots: &[PathBuf], request: &str,
+        claim: impl FnOnce(&Path) -> std::result::Result<(), String>,
+    ) -> io::Result<()> {
+        let change: Mutation = serde_json::from_str(request)?;
+        let target = target_in_roots(workspace, roots, change.path())?;
+        let key = crate::run::path_key(&target);
+        let current = fingerprint(&target)?;
+        // A previously observed file that vanished is also a stale version.
+        match (self.observed.get(&key), current) {
+            (Some(previous), Some(current)) if *previous == current => {}
+            (Some(_), _) => return Err(invalid(format!(
+                "FILE_CHANGED: {} changed since your last read. Read the current file and adapt your edits; never overwrite old contents.", target.display()
+            ))),
+            (None, Some(_)) => return Err(invalid(format!(
+                "READ_REQUIRED: {} already exists. Read it before writing or editing.", target.display()
+            ))),
+            (None, None) => {}
+        }
+        // Validate edit before claiming, so a malformed edit does not lock a file.
+        let content = match change {
+            Mutation::Write { content, .. } => content,
+            Mutation::Edit { edits, .. } => edited_content(&fs::read_to_string(&target)?, edits)?,
+        };
+        if content.len() as u64 > MAX_TRACKED_BYTES {
+            return Err(invalid("File exceeds the 32 MiB version tracking limit."));
+        }
+        claim(&target).map_err(invalid)?;
+        // No await between version check, claim, and atomic replacement.
+        // Recheck after constructing content, before replacing the entry.
+        if fingerprint(&target)? != current {
+            return Err(invalid("FILE_CHANGED: file changed during the edit. Read it again."));
+        }
+        replace_file(&target, &content, current.is_none())?;
+        // Keep the version of the bytes we wrote, not a later external edit.
+        let mut hasher = DefaultHasher::new();
+        content.as_bytes().hash(&mut hasher);
+        self.observed.insert(key, Version { hash: hasher.finish(), len: content.len() as u64 });
+        Ok(())
+    }
+}
+
+fn replace_file(target: &Path, content: &str, new: bool) -> io::Result<()> {
     let parent = target.parent().expect("file parent");
     fs::create_dir_all(parent)?;
-    let permissions = match fs::metadata(&target) {
+    let permissions = match fs::metadata(target) {
         Ok(metadata) => Some(metadata.permissions()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
@@ -160,7 +243,11 @@ pub(in crate::server) fn mutate(root: &Path, allowed: &[PathBuf], request: &str)
     if let Some(permissions) = permissions {
         file.as_file().set_permissions(permissions)?;
     }
-    file.persist(target).map_err(|error| error.error)?;
+    if new {
+        file.persist_noclobber(target).map_err(|error| error.error)?;
+    } else {
+        file.persist(target).map_err(|error| error.error)?;
+    }
     Ok(())
 }
 
@@ -207,96 +294,102 @@ fn edited_content(source: &str, edits: Vec<Replacement>) -> io::Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_changes_reserved_files_and_applies_edits_together() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let allowed = resolve_paths(root, &["src/new.txt".into()]).unwrap();
-        assert!(
-            mutate(
-                root,
-                &allowed,
-                r#"{"tool":"write","path":"other.txt","content":"no"}"#
-            )
-            .is_err()
-        );
-        assert!(
-            mutate(
-                root,
-                &allowed,
-                r#"{"tool":"write","path":"../new.txt","content":"no"}"#
-            )
-            .is_err()
-        );
-        assert!(!root.join("other.txt").exists());
-        mutate(
-            root,
-            &allowed,
-            r#"{"tool":"write","path":"src/new.txt","content":"first\r\nsecond\r\nthird\r\n"}"#,
-        )
-        .unwrap();
-        let path = root.join("src/new.txt");
-        mutate(root, &allowed, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"first\nsecond","newText":"one\ntwo"},{"oldText":"third","newText":"three"}]}"#).unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "one\r\ntwo\r\nthree\r\n"
-        );
-        assert!(mutate(root, &allowed, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"one","newText":"changed"},{"oldText":"absent","newText":"bad"}]}"#).is_err());
-        assert_eq!(fs::read_to_string(path).unwrap(), "one\r\ntwo\r\nthree\r\n");
+    fn read(versions: &mut Versions, root: &Path, path: &str) {
+        versions.begin_read(root, &[root.to_path_buf()], "read".into(), Path::new(path));
+        versions.finish_read("read", true);
+    }
+    fn mutate(versions: &mut Versions, root: &Path, request: &str) -> io::Result<()> {
+        versions.mutate(root, &[root.to_path_buf()], request, |_| Ok(()))
     }
 
     #[test]
-    fn accepts_absolute_reserved_paths_but_not_other_files() {
+    fn stale_writer_cannot_overwrite_other_agents_change() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let allowed = resolve_paths(root, &["new.txt".into()]).unwrap();
-        let request = serde_json::json!({"tool":"write","path":root.join("new.txt"),"content":"old"});
-        mutate(root, &allowed, &request.to_string()).unwrap();
-        let request = serde_json::json!({"tool":"edit","path":root.join("new.txt"),"edits":[{"oldText":"old","newText":"new"}]});
-        mutate(root, &allowed, &request.to_string()).unwrap();
-        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "new");
-        let request = serde_json::json!({"tool":"write","path":root.join("other.txt"),"content":"no"});
-        assert!(mutate(root, &allowed, &request.to_string()).is_err());
+        fs::write(root.join("file.txt"), "old").unwrap();
+        let (mut a, mut b) = (Versions::default(), Versions::default());
+        read(&mut a, root, "file.txt");
+        read(&mut b, root, "file.txt");
+        mutate(&mut b, root, r#"{"tool":"write","path":"file.txt","content":"new"}"#).unwrap();
+        let error = mutate(&mut a, root, r#"{"tool":"write","path":"file.txt","content":"stale"}"#).unwrap_err();
+        assert!(error.to_string().contains("FILE_CHANGED"));
+        assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(), "new");
+        read(&mut a, root, "file.txt");
+        mutate(&mut a, root, r#"{"tool":"edit","path":"file.txt","edits":[{"oldText":"new","newText":"merged"}]}"#).unwrap();
+        assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(), "merged");
     }
 
     #[test]
-    fn replacing_a_reserved_hard_link_does_not_change_its_other_name() {
+    fn new_files_need_no_reservation_but_existing_files_require_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (mut a, mut b) = (Versions::default(), Versions::default());
+        mutate(&mut a, root, r#"{"tool":"write","path":"src/new.txt","content":"first\r\nsecond\r\n"}"#).unwrap();
+        let error = mutate(&mut b, root, r#"{"tool":"write","path":"src/new.txt","content":"bad"}"#).unwrap_err();
+        assert!(error.to_string().contains("READ_REQUIRED"));
+        mutate(&mut a, root, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"first\nsecond","newText":"one\ntwo"}]}"#).unwrap();
+        assert_eq!(fs::read_to_string(root.join("src/new.txt")).unwrap(), "one\r\ntwo\r\n");
+        assert!(mutate(&mut a, root, r#"{"tool":"write","path":"../escape.txt","content":"bad"}"#).is_err());
+        assert!(mutate(&mut a, root, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"one","newText":"changed"},{"oldText":"absent","newText":"bad"}]}"#).is_err());
+        assert_eq!(fs::read_to_string(root.join("src/new.txt")).unwrap(), "one\r\ntwo\r\n");
+    }
+
+    #[test]
+    fn unsuccessful_or_changed_reads_do_not_authorize_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut versions = Versions::default();
+        fs::write(root.join("file"), "old").unwrap();
+        versions.begin_read(root, &[root.to_path_buf()], "read".into(), Path::new("file"));
+        fs::write(root.join("file"), "new").unwrap();
+        versions.finish_read("read", true);
+        assert!(mutate(&mut versions, root, r#"{"tool":"write","path":"file","content":"bad"}"#).is_err());
+        versions.begin_read(root, &[root.to_path_buf()], "read".into(), Path::new("file"));
+        versions.finish_read("read", false);
+        assert!(mutate(&mut versions, root, r#"{"tool":"write","path":"file","content":"bad"}"#).is_err());
+    }
+
+    #[test]
+    fn conflict_does_not_modify_file_and_absolute_other_roots_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("one");
+        let other = dir.path().join("two");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&other).unwrap();
+        let roots = [root.clone(), other.clone()];
+        let mut versions = Versions::default();
+        let path = other.join("new.txt");
+        let request = serde_json::json!({"tool":"write","path":path,"content":"new"}).to_string();
+        let error = versions.mutate(&root, &roots, &request, |_| Err("FILE_LOCKED".into())).unwrap_err();
+        assert!(error.to_string().contains("FILE_LOCKED"));
+        assert!(!path.exists());
+        versions.mutate(&root, &roots, &request, |_| Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn replacement_of_hard_link_preserves_other_name() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("original"), "old").unwrap();
         fs::hard_link(dir.path().join("original"), dir.path().join("alias")).unwrap();
-        let allowed = resolve_paths(dir.path(), &["alias".into()]).unwrap();
-        mutate(
-            dir.path(),
-            &allowed,
-            r#"{"tool":"write","path":"alias","content":"new"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("original")).unwrap(),
-            "old"
-        );
+        let mut versions = Versions::default();
+        read(&mut versions, dir.path(), "alias");
+        mutate(&mut versions, dir.path(), r#"{"tool":"write","path":"alias","content":"new"}"#).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("original")).unwrap(), "old");
         assert_eq!(fs::read_to_string(dir.path().join("alias")).unwrap(), "new");
     }
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlinks_even_if_created_after_dispatch() {
+    fn rejects_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         fs::create_dir(&root).unwrap();
         let target = dir.path().join("outside");
         fs::write(&target, "old").unwrap();
-        let allowed = resolve_paths(&root, &["alias".into()]).unwrap();
         std::os::unix::fs::symlink(&target, root.join("alias")).unwrap();
-        assert!(resolve_paths(&root, &["alias".into()]).is_err());
-        assert!(
-            mutate(
-                &root,
-                &allowed,
-                r#"{"tool":"write","path":"alias","content":"new"}"#
-            )
-            .is_err()
-        );
+        let mut versions = Versions::default();
+        assert!(mutate(&mut versions, &root, r#"{"tool":"write","path":"alias","content":"new"}"#).is_err());
         assert_eq!(fs::read_to_string(target).unwrap(), "old");
     }
 }
