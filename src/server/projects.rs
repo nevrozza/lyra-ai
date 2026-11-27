@@ -602,6 +602,7 @@ impl Store {
             Err(error) => return Err(storage(error)),
         };
         let mut pending_origin = None;
+        let mut skill_reads = SkillReads::default();
         let mut turn_model = None;
         let mut model_aliases: Option<HashMap<String, String>> = None;
         for line in BufReader::new(file).lines() {
@@ -632,6 +633,19 @@ impl Store {
                 continue;
             }
             let message = &entry["message"];
+            if dashboard && let Some(skill) = skill_reads.observe(message) {
+                if messages.len() == 100 {
+                    messages.pop_front();
+                }
+                messages.push_back(Message {
+                    role: "notice",
+                    text: format!("Использован скилл: {skill}"),
+                    thinking: None,
+                    model: None,
+                    origin: None,
+                    request_id: None,
+                });
+            }
             let role = match message["role"].as_str() {
                 Some("user") => "user",
                 Some("assistant") => "assistant",
@@ -728,6 +742,49 @@ impl Store {
             messages.push_back(message);
         }
         Ok(messages)
+    }
+}
+
+// Pi exposes skill descriptions in its prompt and reads the actual SKILL.md
+// through its normal read tool. Match the persisted call to its successful result
+// so failed reads and mere mentions never create a dashboard notice.
+#[derive(Default)]
+struct SkillReads {
+    pending: HashMap<String, String>,
+}
+
+impl SkillReads {
+    fn observe(&mut self, message: &Value) -> Option<String> {
+        match message["role"].as_str()? {
+            "user" => self.pending.clear(),
+            "assistant" => {
+                for part in message["content"].as_array().into_iter().flatten() {
+                    if part["type"] != "toolCall" || part["name"] != "read" {
+                        continue;
+                    }
+                    let Some(id) = part["id"].as_str() else { continue };
+                    let Some(path) = part["arguments"]["path"].as_str() else { continue };
+                    // Both native Windows paths and forward-slash paths occur in Pi calls.
+                    let mut parts = path.rsplit(['/', '\\']);
+                    if !parts.next().is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md")) {
+                        continue;
+                    }
+                    if let Some(name) = parts.next().filter(|name| {
+                        !name.is_empty() && *name != "." && *name != ".."
+                    }) {
+                        self.pending.insert(id.to_owned(), name.to_owned());
+                    }
+                }
+            }
+            "toolResult" => {
+                let skill = self.pending.remove(message["toolCallId"].as_str()?)?;
+                if message["toolName"] == "read" && message["isError"] == false {
+                    return Some(skill);
+                }
+            }
+            _ => {}
+        }
+        None
     }
 }
 
@@ -872,6 +929,25 @@ fn storage(error: impl std::fmt::Display) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_notices_follow_successful_reads_only() {
+        let mut reads = SkillReads::default();
+        let call = serde_json::json!({"role":"assistant","content":[
+            {"type":"text","text":"Use a skill"},
+            {"type":"toolCall","id":"a","name":"read","arguments":{"path":r"C:\skills\ast-index\SKILL.md"}},
+            {"type":"toolCall","id":"b","name":"read","arguments":{"path":"/skills/review/SKILL.md"}},
+            {"type":"toolCall","id":"c","name":"read","arguments":{"path":"/skills/review/reference.md"}}
+        ]});
+        assert_eq!(reads.observe(&call), None);
+        let result = |id: &str, error: bool| serde_json::json!({
+            "role":"toolResult","toolCallId":id,"toolName":"read","isError":error
+        });
+        assert_eq!(reads.observe(&result("b", true)), None);
+        assert_eq!(reads.observe(&result("c", false)), None);
+        assert_eq!(reads.observe(&result("a", false)).as_deref(), Some("ast-index"));
+        assert_eq!(reads.observe(&result("a", false)), None);
+    }
 
     #[test]
     fn project_chat_modes_default_to_work_and_are_saved_per_session() {
