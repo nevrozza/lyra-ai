@@ -65,6 +65,6 @@ Read `structuredContent.context` for a direct Pi run and `result.context` for a 
 
 1. Keep the chat when its history still helps. Inspect the same model at a larger window, then retry with explicit `context_tokens` and a short continuation.
 2. Start a fresh chat when the useful state is small or a larger window is a poor fit. Carry over the goal, constraints, existing changes, remaining work, and checks. Have the worker inspect current files before repeating edits.
-3. For queued work, use `retry_project_task` for either path. Its original task ID still owns the dependencies and write scope. A fresh retry returns the new transcript's `chat_session_id`.
+3. For queued work, use `retry_project_task` for either path. Its original task ID still owns the dependencies and file-lock rules. A fresh retry returns the new transcript's `chat_session_id`.
 
 Read [the recovery procedure](references/models-and-context.md#recover-an-overflow) for the exact calls and how to distinguish a full window from an exhausted output budget.
