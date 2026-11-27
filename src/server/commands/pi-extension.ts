@@ -57,6 +57,24 @@ export default function (pi) {
         }
     }
     if (!textOnly) {
+        const completionDescription = "Confirm the assigned task's actual outcome after checking the original requirements and available evidence. Use completed only when required work is actually done; use blocked when essential work or verification cannot be completed. Call this as your last tool, then return the requested final handoff (including JSON if required).";
+        guardedDescriptions.set("finish_task", completionDescription);
+        pi.registerTool({
+            name: "finish_task", label: "Confirm task outcome", description: completionDescription,
+            parameters: Type.Object({
+                status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")]),
+                summary: Type.String({ minLength: 1, maxLength: 2000, description: "Concrete outcome and checks actually performed, or the remaining blocker; not a promise of future work." }),
+            }),
+            promptSnippet: "Confirm completed or blocked after checking the assignment, then return the requested final answer.",
+            executionMode: "sequential",
+            async execute(_id, args, signal, _onUpdate, ctx) {
+                const value = await ctx.ui.input("lyra:finish-task", JSON.stringify(args), { signal });
+                if (value === undefined) throw new Error("Lyra did not return a completion result");
+                const result = JSON.parse(value);
+                if (!result.ok) throw new Error(result.message);
+                return { content: [{ type: "text", text: "Outcome recorded. Return your final handoff now, using the requested format. If more tools are needed, confirm the outcome again afterward." }], details: result };
+            },
+        });
         const description = "Load the instructions of an available Lyra skill by exact name, without guessing its file path. Returns SKILL.md text and the real package directory for referenced resources.";
         guardedDescriptions.set("load_skill", description);
         pi.registerTool({
@@ -128,7 +146,7 @@ export default function (pi) {
             });
         }
     }
-    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill"];
+    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill", "finish_task"];
     const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir"] : [])];
     async function verifyTools() {
         await pi.setActiveTools(expected);
@@ -191,7 +209,18 @@ export default function (pi) {
             return { messages: conversationContext(messages, promptTimestamp, textOnly) };
         });
     }
-    pi.on("agent_end", (_event, ctx) => ctx.shutdown());
+    pi.on("agent_end", async (_event, ctx) => {
+        if (textOnly) { ctx.shutdown(); return; }
+        // Rust owns the completion decision and retry budget. Only keep Pi
+        // alive if the host explicitly requests a continuation.
+        const decision = await ctx.ui.input("lyra:completion-check", "");
+        if (decision !== "continue") {
+            ctx.shutdown();
+            ctx.ui.notify("lyra:completion-terminal");
+        } else {
+            ctx.ui.notify("lyra:completion-continue");
+        }
+    });
 }
 
 function conversationContext(messages, promptTimestamp, textOnly) {
