@@ -84,7 +84,12 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-system-link:hover { color: var(--accent); }
 .project-split { display: grid; grid-template-columns: minmax(205px, 24%) minmax(0, 1fr); min-height: min(570px, 75dvh); }
 .project-sidebar { display: grid; grid-template-rows: auto auto minmax(0, 1fr); align-content: start; gap: 14px; min-width: 0; padding: 16px 12px; border-right: 1px solid var(--line); border-radius: 0 0 0 12px; background: #141a17; }
-.project-sidebar nav { max-height: 520px; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+.project-sidebar nav { min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+@media (min-width: 721px) {
+  /* The chat column determines the row height. The tree fills the remaining
+     sidebar space without its contents making the entire workspace taller. */
+  .project-sidebar nav { contain: size; align-self: stretch; }
+}
 .project-new { justify-self: stretch; text-align: left; padding: 9px 11px; }
 .project-filters { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; }
 .project-filters button { flex: 1; min-width: 0; padding: 5px; border-radius: 5px; background: transparent; color: var(--muted); font-size: .77rem; }
