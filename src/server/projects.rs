@@ -773,6 +773,11 @@ impl Store {
             }
             let message = &entry["message"];
             if dashboard && let Some(skill) = skill_reads.observe(message) {
+                // Keep failed explicit loads visible as tool cards; successful loads become notices.
+                if message["toolName"] == "load_skill" {
+                    messages.retain(|entry| !entry.tool.as_ref().is_some_and(|tool|
+                        tool.name == "load_skill" && message["toolCallId"].as_str() == Some(tool.id.as_str())));
+                }
                 if messages.len() == 100 {
                     messages.pop_front();
                 }
@@ -963,7 +968,7 @@ fn skill_read_name(part: &Value) -> Option<&str> {
 
 fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestamp: Option<u64>) {
     for part in content.as_array().into_iter().flatten() {
-        if part["type"] != "toolCall" || skill_read_name(part).is_some() {
+        if part["type"] != "toolCall" || (part["name"] == "read" && skill_read_name(part).is_some()) {
             continue;
         }
         let (Some(id), Some(name)) = (part["id"].as_str(), part["name"].as_str()) else {
@@ -1343,6 +1348,21 @@ mod tests {
         assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
         assert_eq!(messages[0].tool.as_ref().unwrap().finished_at, Some(2000));
         assert_eq!(messages[0].tool.as_ref().unwrap().result.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn explicit_skill_load_notices_require_success() {
+        let mut reads = SkillReads::default();
+        let call = serde_json::json!({"role":"assistant","content":[
+            {"type":"toolCall","id":"a","name":"load_skill","arguments":{"name":"canvas-design"}},
+            {"type":"toolCall","id":"b","name":"load_skill","arguments":{"name":"missing"}}
+        ]});
+        assert_eq!(reads.observe(&call), None);
+        let result = |id: &str, error: bool| serde_json::json!({
+            "role":"toolResult","toolCallId":id,"toolName":"load_skill","isError":error
+        });
+        assert_eq!(reads.observe(&result("b", true)), None);
+        assert_eq!(reads.observe(&result("a", false)).as_deref(), Some("canvas-design"));
     }
 
     #[test]
