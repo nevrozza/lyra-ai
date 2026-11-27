@@ -301,13 +301,15 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
+                "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing group in this project."},
+                "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a named group; mutually exclusive with group_id."},
                 "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default."},
                 "search_skill": {"type": ["string", "null"], "description": "Installed Lyra skill to prefer for project searches, such as ast-index."}
             }, "required": ["name", "folders"], "additionalProperties": false}
         },
         {
             "name": "create_project_session",
-            "description": "Create a saved Pi chat in a project.",
+            "description": "Create a saved Pi chat in a project, optionally in a named task group.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
@@ -327,10 +329,12 @@ fn tools() -> Value {
         },
         {
             "name": "enqueue_project_tasks",
-            "description": "Queue a batch of project steps with optional dependencies and parallel file scopes.",
+            "description": "Queue project steps in an optional named group with dependencies and parallel file scopes. Multi-step batches and automatic workflows are grouped by default.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
+                "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing task group in this project across batches."},
+                "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a group named for the overall task. Mutually exclusive with group_id."},
                 "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": queue_task}
             }, "required": ["project_id", "tasks"], "additionalProperties": false}
         },
@@ -340,6 +344,7 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "task_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                "group_id": {"type": "integer", "minimum": 1, "description": "Filter tasks by their group ID."},
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 25, "default": 0, "description": "Maximum wait for completion or a context pause."}
             }, "required": ["project_id"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
