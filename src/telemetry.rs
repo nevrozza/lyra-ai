@@ -26,6 +26,10 @@ pub struct Metrics {
     pub(crate) models: Option<Vec<Model>>,
     installed_models: Option<Vec<String>>,
     pub(crate) model_sizes: Option<BTreeMap<String, u64>>,
+    #[serde(skip_serializing)]
+    pub(crate) model_digests: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing)]
+    pub(crate) ollama_version: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -37,6 +41,8 @@ pub(crate) struct Memory {
 #[derive(Clone, Serialize)]
 pub(crate) struct Gpu {
     pub(crate) name: String,
+    pub(crate) uuid: String,
+    pub(crate) driver_version: String,
     pub(crate) load: Option<u8>,
     pub(crate) vram: Option<Memory>,
     temperature: Option<u8>,
@@ -76,21 +82,20 @@ impl Cache {
         );
         self.previous_cpu = local.cpu;
 
-        let (models, catalog, gpus) = tokio::join!(
+        let (models, catalog, gpus, version) = tokio::join!(
             tokio::task::spawn_blocking(ollama::running_models),
-            tokio::task::spawn_blocking(ollama::model_catalog),
+            tokio::task::spawn_blocking(ollama::model_catalog_details),
             nvidia(),
+            tokio::task::spawn_blocking(ollama::server_version),
         );
         let catalog = catalog.ok().flatten();
         let installed_models: Option<Vec<_>> = catalog
             .as_ref()
             .map(|models| models.keys().cloned().collect());
-        let model_sizes = catalog.map(|models| {
-            models
-                .into_iter()
-                .filter_map(|(name, size)| size.map(|bytes| (name, bytes)))
-                .collect()
-        });
+        let model_digests = catalog.as_ref().map(|models| models.iter()
+            .filter_map(|(name, (_, digest))| Some((name.clone(), digest.clone()?))).collect());
+        let model_sizes = catalog.map(|models| models.into_iter()
+            .filter_map(|(name, (size, _))| size.map(|bytes| (name, bytes))).collect());
         let mut models = models.ok().flatten();
         if let (Some(loaded), Some(installed)) = (&mut models, &installed_models) {
             let aliases: std::collections::HashMap<_, _> = installed
@@ -116,17 +121,19 @@ impl Cache {
             models,
             installed_models,
             model_sizes,
+            model_digests,
+            ollama_version: version.ok().flatten(),
         };
         self.snapshot = Some((Instant::now(), metrics.clone()));
         metrics
     }
 }
 
-async fn nvidia() -> Vec<Gpu> {
+pub(crate) async fn nvidia() -> Vec<Gpu> {
     let mut probe = Command::new("nvidia-smi");
     probe
         .args([
-            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu,uuid,driver_version",
             "--format=csv,noheader,nounits",
         ])
         .stdin(Stdio::null())
@@ -143,7 +150,7 @@ async fn nvidia() -> Vec<Gpu> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let [name, load, used, total, temperature] = line
+            let [name, load, used, total, temperature, uuid, driver_version] = line
                 .split(',')
                 .map(str::trim)
                 .collect::<Vec<_>>()
@@ -159,6 +166,8 @@ async fn nvidia() -> Vec<Gpu> {
                     });
             Some(Gpu {
                 name: name.into(),
+                uuid: uuid.into(),
+                driver_version: driver_version.into(),
                 load: load.parse().ok(),
                 vram,
                 temperature: temperature.parse().ok(),
