@@ -267,6 +267,7 @@ pub(in crate::server) fn mutate(
     let target = target_path(roots, root, change.path(), directory)?;
     // An existing directory is a no-op, not an exclusive reservation of its subtree.
     if directory && target.is_dir() {
+        versions.conflicts.remove(&crate::run::path_key(&target));
         return Ok(());
     }
     // All cooperating Lyra writers acquire this lock before the version check.
