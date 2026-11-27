@@ -82,7 +82,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 #project-tree button { min-width: 0; box-sizing: border-box; }
 #project-tree button > span:first-child { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #project-tree .project-tree-status { flex-shrink: 0; margin-left: auto; }
-#project-tree .project-tree-error { flex: 0 0 13px; width: 13px; text-align: center; color: #f0a09a; font-size: 1.15rem; line-height: 13px; }
+#project-tree .project-tree-error { flex: 0 0 13px; width: 13px; text-align: center; color: #b0807c; font-size: 1rem; line-height: 13px; }
 #project-tree .project-tree-done { flex: 0 0 13px; width: 13px; text-align: center; color: #829987; font-size: .84rem; line-height: 13px; }
 #project-tree .project-group-chevron { flex: 0 0 10px; text-align: center; }
 #project-tree button.project-group-heading { color: #d7e2d3; font-weight: 550; }
