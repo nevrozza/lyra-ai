@@ -15,28 +15,71 @@ function currentChoice(settings) {
 
 export function createThinkingControl() {
   const button = get('chat-thinking');
-  const dialog = get('chat-thinking-dialog');
-  const form = get('chat-thinking-form');
+  const buttonLabel = get('chat-thinking-label');
+  const popover = get('chat-thinking-popover');
   const options = get('chat-thinking-options');
   const feedback = get('chat-thinking-feedback');
-  const save = get('save-chat-thinking');
-  const cancel = get('cancel-chat-thinking');
   let model;
   let dashboardModel;
   let revision;
   let requestId = 0;
   let settings;
-  let editingModel;
   let saving = false;
+  let optionsKey;
+
+  function isOpen() {
+    return popover.matches(':popover-open');
+  }
+
+  function close() {
+    if (isOpen()) popover.hidePopover();
+  }
+
+  function position() {
+    if (!isOpen()) return;
+    const rect = button.getBoundingClientRect();
+    const width = popover.offsetWidth;
+    const height = popover.offsetHeight;
+    const top = rect.top >= height + 12 ? rect.top - height - 4 : rect.bottom + 4;
+    popover.style.left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) + 'px';
+    popover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
+  }
+
+  function report(text = '') {
+    feedback.textContent = text;
+    feedback.hidden = !text;
+    position();
+  }
 
   function render() {
     button.hidden = !settings?.options.length;
     button.disabled = saving;
-    const label = settings && labelFor(currentChoice(settings));
-    button.textContent = label ? `Thinking · ${label}` : 'Thinking';
-    save.disabled = saving || !model || !options.querySelector(':checked');
-    cancel.disabled = saving;
-    options.querySelectorAll('input').forEach(input => { input.disabled = saving; });
+    if (button.hidden) close();
+    const selected = settings && currentChoice(settings);
+    const label = labelFor(selected);
+    buttonLabel.textContent = label ? `Thinking · ${label}` : 'Thinking';
+    get('chat-thinking-name').textContent = model ?? '';
+    get('chat-thinking-note').hidden = !settings?.off_uses_lowest;
+    const key = JSON.stringify(settings?.options ?? []);
+    if (key !== optionsKey) {
+      optionsKey = key;
+      options.replaceChildren(...(settings?.options ?? []).map(think => {
+        const choice = element('button', '');
+        choice.type = 'button';
+        choice.dataset.think = JSON.stringify(think);
+        const check = element('span', '✓');
+        check.className = 'terminal-check';
+        check.setAttribute('aria-hidden', 'true');
+        choice.append(element('span', labelFor(think)), check);
+        choice.addEventListener('click', () => void change(think));
+        return choice;
+      }));
+    }
+    for (const choice of options.querySelectorAll('button')) {
+      choice.disabled = saving;
+      choice.setAttribute('aria-pressed', String(choice.dataset.think === JSON.stringify(selected)));
+    }
+    position();
   }
 
   async function readSettings(name) {
@@ -61,38 +104,34 @@ export function createThinkingControl() {
   }
 
   button.onclick = () => {
-    editingModel = model;
-    const selected = currentChoice(settings);
-    options.replaceChildren(...settings.options.map(think => {
-      const input = element('input', '');
-      input.type = 'radio';
-      input.name = 'think';
-      input.value = JSON.stringify(think);
-      input.checked = think === selected;
-      input.autofocus = input.checked;
-      const label = element('label', '');
-      label.className = 'pin';
-      label.append(input, labelFor(think));
-      return label;
-    }));
-    get('chat-thinking-name').textContent = editingModel;
-    get('chat-thinking-note').hidden = !settings.off_uses_lowest;
-    feedback.textContent = '';
+    if (button.disabled || !settings?.options.length) return;
+    if (isOpen()) {
+      close();
+      return;
+    }
+    report();
     render();
-    dialog.showModal();
+    popover.showPopover({ source: button });
+    position();
+    (options.querySelector('[aria-pressed="true"]:not(:disabled)')
+      ?? options.querySelector('button:not(:disabled)'))?.focus({ preventScroll: true });
   };
 
-  form.onchange = render;
-  cancel.onclick = () => dialog.close();
-  dialog.oncancel = event => {
-    if (saving) event.preventDefault();
-  };
-  form.onsubmit = async event => {
-    event.preventDefault();
-    if (save.disabled) return;
-    const think = JSON.parse(new FormData(form).get('think'));
+  popover.addEventListener('toggle', () => {
+    button.setAttribute('aria-expanded', String(isOpen()));
+  });
+  window.addEventListener('resize', position);
+  window.addEventListener('scroll', position, true);
+
+  async function change(think) {
+    if (saving || !model || !settings?.options.includes(think)) return;
+    if (think === currentChoice(settings)) {
+      close();
+      return;
+    }
+    const editingModel = model;
     saving = true;
-    feedback.textContent = '';
+    report();
     render();
     try {
       const response = await postModel('/model/thinking', dashboardModel, { think }, editingModel);
@@ -100,31 +139,36 @@ export function createThinkingControl() {
         throw new Error(response.status === 400 ? 'Модель больше не поддерживает этот уровень.' :
           modelResponseError(response));
       }
-      if (editingModel === model && settings) {
-        requestId++;
-        settings.think = think;
+      if (editingModel === model) {
+        if (settings) {
+          requestId++;
+          settings.think = think;
+        } else {
+          void readSettings(model);
+        }
+        close();
       }
-      dialog.close();
     } catch (error) {
-      feedback.textContent = error.message;
+      if (editingModel === model) report(error.message);
     } finally {
       saving = false;
       render();
     }
-  };
+  }
 
   return {
     update(next, run) {
       dashboardModel = run?.model;
       if (next === model && revision === run?.benchmark_revision) return;
       if (next !== model) {
+        close();
         settings = undefined;
-        if (dialog.open && !saving) dialog.close();
+        report();
       }
       model = next;
       revision = run?.benchmark_revision;
       render();
-      readSettings(model);
+      void readSettings(model);
     },
   };
 }

@@ -95,7 +95,7 @@
               <label class="project-model-label" for="project-chat-model">Модель
                 <select id="project-chat-model"></select>
               </label>
-              <button id="chat-thinking" class="unload" type="button" aria-haspopup="dialog" aria-controls="chat-thinking-dialog" hidden>Thinking</button>
+              <button id="chat-thinking" class="unload" type="button" aria-expanded="false" aria-controls="chat-thinking-popover" hidden><span id="chat-thinking-label">Thinking</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
               <button id="send-project-prompt" type="submit">Отправить</button>
             </div>
           </form>
@@ -120,19 +120,13 @@
           <p id="command-notification-status" class="secondary" role="status" hidden></p>
         </div>
       </div>
-      <dialog id="chat-thinking-dialog" class="project-dialog chat-thinking-dialog" aria-labelledby="chat-thinking-title">
-        <form id="chat-thinking-form" class="project-form">
-          <h3 id="chat-thinking-title">Thinking</h3>
-          <p id="chat-thinking-name" class="secondary"></p>
-          <div id="chat-thinking-options" role="radiogroup" aria-label="Уровень thinking"></div>
-          <p id="chat-thinking-note" class="secondary" hidden>Для этой модели Off использует минимальный уровень thinking.</p>
-          <p id="chat-thinking-feedback" class="project-feedback" data-error="true" role="status"></p>
-          <div class="project-controls project-dialog-actions">
-            <button id="cancel-chat-thinking" class="unload" type="button">Отмена</button>
-            <button id="save-chat-thinking" type="submit">Сохранить</button>
-          </div>
-        </form>
-      </dialog>
+      <div id="chat-thinking-popover" class="terminal-popover" popover="auto" role="group" aria-labelledby="chat-thinking-title">
+        <p id="chat-thinking-title" class="secondary">Thinking</p>
+        <p id="chat-thinking-name" class="secondary"></p>
+        <div id="chat-thinking-options" class="terminal-options" role="group" aria-label="Уровень thinking"></div>
+        <p id="chat-thinking-note" class="secondary" hidden>Для этой модели Off использует минимальный уровень thinking.</p>
+        <p id="chat-thinking-feedback" class="secondary" role="status" hidden></p>
+      </div>
       <dialog id="project-task-dialog" class="project-dialog" aria-labelledby="project-task-title">
         <form id="project-task-form" class="project-form">
           <h3 id="project-task-title">Новая задача</h3>
