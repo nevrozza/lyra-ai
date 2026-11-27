@@ -472,6 +472,10 @@ impl Snapshot {
         self.skills_revision += 1;
     }
 
+    pub fn projects_revision(&self) -> u64 {
+        self.projects_revision
+    }
+
     pub fn projects_changed(&mut self) {
         self.projects_revision += 1;
     }
