@@ -167,18 +167,12 @@ pub(super) fn add_candidates(
     candidates: &[Candidate],
     metrics: &crate::telemetry::Metrics,
     reviewer: &str,
-    preferred_fix: Option<&str>,
+    intelligence: &crate::server::ai_settings::ProjectModels,
 ) {
     use std::fmt::Write;
     let models = serde_json::to_string(candidates).expect("serialize model shortlist");
-    if let Some(preferred) =
-        preferred_fix.filter(|name| candidates.iter().any(|candidate| candidate.model == *name))
-    {
-        let _ = write!(
-            prompt,
-            "\nConfigured fix model preference: {preferred}. Use it when it fits the finding, memory and review scope.\n"
-        );
-    }
+    let levels = serde_json::to_string(intelligence).expect("serialize intelligence levels");
+    let _ = write!(prompt, "\nConfigured model intelligence (low/medium/high): {levels}. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability.\n");
     let system = serde_json::json!({
         "cpu_percent": metrics.cpu_percent,
         "ram": metrics.ram,
@@ -536,7 +530,7 @@ Return only one JSON object as the final answer:
 {{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"one concrete problem, at most 360 characters","check":"one focused acceptance check, at most 240 characters","model":"exact installed model tag","write_paths":["src/file.ext"],"after":[]}}]}}
 {{"status":"blocked","reason":"why the check cannot be completed, at most 360 characters"}}
 For each finding, list every file it may edit in write_paths, using forward-slash paths relative to the primary working folder. Lyra can run fixes with independent files in parallel and reviews the combined result only after all fixes succeed. Use after for findings whose results are prerequisites, referring to earlier findings by one-based position. When the scope is unknown or the fix requires shell writes, omit write_paths so that fix runs exclusively. Scoped fix steps use write and edit and leave command checks to the next review.
-Use pass only after covering the full task diff and confirming the acceptance criteria. For each fix, choose from the provided list and honor any model restrictions in the review scope. Prefer a medium model for fixes that require reasoning about behavior. Use a light model for mechanical fixes when permitted. Prefer a model with a passed Pi check when available. Use blocked if you cannot cover the full change or complete a necessary check. Keep the whole report compact, without source excerpts.
+Use pass only after covering the full task diff and confirming the acceptance criteria. For each fix, choose from the provided list and honor any model restrictions in the review scope. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability. Prefer a model with a passed Pi check when available. Use blocked if you cannot cover the full change or complete a necessary check. Keep the whole report compact, without source excerpts.
 
 Review scope and acceptance criteria:
 {scope}"#

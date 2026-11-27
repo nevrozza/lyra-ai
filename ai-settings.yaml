@@ -10,8 +10,8 @@ maximum_output_tokens: 2048
 parallel_project_tasks: 2
 parallel_project_models: 1
 
-# Начальные предпочтения оркестратора. Их можно менять в дашборде без пересборки.
+# Начальные уровни интеллекта моделей. Их можно менять в дашборде без пересборки.
 project_models:
-  implement: null
-  fix: null
-  review: null
+  medium: null
+  low: null
+  high: null

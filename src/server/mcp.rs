@@ -1251,7 +1251,8 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
             output,
             "\n{}",
             json!({
-                "project_models": app.project_models.get().await,
+                "model_intelligence": app.project_models.get().await,
+                "model_selection_policy": "Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability.",
                 "parallel_project_tasks": AI_SETTINGS.parallel_project_tasks,
                 "parallel_project_models": AI_SETTINGS.parallel_project_models,
             })
