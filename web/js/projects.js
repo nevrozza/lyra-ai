@@ -18,28 +18,23 @@ export function compareTreeChats(a, b) {
   return (b.group?.id ?? b.id) - (a.group?.id ?? a.id) || a.id - b.id;
 }
 
-// Preserve chronological order: tool runs, thinking-only turns and skill
-// notices can share a compact activity block, but never cross visible messages.
-function isActivity(message) {
-  return Boolean(message.tool || (message.role === 'assistant' && !message.text && message.thinking)
-    || (message.role === 'notice' && message.text?.startsWith('Использован скилл: ')));
-}
-
+// Group consecutive tool calls only; preserve thinking and notices in place.
 export function groupChatHistory(entries) {
   const blocks = [];
-  let activity;
+  let tools = [];
+  const flush = () => {
+    if (tools.length === 1) blocks.push({ kind: 'tool', message: tools[0] });
+    else if (tools.length > 1) blocks.push({ kind: 'activity', entries: tools });
+    tools = [];
+  };
   for (const message of entries) {
-    if (isActivity(message)) {
-      if (!activity) {
-        activity = { kind: 'activity', entries: [] };
-        blocks.push(activity);
-      }
-      activity.entries.push(message);
-    } else {
-      activity = undefined;
+    if (message.tool) tools.push(message);
+    else {
+      flush();
       blocks.push({ kind: 'message', message });
     }
   }
+  flush();
   return blocks;
 }
 
@@ -747,23 +742,15 @@ export function createProjects({ onSelection = () => {} } = {}) {
     return node;
   }
 
-  function renderActivity(block, index, active) {
+  function renderActivity(block, active) {
     const item = element('li', '');
     item.dataset.role = 'activity';
     const entries = block.entries;
-    const tools = entries.filter(entry => entry.tool);
-    const skills = entries.filter(entry => entry.role === 'notice');
-    const count = tools.length + skills.length;
-    const first = entries[0];
-    const key = 'activity:' + (first.tool?.id ?? `${first.timestamp ?? 'unknown'}:${index}`);
+    const tools = entries;
+    const count = tools.length;
+    const key = 'activity:' + tools[0].tool.id;
     item.dataset.historyKey = key;
     item.dataset.historyContent = JSON.stringify(entries);
-    if (!count) {
-      for (const [i, message] of entries.entries()) {
-        item.append(thinkingDetail(message, key + ':thinking:' + i));
-      }
-      return item;
-    }
     const summary = element('summary', '');
     const name = element('span', `Действия · ${count}`);
     name.className = 'project-activity-label';
@@ -781,15 +768,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     node.dataset.initialOpen = String(node.open);
     const rows = element('div', '');
     rows.className = 'project-activity-rows';
-    for (const [i, message] of entries.entries()) {
-      if (message.tool) rows.append(toolDetail(message));
-      else if (message.thinking) rows.append(thinkingDetail(message, key + ':thinking:' + i));
-      else {
-        const skill = element('p', message.text);
-        skill.className = 'project-activity-skill';
-        rows.append(skill);
-      }
-    }
+    for (const message of tools) rows.append(toolDetail(message));
     node.append(rows);
     item.append(node);
     return item;
@@ -832,9 +811,23 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const blocks = groupChatHistory(entries);
     const working = Boolean(chatRun(chatId));
     const nextItems = blocks.map((block, index) => {
-      if (block.kind === 'activity') return renderActivity(block, index, working && index === blocks.length - 1);
+      if (block.kind === 'activity') return renderActivity(block, working && index === blocks.length - 1);
       const message = block.message;
       const item = element('li', '');
+      if (block.kind === 'tool') {
+        item.dataset.role = 'tool';
+        item.dataset.historyKey = 'activity:' + message.tool.id;
+        item.dataset.historyContent = JSON.stringify([message]);
+        item.append(toolDetail(message));
+        return item;
+      }
+      if (message.role === 'assistant' && !message.text && message.thinking) {
+        item.dataset.role = 'thinking';
+        item.dataset.historyKey = `thinking:${message.timestamp ?? 'unknown'}:${index}`;
+        item.dataset.historyContent = JSON.stringify(message);
+        item.append(thinkingDetail(message, item.dataset.historyKey));
+        return item;
+      }
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
       item.dataset.historyKey = message.request_id ? 'request:' + message.request_id
