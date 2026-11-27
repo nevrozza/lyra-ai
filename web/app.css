@@ -56,15 +56,15 @@ h2 { font-size: .96rem; font-weight: 650; }
 #skill-selection { overflow-wrap: anywhere; }
 #skill-result:empty, #skill-catalog-message:empty, #skill-catalog:empty, #agents-result:empty { display: none; }
 #skill-result[data-error="true"], #agents-result[data-error="true"] { color: #f0ac9c; }
-#skill-catalog { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
-#skill-catalog li { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-#skill-catalog code { font-size: .83rem; min-width: 0; overflow-wrap: anywhere; }
+:is(#skill-catalog, #builtin-skill-catalog) { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+:is(#skill-catalog, #builtin-skill-catalog) li { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+:is(#skill-catalog, #builtin-skill-catalog) code { font-size: .83rem; min-width: 0; overflow-wrap: anywhere; }
 .skill-entry-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .skill-entry-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-left: auto; }
 .skill-enable { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: .75rem; cursor: pointer; }
 .skill-enable input { accent-color: var(--accent); }
 #skill-catalog .skill-remove { font-size: .73rem; padding: 4px 7px; color: #b0807c; }
-#skill-catalog li[data-enabled="false"] > .secondary, #skill-catalog li[data-enabled="false"] code { opacity: .65; }
+:is(#skill-catalog, #builtin-skill-catalog) li[data-enabled="false"] > .secondary, :is(#skill-catalog, #builtin-skill-catalog) li[data-enabled="false"] code { opacity: .65; }
 #agents-form { margin-top: 5px; padding-top: 12px; border-top: 1px solid var(--line); }
 #agents-form label { font-size: .88rem; font-weight: 650; }
 #agents-content { width: 100%; resize: vertical; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: .83rem/1.5 var(--mono); }
@@ -432,3 +432,9 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 @media (max-width: 420px) {
   .gpu { grid-template-columns: 1fr; }
 }
+
+.builtin-skills { border-top: 1px solid var(--line); padding: 9px 0; }
+.builtin-skills summary { color: var(--muted); font-size: .83rem; cursor: pointer; }
+.builtin-skills summary:hover { color: var(--accent); }
+.builtin-skills[open] summary { margin-bottom: 8px; }
+.builtin-skills summary .secondary { margin-left: 3px; }
