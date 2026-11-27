@@ -16,6 +16,7 @@ export default function (pi) {
     }
     let earlierMessages = [];
     let promptTimestamp;
+    let completionFollowUp = false;
     const guardedDescriptions = new Map();
     if (guardedWrite) {
         const path = Type.String({ description: "Exact file path, relative to the primary working folder or absolute" });
@@ -178,11 +179,12 @@ export default function (pi) {
             if (message.role === "user") {
                 promptTimestamp = message.timestamp;
                 pi.appendEntry("lyra-message-origin", {
-                    origin,
+                    origin: completionFollowUp ? "lyra" : origin,
                     messageTimestamp: message.timestamp,
-                    requestId: process.env.LYRA_MESSAGE_REQUEST_ID,
+                    requestId: completionFollowUp ? undefined : process.env.LYRA_MESSAGE_REQUEST_ID,
                     model: process.env.LYRA_CHAT_MODEL,
                 });
+                completionFollowUp = false;
             }
         });
         let reportedNearLimit = false;
@@ -218,6 +220,7 @@ export default function (pi) {
             ctx.shutdown();
             ctx.ui.notify("lyra:completion-terminal");
         } else {
+            completionFollowUp = true;
             ctx.ui.notify("lyra:completion-continue");
         }
     });
