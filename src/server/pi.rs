@@ -363,6 +363,12 @@ pub(super) async fn run(
             Some("extension_ui_request") if commands.is_some() => {
                 let stdin = stdin.as_mut().expect("Pi RPC input");
                 match event["method"].as_str() {
+                    Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:tools-error:")) => {
+                        return Err(event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:tools-error:").to_owned());
+                    }
+                    Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:active-tools:")) => {
+                        log(Kind::Pi, "Active tools", event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:active-tools:"), Some("ok"));
+                    }
                     Some("notify") if event["message"] == "lyra:context-near-limit" => {
                         report_context(task.as_ref(), ContextNotice::NearLimit);
                     }
@@ -766,6 +772,10 @@ async fn write_project_instructions(
     }
     if task.text_only {
         text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
+    } else if matches!(task.role, Some(Role::Review)) {
+        text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write and edit tools are intentionally unavailable. Report fixes instead of editing.\n");
+    } else {
+        text.push_str("\nWork mode: use the write tool to create or replace files and the edit tool for targeted edits. Use the exact path and the tool's advertised argument schema.\n");
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
@@ -897,9 +907,10 @@ fn spawn_pi(
         } else {
             let tools = if reviewing {
                 "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
-            } else if scoped_write {
-                "read,grep,find,ls,run_command"
             } else if extension.is_some() {
+                // Pi's --tools is an allowlist for extension tools as well as built-ins.
+                // For scoped runs the extension overrides write/edit with guarded tools
+                // and verifies the overrides before accepting the prompt.
                 "read,grep,find,ls,write,edit,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
