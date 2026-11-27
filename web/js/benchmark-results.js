@@ -1,4 +1,4 @@
-import { contextLabel } from './context-settings.js';
+import { contextLabel, markBenchmarkSelection } from './context-settings.js';
 import { element, get, memoryAmount, oneDecimal, whole } from './ui.js';
 
 const elapsed = (ms) => ms == null ? '—' : ms < 1000 ? `${oneDecimal.format(ms)} мс` : `${oneDecimal.format(ms / 1000)} с`;
@@ -62,12 +62,14 @@ export function renderBenchmark(record, message) {
   const points = profile?.points ?? [];
   get('benchmark-profile-note').textContent = !profile ? '' : points.length === 0
     ? 'Замеры прервались до первой точки. Причина в диагностике.'
-    : 'В таблице — пиковая память раннера по холодному замеру. Auto сравнивает её с доступным бюджетом.';
+    : 'Auto сравнивает замеры с бюджетом VRAM и пропускает окна с падением скорости генерации на 30% и больше.';
   get('benchmark-profile-diagnostics').hidden = !profile?.stopped_reason;
   get('benchmark-profile-reason').textContent = profile?.stopped_reason ?? '';
   get('benchmark-profile-results').replaceChildren(...points.map(point => {
     const row = document.createElement('tr');
     const verified = point.profile_gpu_bytes != null;
+    const slowdown = point.generation_slowdown_percent;
+    if (verified && slowdown == null) row.dataset.verifiedContext = String(point.context_tokens);
     const title = element('th', point.context_tokens == null ? 'Авто' : whole.format(point.context_tokens));
     title.scope = 'row';
     if (point.measured_context_tokens !== point.context_tokens) {
@@ -76,10 +78,16 @@ export function renderBenchmark(record, message) {
     }
     const memory = element('td', mem(point.profile_gpu_bytes));
     const speed = element('td', rate(point.generated_tokens_per_second));
-    const status = element('td', verified ? 'Подтверждён' : 'Не подтверждён');
+    const status = element('td', slowdown != null ? `Медленнее на ${slowdown}%` : verified ? 'Подтверждён' : 'Не подтверждён');
     status.dataset.verified = String(verified);
+    if (slowdown != null) status.dataset.slowdown = 'true';
     status.title = `Холодная загрузка: ${elapsed(point.load_ms)}. Прирост VRAM: ${mem(coldDelta(point))}. По Ollama: ${mem(point.model_vram_bytes)} VRAM / ${mem(point.model_ram_bytes)} RAM.`;
+    const choice = element('span', 'Выбор Auto');
+    choice.className = 'benchmark-auto-choice';
+    choice.hidden = true;
+    status.append(choice);
     row.append(title, memory, speed, status);
     return row;
   }));
+  markBenchmarkSelection();
 }

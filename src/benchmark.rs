@@ -110,6 +110,8 @@ pub struct Measurement {
     cold_isolated: bool,
     #[serde(default)]
     profile_gpu_bytes: Option<u64>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    generation_slowdown_percent: Option<u8>,
     #[serde(default)]
     token_memory_bytes_f16: Option<u64>,
     #[serde(default)]
@@ -200,6 +202,24 @@ impl MemoryProfile {
         self.points.iter().any(|point| point.verified_gpu_bytes(weights).is_some())
     }
 
+    fn generation_slowdown(&self, point: &Measurement) -> Option<u8> {
+        let tokens = point.context_tokens?;
+        let rate = point.comparable_generation_rate()?;
+        let reference = self.points.iter()
+            .filter(|smaller| smaller.context_tokens.is_some_and(|window| window < tokens))
+            .filter_map(Measurement::comparable_generation_rate)
+            .reduce(f64::max)?;
+        // A large drop is a performance warning, not proof of RAM offload.
+        (rate <= 0.70 * reference).then(|| (100.0 * (1.0 - rate / reference)).round() as u8)
+    }
+
+    fn annotate_generation_slowdowns(&mut self) {
+        let slowdowns: Vec<_> = self.points.iter().map(|point| self.generation_slowdown(point)).collect();
+        for (point, slowdown) in self.points.iter_mut().zip(slowdowns) {
+            point.generation_slowdown_percent = slowdown;
+        }
+    }
+
     // Only use measured windows; no extrapolation beyond a real successful
     // run and no partial CPU offload advertised as a GPU fit.
     pub(crate) fn fit(&self, budget: u64, weights: u64, maximum: u64) -> Option<u32> {
@@ -207,7 +227,7 @@ impl MemoryProfile {
             let tokens = point.context_tokens?;
             if u64::from(tokens) > maximum { return None; }
             let bytes = point.verified_gpu_bytes(weights)?;
-            (bytes <= budget).then_some(tokens)
+            (bytes <= budget && self.generation_slowdown(point).is_none()).then_some(tokens)
         }).max()
     }
 
@@ -225,6 +245,12 @@ impl MemoryProfile {
 }
 
 impl Measurement {
+    fn comparable_generation_rate(&self) -> Option<f64> {
+        self.profile_gpu_bytes?;
+        if self.generated_tokens < 64 { return None; }
+        self.generated_tokens_per_second.filter(|rate| rate.is_finite() && *rate > 0.0)
+    }
+
     fn verified_gpu_bytes(&self, weights: u64) -> Option<u64> {
         if !self.cold_isolated || self.was_loaded || weights == 0 || self.context_tokens.map(u64::from) != self.measured_context_tokens
             || self.measured_context_tokens.is_none() { return None; }
@@ -281,6 +307,9 @@ impl Store {
         let mut record = self.read()?.remove(model).unwrap_or_default();
         record.average_run = record.average_run();
         record.average_launch = record.average_launch();
+        if let Some(profile) = &mut record.memory_profile {
+            profile.annotate_generation_slowdowns();
+        }
         Ok(record)
     }
 
@@ -533,8 +562,7 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
     let mut lower = None::<u32>;
     let mut upper = None::<u32>;
     let mut windows = profile_windows(maximum).into_iter();
-    // Refine the first interval that exceeds the same budget used by Auto,
-    // even if the upper bound ran entirely on GPU.
+    // Refine the first window that exceeds the Auto budget or slows down sharply.
     loop {
         let tokens = match (lower, upper) {
             (Some(low), Some(high)) if high.saturating_sub(low) > 2048 => {
@@ -560,12 +588,15 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
                 let fits = point.profile_gpu_bytes.zip(available)
                     .is_some_and(|(bytes, available)| bytes <= context::gpu_budget(available, 1));
                 let verified = point.profile_gpu_bytes.is_some();
+                let slowdown = profile.generation_slowdown(&point);
                 profile.points.push(point);
-                if fits {
+                if fits && slowdown.is_none() {
                     lower = Some(tokens);
                 } else {
                     upper = Some(tokens);
-                    profile.stopped_reason = Some(if verified {
+                    profile.stopped_reason = Some(if let Some(percent) = slowdown {
+                        format!("At {tokens} tokens generation slowed by {percent}% compared with a smaller verified window")
+                    } else if verified {
                         format!("At {tokens} tokens the measured peak exceeded the Auto VRAM budget")
                     } else {
                         format!("At {tokens} tokens full GPU residency or physical sampling could not be verified")
@@ -684,6 +715,7 @@ pub fn measure(
         gpu_memory,
         cold_isolated,
         profile_gpu_bytes: None,
+        generation_slowdown_percent: None,
         token_memory_bytes_f16: bytes_per_token
             .and_then(|bytes| bytes.checked_mul(occupied_tokens)),
         context_memory_bytes_f16: context_capacity
@@ -797,5 +829,38 @@ mod profile_tests {
         // A measured peak already includes compute; a second 10% reserve
         // would make this usable window look too large.
         assert_eq!(profile.fit(context::gpu_budget(9*gib + (256 << 20), 1),8*gib,65536),Some(8192));
+    }
+
+    #[test]
+    fn measured_auto_skips_large_generation_slowdowns_even_with_vram_to_spare() {
+        let gib = 1u64 << 30;
+        let weights = 8 * gib;
+        let measured = |tokens, rate, generated| {
+            let mut point = point(tokens, 9 * gib, gib, gib);
+            point.profile_gpu_bytes = point.verified_gpu_bytes(weights);
+            point.generated_tokens_per_second = Some(rate);
+            point.generated_tokens = generated;
+            point
+        };
+        let mut profile = MemoryProfile {
+            identity: ProfileIdentity {
+                digest: "model".into(), ollama_version: "version".into(), gpu_uuid: "gpu".into(),
+                driver_version: "driver".into(), gpu_total_bytes: 12 * gib, environment: BTreeMap::new(),
+            },
+            points: vec![
+                measured(4_096, 79.7, 128),
+                measured(65_536, 240.0, 12), // Too short to establish the baseline.
+                measured(131_072, 75.2, 128),
+                measured(262_144, 32.9, 128),
+            ],
+            stopped_reason: None,
+        };
+        assert_eq!(profile.fit(11 * gib, weights, 262_144), Some(131_072));
+        profile.annotate_generation_slowdowns();
+        assert_eq!(profile.points[2].generation_slowdown_percent, None);
+        assert_eq!(profile.points[3].generation_slowdown_percent, Some(59));
+
+        profile.points[3].generated_tokens_per_second = Some(74.0);
+        assert_eq!(profile.fit(11 * gib, weights, 262_144), Some(262_144));
     }
 }

@@ -1648,12 +1648,12 @@ pub(super) fn auto_context_estimate(
         && slots <= daemon_slots
     {
         if let Some(tokens) = profile.fit(context::gpu_budget(available, model_slots), weights, maximum) {
-            return AutoChoice::chosen(tokens, "measured", "largest verified cold full-GPU profile fitting current budget");
+            return AutoChoice::chosen(tokens, "measured", "largest verified profile fitting VRAM without a large measured generation slowdown");
         }
         // A valid profile may establish that a larger context spills to CPU.
         // Do not extrapolate beyond or override its actual observations.
         return AutoChoice::unavailable(if profile.has_verified_points(weights) {
-            "no verified measured context fits; free GPU memory or choose a manual window"
+            "no verified measured context fits within the VRAM and generation speed limits"
         } else {
             "full benchmark has no trustworthy GPU-fit measurements; rerun it on an idle GPU or choose a manual window"
         });

@@ -280,6 +280,9 @@ h2 { font-size: .96rem; font-weight: 650; }
 #benchmark-profile td:nth-child(2), #benchmark-profile td:nth-child(3) { white-space: nowrap; }
 #benchmark-profile td[data-verified="true"] { color: var(--accent); }
 #benchmark-profile td[data-verified="false"] { color: var(--muted); }
+#benchmark-profile td[data-slowdown="true"] { color: #f0cd91; }
+#benchmark-profile .benchmark-auto-choice:not([hidden]) { display: block; font-weight: 700; }
+#benchmark-profile tr:has(.benchmark-auto-choice:not([hidden])) { background: #27372a; }
 #benchmark-profile-diagnostics summary { color: var(--muted); cursor: pointer; font-size: .78rem; }
 .model-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #708075; }
 .model-dot[data-state="loading"] { background: #e1c580; }

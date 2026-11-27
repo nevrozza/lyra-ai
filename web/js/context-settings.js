@@ -8,6 +8,14 @@ export function contextLabel(tokens) {
   return tokens == null ? 'Авто' : `${whole.format(tokens)} токенов`;
 }
 
+export function markBenchmarkSelection() {
+  const results = get('benchmark-profile-results');
+  for (const row of results.rows) {
+    const selected = Boolean(results.dataset.autoContext) && row.dataset.verifiedContext === results.dataset.autoContext;
+    row.querySelector('.benchmark-auto-choice').hidden = !selected;
+  }
+}
+
 export function createContextSettings(session, {
   displayedModel, getRecord, isMemoryChanging, refreshControls, requestMetrics,
 }) {
@@ -73,6 +81,9 @@ export function createContextSettings(session, {
     const profileAuto = get('benchmark-profile-auto');
     profileAuto.hidden = configuredAutoContext == null;
     profileAuto.textContent = profileAuto.hidden ? '' : `Auto для одной модели сейчас: ${contextLabel(configuredAutoContext)}`;
+    get('benchmark-profile-results').dataset.autoContext = autoSource === 'measured' && configuredAutoContext != null
+      ? String(configuredAutoContext) : '';
+    markBenchmarkSelection();
     contextSize.setAttribute('aria-valuetext', label);
     const required = memory?.total_bytes_excluding_unknown_kv;
     const budget = memory?.best_gpu_vram_available_bytes;
