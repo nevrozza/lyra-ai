@@ -100,34 +100,26 @@
             </div>
           </form>
           <div class="project-permissions">
-            <button id="command-settings-global" class="terminal-mode" type="button" aria-haspopup="dialog" aria-controls="command-settings-dialog" title="Терминал — глобальные разрешения Lyra">
+            <button id="command-settings-global" class="terminal-mode" type="button" aria-expanded="false" aria-controls="command-settings-popover" title="Терминал — глобальные разрешения Lyra">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/></svg>
-              <span id="command-mode-label">Терминал</span>
+              <span id="command-mode-label">Нет данных</span>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </button>
           </div>
         </div>
       </div>
-      <dialog id="command-settings-dialog" class="project-dialog" aria-labelledby="command-settings-title">
-        <div class="project-form">
-          <h3 id="command-settings-title">Терминал</h3>
-          <p class="secondary">Глобальные разрешения для всей Lyra — всех чатов и внешних вызовов.</p>
-          <div class="command-settings">
-            <label for="command-mode">Подтверждение</label>
-            <select id="command-mode" disabled>
-              <option value="ask">Спрашивать всегда</option>
-              <option value="allow_all">Разрешать всегда</option>
-            </select>
-            <button id="command-notifications" class="unload" type="button" hidden>Включить уведомления</button>
-            <p id="command-settings-error" class="secondary" role="status" hidden></p>
-            <p id="command-notification-status" class="secondary" role="status" hidden></p>
-          </div>
-          <p class="secondary">При автоматическом разрешении команды выполняются без подтверждения.</p>
-          <div class="project-controls project-dialog-actions">
-            <button id="close-command-settings" class="unload" type="button">Закрыть</button>
-          </div>
+      <div id="command-settings-popover" class="terminal-popover" popover="auto" role="group" aria-labelledby="command-settings-title">
+        <p id="command-settings-title" class="secondary">Терминал · для всей Lyra</p>
+        <div id="command-mode" class="terminal-options" role="group" aria-label="Разрешения команд">
+          <button type="button" data-mode="ask" aria-pressed="false" disabled><span>Спрашивать всегда</span><span class="terminal-check" aria-hidden="true">✓</span></button>
+          <button type="button" data-mode="allow_all" aria-pressed="false" disabled><span>Разрешать всегда</span><span class="terminal-check" aria-hidden="true">✓</span></button>
         </div>
-      </dialog>
+        <p id="command-settings-error" class="secondary" role="status" hidden></p>
+        <div class="terminal-notifications">
+          <button id="command-notifications" class="unload" type="button" hidden>Включить уведомления</button>
+          <p id="command-notification-status" class="secondary" role="status" hidden></p>
+        </div>
+      </div>
       <dialog id="chat-thinking-dialog" class="project-dialog chat-thinking-dialog" aria-labelledby="chat-thinking-title">
         <form id="chat-thinking-form" class="project-form">
           <h3 id="chat-thinking-title">Thinking</h3>
@@ -224,7 +216,7 @@
 
     <div id="dashboard-layout" class="layout">
       <section class="panel system-panel" aria-labelledby="system-title">
-        <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="service">—</span></header>
+        <header class="panel-header"><h2 id="system-title">Система</h2><span id="sampled" class="metrics-freshness" data-state="waiting" role="status" tabindex="0">Ожидаем данные</span></header>
         <div class="panel-body system">
           <div class="system-host">
             <div class="metric"><span>CPU</span><output id="cpu-value">—</output></div>
