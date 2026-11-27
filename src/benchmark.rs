@@ -101,6 +101,10 @@ pub struct Measurement {
     #[serde(default)]
     ollama_total_bytes: Option<u64>,
     #[serde(default)]
+    model_weight_bytes: Option<u64>,
+    #[serde(default)]
+    system_ram: Option<RamMeasurement>,
+    #[serde(default)]
     gpu_memory: Vec<GpuMeasurement>,
     #[serde(default)]
     cold_isolated: bool,
@@ -131,6 +135,15 @@ pub struct Measurement {
 struct GpuMeasurement {
     uuid: String,
     name: String,
+    total_bytes: u64,
+    baseline_bytes: u64,
+    sampled_peak_bytes: u64,
+    final_bytes: Option<u64>,
+    samples: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RamMeasurement {
     total_bytes: u64,
     baseline_bytes: u64,
     sampled_peak_bytes: u64,
@@ -411,12 +424,13 @@ fn gpu_snapshot() -> Vec<telemetry::Gpu> {
 
 struct GpuSampler {
     stop: mpsc::Sender<()>,
-    thread: Option<thread::JoinHandle<Vec<GpuMeasurement>>>,
+    thread: Option<thread::JoinHandle<(Vec<GpuMeasurement>, Option<RamMeasurement>)>>,
 }
 
 impl GpuSampler {
     fn start() -> Self {
         let baseline = gpu_snapshot();
+        let ram_baseline = telemetry::system_memory();
         let (stop, receiver) = mpsc::channel();
         let thread = thread::spawn(move || {
             let mut rows: Vec<_> = baseline.into_iter().filter_map(|gpu| {
@@ -424,7 +438,17 @@ impl GpuSampler {
                 Some(GpuMeasurement { uuid: gpu.uuid, name: gpu.name, total_bytes: mem.total,
                     baseline_bytes: mem.used, sampled_peak_bytes: mem.used, final_bytes: None, samples: 0 })
             }).collect();
-            let sample = |rows: &mut Vec<GpuMeasurement>, final_sample: bool| {
+            let mut ram = ram_baseline.map(|mem| RamMeasurement { total_bytes: mem.total,
+                baseline_bytes: mem.used, sampled_peak_bytes: mem.used, final_bytes: None, samples: 0 });
+            let sample = |rows: &mut Vec<GpuMeasurement>, ram: &mut Option<RamMeasurement>, final_sample: bool| {
+                if let Some(row) = ram.as_mut()
+                    && let Some(mem) = telemetry::system_memory()
+                    && mem.total == row.total_bytes
+                {
+                    row.sampled_peak_bytes = row.sampled_peak_bytes.max(mem.used);
+                    row.samples = row.samples.saturating_add(1);
+                    if final_sample { row.final_bytes = Some(mem.used); }
+                }
                 for gpu in gpu_snapshot() {
                     if let Some(row) = rows.iter_mut().find(|row| row.uuid == gpu.uuid)
                         && let Some(mem) = gpu.vram
@@ -436,19 +460,19 @@ impl GpuSampler {
                     }
                 }
             };
-            if rows.is_empty() { return rows; }
+            if rows.is_empty() && ram.is_none() { return (rows, ram); }
             loop {
                 match receiver.recv_timeout(Duration::from_millis(200)) {
-                    Err(mpsc::RecvTimeoutError::Timeout) => sample(&mut rows, false),
-                    _ => { sample(&mut rows, true); break; }
+                    Err(mpsc::RecvTimeoutError::Timeout) => sample(&mut rows, &mut ram, false),
+                    _ => { sample(&mut rows, &mut ram, true); break; }
                 }
             }
-            rows
+            (rows, ram)
         });
         Self { stop, thread: Some(thread) }
     }
 
-    fn finish(mut self) -> Vec<GpuMeasurement> {
+    fn finish(mut self) -> (Vec<GpuMeasurement>, Option<RamMeasurement>) {
         let _ = self.stop.send(());
         self.thread.take().and_then(|thread| thread.join().ok()).unwrap_or_default()
     }
@@ -569,6 +593,7 @@ pub fn measure(
     } else {
         Stage::LoadingAndPrefill
     });
+    let model_weight_bytes = ollama::model_catalog().and_then(|catalog| catalog.get(model).copied().flatten());
     let sampler = GpuSampler::start();
     let generation = (|| {
         let response = ollama::agent(Duration::from_secs(300))
@@ -595,7 +620,7 @@ pub fn measure(
     let measured_model = measured_models.and_then(|models| {
         models.into_iter().find(|entry| ollama::same_model(&entry.name, &backend))
     });
-    let gpu_memory = sampler.finish();
+    let (gpu_memory, system_ram) = sampler.finish();
     if resident.is_none()
         && let Err(error) = ollama::unload_profile(&backend)
     {
@@ -629,6 +654,8 @@ pub fn measure(
         model_ram_bytes: measured_model.as_ref().and_then(ollama::Model::ram_bytes),
         model_vram_bytes: measured_model.as_ref().and_then(|entry| entry.size_vram),
         ollama_total_bytes: measured_model.as_ref().and_then(|entry| entry.size),
+        model_weight_bytes,
+        system_ram,
         gpu_memory,
         cold_isolated,
         profile_gpu_bytes: None,
