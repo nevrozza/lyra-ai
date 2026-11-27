@@ -1,12 +1,25 @@
 # Project pipelines
 
+## Required pipelines
+
+Choose one pipeline before dispatching any delegated code change. Record each worker's model and scope so the final report can say who implemented, reviewed, and fixed the work.
+
+| Pipeline | Use when | Sequence |
+| --- | --- | --- |
+| Fine-grained implementation | Contracts are clear and the change divides into small mechanical or otherwise independently verifiable steps. | Send each leaf to a suitable local model in its own chat. Overlap independent write scopes when possible. Assemble the result, then run the required final review with the strongest eligible independent local reviewer. Delegate confirmed fixes and repeat the review with a model that did not make those edits. |
+| Coherent implementation | The change requires coupled design or edits that benefit from one owner per coherent slice. | Assign a capable medium or stronger local model directly to each slice. Start a fresh chat for the next slice when it can proceed from a clean handoff. Run the required final review on the assembled result with the strongest eligible independent local reviewer. Delegate confirmed fixes and repeat the review with a model that did not make those edits. |
+
+Final review is required in both pipelines. Select the strongest locally installed model that can review the full assembled change in the available context and memory, is eligible for Pi, and did not implement or fix the changes under review. Reserve that reviewer before dispatch, including when several workers contribute. Schedule it after the writers if the models cannot coexist in memory. If a suitable independent reviewer is unavailable, report the limitation and use a fallback only when the user authorizes it. The original worker can run focused checks, and the orchestrator can inspect the final outcome in addition to this review.
+
+Plan fresh chats early where a step can work from a short handoff. Use shared project files as the source of truth. Pass the contract, changed paths, acceptance checks, and blockers, and let the next worker inspect what it needs. Long transcripts and compaction are fallback mechanisms for work that genuinely depends on shared history.
+
 ## Delegated delivery and exact file paths
 
 When the user delegates creation or explicitly forbids the orchestrator from writing code, the orchestrator learns the requirements, schedules work, and verifies results. It does not author the deliverable or silently finish a worker's partial edit. Give each worker the requested behavior and acceptance checks. Leave room for the worker to design details the user delegated. Preserve the requested file layout and restrictions on deployment or external actions independently of model choice.
 
 1. **Resolve the destination.** If the user names a chat, find it with `list_projects` and verify the registered working folder. Use `read_project_session` for the relevant history when the user refers to earlier work. For sequential work in that chat, use `run_pi` with its project and chat IDs. If concurrent execution is requested and separate step chats are acceptable, queue the steps in the same project. Scope all steps to the user's requested folder.
 2. **Constrain writes.** With `run_pi` or `enqueue_project_tasks`, pass exact relative filenames in `write_paths`, such as `["index.html"]`. Keep the folder in `folders`, the chat's working folder, or `workspace` as appropriate. Pass `index.html` as plain text in the write tool's path value, without Markdown backticks, closing punctuation, or an appended Windows backslash. The orchestrator sets the allowlist itself. Lyra checks each write against it and disables shell access for that step. This works with a single file and with `parallel` omitted.
-3. **Pick implementation and review separately.** Use the configured model preferences and eligibility for each role. Reuse a model when it fits both roles, unless the user requested different models. In a named chat, use a separate `run_pi` call with `role: review` after the implementation. In the queue, make the review depend on every implementation step, or attach `follow_up.review` to the final implementation step. Pass the original acceptance criteria. Ask the reviewer to inspect the actual directory and read the exact expected files. A worker's file path or completion claim alone is insufficient.
+3. **Run the independent review.** Choose an eligible local reviewer according to the required pipeline. Use `run_pi` with `role: review` in a fresh chat for direct work, unless the user explicitly requires all turns in one chat. In the queue, make the review depend on every implementation step, or attach `follow_up.review` to the final implementation step. Pass the original acceptance criteria. Ask the reviewer to inspect the actual directory and read the exact expected files. A worker's file path or completion claim alone is insufficient.
 4. **Close the loop.** If an expected file is missing, misnamed, or fails a check, delegate a bounded fix using the same exact allowed paths and repeat the relevant review. If an unexpected file already exists, report it and preserve it unless removal is authorized. State which checks actually ran. Maintain the no-deploy rule during verification.
 
 ### Example with parallel implementation
@@ -21,7 +34,7 @@ For scoped steps, list every file that may change, including a fixture or lockfi
 
 Use `after` for prerequisite results and stable ordering on shared files. A prerequisite is ready only after its work and automatic follow-up succeed. Use earlier keys in the same batch or existing task IDs from the same project. Each entry gets its own saved chat. Use a stable `batch_id` when a submission might need to be retried after a lost response. Reuse it only for the same payload.
 
-Read the current `parallel_project_tasks` and `parallel_project_models` values from `inspect`. The first limits active parallel steps. The second limits active model and context combinations. Prefer a common model for comparably suitable parallel steps. Lyra controls task dispatch and file reservations. Ollama independently controls residency and the number of requests it can generate for at once.
+Read the current `parallel_project_tasks` and `parallel_project_models` values from `inspect`. The first limits active parallel steps. The second limits active model and context combinations. Parallel implementation steps may share a worker model. Keep the reviewer independent. Lyra controls task dispatch and file reservations. Ollama independently controls residency and the number of requests it can generate for at once.
 
 ### Example batch
 
@@ -65,7 +78,7 @@ The example assumes the response contract is settled and both steps can use the 
 
 ## Review and fix
 
-Use an exclusive `role: review` step for a standalone verification. For Lyra's automatic review and fix loop, attach `follow_up.review` to the implementation or integration step that completes the slice. Give that step `after` dependencies for all other contributions. Include the full intended change and acceptance criteria in the review prompt. Supply `follow_up.launch` when startup verification is part of the goal.
+Use an exclusive `role: review` step for a standalone verification. For Lyra's automatic review and fix loop, attach `follow_up.review` to the implementation or integration step that completes the slice. Give that step `after` dependencies for all other contributions. Include the full intended change and acceptance criteria in the review prompt. For the automatic loop, give the reviewer the eligible fix tags and exclude the reviewer itself, so the repeat review stays independent. Supply `follow_up.launch` when startup verification is part of the goal.
 
 Lyra reviews the assembled diff, schedules small fixes, and waits for all fixes to succeed before a new round, up to three reviews. Independent fixes with known disjoint scopes may overlap. A fix with unknown scope or a shell requirement runs exclusively. If the user asked for a coarse slice and wants stronger fix models, give the reviewer the eligible tags to choose from. For mechanical fixes, permit a suitable lightweight model. Inspect the final diff and checks before delivering the result.
 
@@ -78,7 +91,7 @@ Lyra accepts a flat list of steps with dependencies. Translate the group plan in
 1. **Implement the group.** Run independent leaves together when their `write_paths` are disjoint and the model limits allow it. Order leaves that share files or depend on each other's results.
 2. **Integrate and review the group.** Use the real step that assembles the group, such as wiring its components or adding its integration checks. Give it `after` dependencies for every group branch it needs and attach `follow_up.review`. The review prompt identifies the group's complete change, shared interfaces, and acceptance checks. Ask the reviewer to inspect that scope in the working diff and attribute findings before scheduling fixes. Lyra applies the fixes and repeats the group review within its review limit. If there's no integration edit, either attach the loop to a real final implementation step with the required dependencies or use `role: review` for a standalone check and coordinate its fixes and re-review explicitly.
 3. **Release dependent groups after verification.** Point a consumer that needs a finished group at its integration step. Lyra's `after` waits for that step and its automatic follow-up, so the consumer also waits for group fixes and the successful repeat review. For a manually coordinated loop, queue consumers only when the group passes. Independent groups may overlap at the leaf level.
-4. **Verify the whole task.** Make the final integration or review depend on every group result. Check the original acceptance criteria, cross-group interfaces, and the relevant build and integration tests or startup. If this round needs cross-group fixes, scope them explicitly and repeat the assembled check. Attach an automatic cycle to a real final integration step when appropriate.
+4. **Verify the whole task.** Make the final integration or review depend on every group result. Give the combined change to the strongest eligible independent local reviewer. Check the original acceptance criteria, cross-group interfaces, and the relevant build and integration tests or startup. If this round needs cross-group fixes, scope them explicitly and repeat the assembled check. Attach an automatic cycle to a real final integration step when appropriate.
 
 ### Worked group plan
 

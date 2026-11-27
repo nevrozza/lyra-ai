@@ -187,6 +187,7 @@ fn tools() -> Value {
         "additionalProperties": false
     });
     let write_paths = json!({"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Allowed write paths relative to the primary folder. Disables shell access."});
+    let pi_output_limit = json!({"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional Pi generation cap. Omit to use Pi's default."});
     let worker_role = json!({"enum": ["implement", "fix", "review"], "description": "Local worker role. Review uses read-only file tools."});
     let mut queue_task = json!({"type": "object", "properties": {
         "name": {"type": "string"}, "prompt": {"type": "string", "description": "Instructions for the step."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
@@ -200,7 +201,7 @@ fn tools() -> Value {
         "skills": {"type": "array", "items": {"type": "string"}},
         "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
         "follow_up": follow_up,
-        "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens}
+        "max_output_tokens": pi_output_limit
     }, "required": ["name", "prompt"], "additionalProperties": false});
     queue_task["properties"]["role"]["default"] = json!("implement");
     let retry_task = json!({
@@ -351,7 +352,7 @@ fn tools() -> Value {
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
                 "role": worker_role,
                 "write_paths": write_paths,
-                "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens}
+                "max_output_tokens": pi_output_limit
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
         }
@@ -377,8 +378,14 @@ fn tools() -> Value {
                         "notice": {"enum": ["near_limit", "compacting", "compacted", "full"]}
                     }, "required": ["context_tokens"]}
                 },
-                "required": ["stop_reason", "truncated", "max_output_tokens"]
+                "required": ["stop_reason", "truncated"]
             });
+            if tool["name"] == "run_model" {
+                tool["outputSchema"]["required"]
+                    .as_array_mut()
+                    .expect("required output fields")
+                    .push(json!("max_output_tokens"));
+            }
         }
     }
     tools
@@ -467,7 +474,8 @@ pub(super) struct PiContext {
 struct GenerationInfo {
     stop_reason: Option<String>,
     truncated: bool,
-    max_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -650,7 +658,7 @@ async fn manage_model(app: Arc<App>, request: ManageModel) -> Result<String, Str
     Ok(format!("model={model} action={action} ok"))
 }
 
-pub(super) fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
+fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
     let limit = requested.unwrap_or(AI_SETTINGS.default_output_tokens);
     if !(AI_SETTINGS.minimum_output_tokens..=AI_SETTINGS.maximum_output_tokens).contains(&limit) {
         return Err(format!(
@@ -662,6 +670,16 @@ pub(super) fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, 
         return Err("Prompt is empty".into());
     }
     Ok(limit)
+}
+
+pub(super) fn validate_pi_generation(prompt: &str, limit: Option<u32>) -> Result<(), String> {
+    if prompt.trim().is_empty() {
+        return Err("Prompt is empty".into());
+    }
+    if limit == Some(0) {
+        return Err("max_output_tokens must be positive when supplied".into());
+    }
+    Ok(())
 }
 
 async fn run_model(
@@ -723,7 +741,7 @@ async fn run_model(
     let generation = Some(GenerationInfo {
         truncated: stop_reason.as_deref() == Some("length") || !reply.completed(),
         stop_reason,
-        max_output_tokens: limit,
+        max_output_tokens: Some(limit),
         text_only: None,
         context: None,
     });
@@ -762,7 +780,8 @@ async fn run_pi(
     origin: projects::MessageOrigin,
     reserved: Option<u64>,
 ) -> Result<ToolOutput, String> {
-    let limit = output_limit(&request.prompt, request.max_output_tokens)?;
+    let limit = request.max_output_tokens;
+    validate_pi_generation(&request.prompt, limit)?;
     let session_id = request.project_session_id;
     let (project, workspace) = if let Some(id) = request.project_id {
         let workspace = request.workspace;

@@ -106,7 +106,7 @@ pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bo
             "Use the read tool to read input.txt. Use the write tool to copy its contents exactly into result.txt. Then use the edit tool on result.txt to replace status=pending with status=passed. Reply Done when finished.",
             &config,
             context_tokens,
-            2048,
+            None,
             None,
         ),
     )
@@ -161,7 +161,7 @@ pub(super) async fn run(
     prompt: &str,
     config: &Path,
     context_tokens: Option<u32>,
-    limit: u32,
+    limit: Option<u32>,
     task: Option<Task<'_>>,
 ) -> Result<Reply, String> {
     let project = task.as_ref().and_then(|task| task.project);
@@ -599,8 +599,9 @@ pub(super) async fn run(
     if last_error.is_none() {
         if answer.trim().is_empty() {
             last_error = Some(if stop_reason.as_deref() == Some("length") {
-                format!(
-                    "Pi reached its {limit}-token max_output_tokens budget before returning text"
+                limit.map_or_else(
+                    || "Pi reached its generation limit before returning text".into(),
+                    |limit| format!("Pi reached its {limit}-token max_output_tokens budget before returning text"),
                 )
             } else {
                 "Pi returned no text".into()
@@ -752,9 +753,12 @@ async fn configure_pi(
     model: &str,
     name: &str,
     context_tokens: Option<u32>,
-    limit: u32,
+    limit: Option<u32>,
 ) -> io::Result<()> {
-    let mut entry = serde_json::json!({ "id": model, "maxTokens": limit });
+    let mut entry = json!({ "id": model });
+    if let Some(limit) = limit {
+        entry["maxTokens"] = json!(limit);
+    }
     if let Some(tokens) = context_tokens {
         entry["name"] = serde_json::json!(name);
         entry["contextWindow"] = serde_json::json!(tokens);
@@ -927,4 +931,29 @@ fn append_tail(buffer: &mut String, chunk: &str, limit: usize) {
     buffer.push_str(chunk);
     let remove = buffer.ceil_char_boundary(buffer.len().saturating_sub(limit));
     buffer.drain(..remove);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn configures_a_pi_output_cap_only_when_requested() {
+        let directory = tempfile::tempdir().unwrap();
+        configure_pi(directory.path(), "worker", "worker", Some(8192), None)
+            .await
+            .unwrap();
+        let config = || {
+            let bytes = std::fs::read(directory.path().join("models.json")).unwrap();
+            let json: Value = serde_json::from_slice(&bytes).unwrap();
+            json["providers"]["ollama"]["models"][0].clone()
+        };
+        assert!(config().get("maxTokens").is_none());
+
+        configure_pi(directory.path(), "worker", "worker", Some(8192), Some(4096))
+            .await
+            .unwrap();
+        assert_eq!(config()["maxTokens"], 4096);
+        assert_eq!(config()["contextWindow"], 8192);
+    }
 }

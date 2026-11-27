@@ -321,7 +321,7 @@ pub(in crate::server) async fn enqueue(
             }
             let model = crate::model_name(&task.model).map_err(invalid)?;
             task.model = mcp::resolve_model(&installed, &model).map_err(invalid)?;
-            mcp::output_limit(&task.prompt, task.max_output_tokens).map_err(invalid)?;
+            mcp::validate_pi_generation(&task.prompt, task.max_output_tokens).map_err(invalid)?;
             app.skills.paths(task.skills.as_deref()).map_err(invalid)?;
             if task.follow_up.is_none()
                 && !matches!(task.role, Some(pi::Role::Review))
@@ -530,6 +530,15 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
     let key = task.key();
     let mut candidates = Vec::new();
     let (status, result) = if let Some(mut input) = task.job.input.take() {
+        if task
+            .job
+            .workflow
+            .as_ref()
+            .is_some_and(workflow::Workflow::is_follow_up)
+        {
+            // Older automatic follow-ups may still carry Lyra's former default cap.
+            input.max_output_tokens = None;
+        }
         if let Some(handoff) = input.retry_prompt.take() {
             input.prompt = match &task.job.workflow {
                 Some(flow) if flow.is_follow_up() => format!(

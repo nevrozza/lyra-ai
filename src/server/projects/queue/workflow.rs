@@ -488,11 +488,7 @@ Return one JSON verdict. Use {"status":"pass","summary":"change made or confirme
                 batch_id: None,
                 input: Some(Prompt {
                     prompt,
-                    max_output_tokens: Some(
-                        (if stage == Stage::Review { 2048 } else { 1024 })
-                            .min(AI_SETTINGS.maximum_output_tokens)
-                            .max(AI_SETTINGS.minimum_output_tokens),
-                    ),
+                    max_output_tokens: None,
                     skills: None,
                     context_tokens: None,
                     retry_prompt: None,
