@@ -15,12 +15,16 @@ export function createSkills() {
   const list = get('skill-catalog');
   let saving = false;
   let online = false;
+  let running = false;
   let revision = 0;
   let files = [];
 
   function updateControls() {
     pickFolder.disabled = pickFile.disabled = saving || !online;
     button.disabled = saving || !online || !files.length;
+    for (const control of list.querySelectorAll('button, input')) {
+      control.disabled = saving || !online || (running && control.dataset.remove === 'true');
+    }
   }
 
   function select(input) {
@@ -59,11 +63,65 @@ export function createSkills() {
         const entry = element('li', '');
         const description = element('p', skill.description);
         description.className = 'secondary';
-        entry.append(element('code', skill.name), description);
+        entry.dataset.enabled = String(skill.enabled);
+        const heading = element('div', '');
+        heading.className = 'skill-entry-heading';
+        const name = element('code', skill.name);
+        const controls = element('div', '');
+        controls.className = 'skill-entry-controls';
+        const label = element('label', '');
+        label.className = 'skill-enable';
+        const toggle = element('input', '');
+        toggle.type = 'checkbox';
+        toggle.checked = skill.enabled;
+        toggle.setAttribute('aria-label', 'Включить скилл ' + skill.name);
+        toggle.onchange = () => changeSkill(skill, toggle.checked);
+        label.append(toggle, element('span', skill.enabled ? 'Включён' : 'Отключён'));
+        const remove = element('button', 'Удалить');
+        remove.type = 'button';
+        remove.className = 'unload skill-remove';
+        remove.dataset.remove = 'true';
+        remove.title = 'Удалить скилл ' + skill.name;
+        remove.onclick = () => {
+          if (window.confirm('Удалить скилл «' + skill.name + '» из Lyra?')) changeSkill(skill);
+        };
+        controls.append(label, remove);
+        heading.append(name, controls);
+        entry.append(heading, description);
+        if (skill.role_template) {
+          const note = element('small', 'Встроенные инструкции роли работают независимо от пакета скилла.');
+          note.className = 'secondary';
+          entry.append(note);
+        }
         return entry;
       }));
+      updateControls();
     } catch {
       if (request === revision) message.textContent = 'Не удалось загрузить список скиллов.';
+    }
+  }
+
+  async function changeSkill(skill, enabled) {
+    if (!online || saving || (enabled === undefined && running)) return;
+    saving = true;
+    updateControls();
+    result.dataset.error = 'false';
+    result.textContent = '';
+    try {
+      const response = await fetch(enabled === undefined ? '/skills/remove' : '/skills/enabled', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(enabled === undefined ? { name: skill.name } : { name: skill.name, enabled }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      result.textContent = 'Скилл «' + skill.name + '» ' + (enabled === undefined ? 'удалён.' : enabled ? 'включён.' : 'отключён.');
+    } catch (error) {
+      result.dataset.error = 'true';
+      result.textContent = error instanceof TypeError || !error.message ? 'Не удалось изменить скилл.' : error.message;
+    } finally {
+      await refreshCatalog();
+      saving = false;
+      updateControls();
     }
   }
 
@@ -111,8 +169,10 @@ export function createSkills() {
     refresh() {
       return Promise.all([refreshCatalog(), agents.refresh()]);
     },
-    setOnline(value) {
+    refreshCatalog,
+    setOnline(value, busy = false) {
       online = value;
+      running = busy;
       updateControls();
       agents.setOnline(value);
     },
