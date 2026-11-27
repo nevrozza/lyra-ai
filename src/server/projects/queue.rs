@@ -94,6 +94,7 @@ pub(in crate::server) struct Enqueue {
     project_id: u64,
     group_id: Option<u64>,
     group_name: Option<String>,
+    group_brief: Option<String>,
     batch_id: Option<String>,
     tasks: Vec<NewJob>,
 }
@@ -1088,13 +1089,14 @@ impl Store {
             }
             // A multi-step batch or automatic workflow is one group by default.
             let group_name = if input.group_id.is_none() && input.group_name.is_none()
-                && (input.tasks.len() > 1 || input.tasks.iter().any(|task| task.follow_up.is_some()))
+                && (input.group_brief.is_some() || input.tasks.len() > 1 || input.tasks.iter().any(|task| task.follow_up.is_some()))
             {
                 input.tasks.first().map(|task| task.name.clone())
             } else {
                 input.group_name
             };
             let group = choose_group(project, &mut catalog.next_id, input.group_id, group_name)?;
+            super::group_context::initialize_brief(&mut catalog.group_memory, group.as_ref(), input.group_id, input.group_brief)?;
             let mut tasks = Vec::with_capacity(input.tasks.len());
             let mut keys = HashMap::new();
             for new in input.tasks {
