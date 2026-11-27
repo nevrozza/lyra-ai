@@ -194,7 +194,7 @@ fn tools() -> Value {
     let pi_output_limit = json!({"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional Pi generation cap. Omit to use Pi's default."});
     let worker_role = json!({"enum": ["implement", "fix", "review"], "description": "Local worker role. Review uses read-only file tools."});
     let mut queue_task = json!({"type": "object", "properties": {
-        "name": {"type": "string"}, "prompt": {"type": "string", "description": "Instructions for the step."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
+        "name": {"type": "string"}, "prompt": {"type": "string", "description": "Actionable technical specification for the step: goal, verified code context, concrete implementation or review plan, constraints, dependencies, acceptance checks and handoff."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
         "key": {"type": "string", "description": "Unique key for this task within the batch."},
         "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
         "external": {"type": "boolean", "default": false, "description": "Step completed outside Lyra with complete_project_step."},
