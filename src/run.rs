@@ -25,6 +25,7 @@ pub struct Snapshot {
     delegated_model: Option<String>,
     delegations: BTreeMap<u64, Delegation>,
     chat_context: BTreeMap<u64, ContextNotice>,
+    chat_errors: BTreeSet<u64>,
     #[serde(skip)]
     next_delegation: u64,
     ai_model_actions: BTreeMap<String, AiAction>,
@@ -109,6 +110,7 @@ impl Snapshot {
             delegated_model: None,
             delegations: BTreeMap::new(),
             chat_context: BTreeMap::new(),
+            chat_errors: BTreeSet::new(),
             next_delegation: 0,
             ai_model_actions: BTreeMap::new(),
             pinned: None,
@@ -212,6 +214,7 @@ impl Snapshot {
         self.next_delegation += 1;
         if let Some(session) = project_session_id {
             self.chat_context.remove(&session);
+            self.chat_errors.remove(&session);
         }
         self.delegated_model.get_or_insert_with(|| model.to_owned());
         self.delegations.insert(
@@ -262,6 +265,9 @@ impl Snapshot {
                 .next()
                 .map(|active| active.model.clone());
             if let Some(session) = active.project_session_id {
+                if !succeeded && !active.stopping {
+                    self.chat_errors.insert(session);
+                }
                 if let Some(notice @ (ContextNotice::NearLimit | ContextNotice::Full)) =
                     active.context_notice
                 {
