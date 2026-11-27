@@ -61,8 +61,103 @@ impl Completion {
         true
     }
 
+    fn can_retry(&self, reason: Option<&str>, has_error: bool, clipped: bool, context_exhausted: bool, answer: &str) -> bool {
+        !has_error && !context_exhausted
+            && !matches!(&self.confirmation, Some(Confirmation::Blocked(_)))
+            && match reason {
+                Some("stop") => !clipped && !self.confirmed(answer, clipped),
+                // An output-limited turn may already have made valid changes or
+                // confirmed its work, but its handoff is not complete.
+                Some("length") => true,
+                _ => false,
+            }
+    }
+
     fn confirmed(&self, answer: &str, clipped: bool) -> bool {
         self.confirmation.is_some() && !answer.trim().is_empty() && !clipped
+    }
+}
+
+fn input_window_exhausted(input: Option<u64>, window: Option<u32>) -> bool {
+    input.zip(window).is_some_and(|(input, window)| input >= u64::from(window))
+}
+
+// Evidence records successful guarded operations, not the model's claims.
+// It does not establish that the files satisfy the assignment.
+const RECENT_MUTATION_LIMIT: usize = 32;
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct ConfirmedMutation {
+    tool: String,
+    path: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(super) struct WorkProgress {
+    generation_stop_reason: Option<String>,
+    confirmation_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation_summary: Option<String>,
+    handoff_complete: bool,
+    continuation_attempts: u8,
+    confirmed_mutation_count: usize,
+    recent_mutations: Vec<ConfirmedMutation>,
+}
+
+impl Default for WorkProgress {
+    fn default() -> Self {
+        Self {
+            generation_stop_reason: None,
+            confirmation_status: "unconfirmed".into(),
+            confirmation_summary: None,
+            handoff_complete: false,
+            continuation_attempts: 0,
+            confirmed_mutation_count: 0,
+            recent_mutations: Vec::new(),
+        }
+    }
+}
+
+impl WorkProgress {
+    fn record_guarded_success(&mut self, request: &str) {
+        let Ok(request) = serde_json::from_str::<Value>(request) else { return };
+        let (Some(tool), Some(path)) = (request["tool"].as_str(), request["path"].as_str()) else { return };
+        if !matches!(tool, "mkdir" | "write" | "edit") { return; }
+        self.confirmed_mutation_count = self.confirmed_mutation_count.saturating_add(1);
+        if self.recent_mutations.len() == RECENT_MUTATION_LIMIT {
+            self.recent_mutations.remove(0);
+        }
+        self.recent_mutations.push(ConfirmedMutation { tool: tool.into(), path: path.into() });
+    }
+
+    fn finish(&mut self, completion: &Completion, reason: Option<String>, handoff_complete: bool) {
+        self.generation_stop_reason = reason;
+        self.handoff_complete = handoff_complete;
+        self.continuation_attempts = completion.retries;
+        let (status, summary) = match &completion.confirmation {
+            Some(Confirmation::Completed(summary)) => ("completed", Some(summary.clone())),
+            Some(Confirmation::Blocked(summary)) => ("blocked", Some(summary.clone())),
+            None => ("unconfirmed", None),
+        };
+        self.confirmation_status = status.into();
+        self.confirmation_summary = summary;
+    }
+
+    pub(super) fn recovery_note(&self) -> String {
+        let mut note = format!(
+            "\n\nWork evidence: generation stop={}, worker confirmation={}, final handoff={}, successful guarded mutations={}, continuation attempts={}.",
+            self.generation_stop_reason.as_deref().unwrap_or("unknown"), self.confirmation_status,
+            if self.handoff_complete { "received" } else { "incomplete" },
+            self.confirmed_mutation_count, self.continuation_attempts,
+        );
+        let recent = self.recent_mutations.len().min(8);
+        if recent > 0 {
+            note.push_str("\nMost recent confirmed operations (not proof of task completion):");
+            for mutation in &self.recent_mutations[self.recent_mutations.len() - recent..] {
+                note.push_str(&format!("\n- {} {}", mutation.tool, mutation.path));
+            }
+        }
+        note
     }
 }
 
@@ -142,6 +237,7 @@ pub(super) struct Reply {
     pub(super) truncated: bool,
     pub(super) error: Option<String>,
     pub(super) context_overflow: bool,
+    pub(super) work_progress: Option<WorkProgress>,
     successful_file_tools: [bool; 3],
 }
 
@@ -393,6 +489,7 @@ pub(super) async fn run(
     let mut delta_bytes = 0usize;
     let completion_required = commands.is_some() && !text_only;
     let mut completion = Completion::default();
+    let mut work_progress = WorkProgress::default();
     let mut completion_terminal = false;
     let mut continuation_deadline = None::<tokio::time::Instant>;
     let mut last_error = None;
@@ -512,14 +609,13 @@ pub(super) async fn run(
                         if ready && completion_required && event["title"] == "lyra:completion-check" =>
                     {
                         let id = event["id"].as_str().ok_or("Missing Pi completion check ID")?;
-                        // Only ordinary stops are eligible for continuation. Never
-                        // restart errors, exhausted context/output, or user cancellation.
-                        let retry = last_error.is_none()
-                            && stop_reason.as_deref() == Some("stop")
-                            && !text_clipped
-                            && !matches!(&completion.confirmation, Some(Confirmation::Blocked(_)))
-                            && !completion.confirmed(&answer, text_clipped)
-                            && completion.retry();
+                        // Ordinary unfinished stops and output exhaustion can resume
+                        // in the same session with the same locks and retry budget.
+                        // Never restart errors, known context exhaustion or cancellation.
+                        let retry = completion.can_retry(
+                            stop_reason.as_deref(), last_error.is_some(), text_clipped,
+                            input_window_exhausted(last_input_tokens, context_window), &answer,
+                        ) && completion.retry();
                         if retry {
                             log(Kind::Pi, "Completion check", &format!("Continuing unfinished task ({}/{COMPLETION_RETRIES})", completion.retries), Some("running"));
                         } else {
@@ -598,7 +694,11 @@ pub(super) async fn run(
                             ).map(|()| json!({}))
                         };
                         let result = match result {
-                            Ok(mut data) => { data["ok"] = json!(true); data },
+                            Ok(mut data) => {
+                                work_progress.record_guarded_success(request);
+                                data["ok"] = json!(true);
+                                data
+                            },
                             Err(error) => json!({"ok": false, "message": error.to_string()}),
                         };
                         rpc_send(stdin, json!({
@@ -867,6 +967,12 @@ pub(super) async fn run(
             stop_reason.as_deref(),
             Some("length" | "aborted" | "toolUse" | "deferred")
         );
+    let generation_stop_reason = stop_reason.clone();
+    let context_overflow = stop_reason.as_deref() == Some("length")
+        && input_window_exhausted(last_input_tokens, context_window);
+    let handoff_complete = completion_terminal && last_error.is_none()
+        && stop_reason.as_deref() == Some("stop") && !truncated
+        && completion.confirmed(&answer, text_clipped);
     if last_error.is_none()
         && !matches!(stop_reason.as_deref(), Some("aborted" | "length"))
         && let Some(conflicts) = file_versions.unresolved_conflicts()
@@ -886,8 +992,13 @@ pub(super) async fn run(
             Some(Confirmation::Completed(_)) if completion_terminal
                 && stop_reason.as_deref() == Some("stop") && !truncated
                 && !answer.trim().is_empty() => {}
-            _ if stop_reason.as_deref() == Some("length") && answer.trim().is_empty() => {
-                // Preserve the existing context-overflow diagnosis.
+            _ if stop_reason.as_deref() == Some("length") => {
+                // Keep the actual stop reason even when some text was generated.
+                // The queue can pause this task without releasing its dependents.
+                last_error = Some(format!(
+                    "Pi reached its output limit before a complete handoff ({} continuation attempts).\n\nWorker's last answer:\n{answer}",
+                    completion.retries
+                ));
             }
             _ => {
                 stop_reason = Some("task_incomplete".into());
@@ -917,12 +1028,10 @@ pub(super) async fn run(
             log(Kind::Pi, "Pi", detail, Some("ok"));
         }
     }
+    work_progress.finish(&completion, generation_stop_reason, handoff_complete);
     Ok(Reply {
-        context_overflow: answer.trim().is_empty()
-            && stop_reason.as_deref() == Some("length")
-            && last_input_tokens
-                .zip(context_window)
-                .is_some_and(|(input, window)| input >= u64::from(window)),
+        context_overflow,
+        work_progress: completion_required.then_some(work_progress),
         text: answer,
         stop_reason,
         truncated,
@@ -1248,6 +1357,47 @@ mod completion_tests {
         assert!(state.retry());
         assert!(state.retry());
         assert!(!state.retry());
+    }
+
+    #[test]
+    fn output_limit_can_continue_but_context_error_and_cancel_cannot() {
+        let mut state = Completion::default();
+        assert!(state.can_retry(Some("length"), false, true, false, "partial"));
+        assert!(state.can_retry(Some("length"), false, false, false, ""));
+        assert!(!state.can_retry(Some("length"), false, false, true, "partial"));
+        assert!(!state.can_retry(Some("error"), true, false, false, ""));
+        assert!(!state.can_retry(Some("aborted"), false, false, false, ""));
+        assert!(!state.can_retry(Some("stop"), false, true, false, "clipped"));
+        state.confirm(r#"{"status":"completed","summary":"Written"}"#).unwrap();
+        assert!(state.can_retry(Some("length"), false, false, false, "partial handoff"));
+        assert!(!state.can_retry(Some("stop"), false, false, false, "final handoff"));
+        assert!(state.retry());
+        assert!(state.retry());
+        assert!(!state.retry());
+        state.confirm(r#"{"status":"blocked","summary":"Missing dependency"}"#).unwrap();
+        assert!(!state.can_retry(Some("length"), false, false, false, ""));
+        assert!(input_window_exhausted(Some(4096), Some(4096)));
+        assert!(!input_window_exhausted(Some(3000), Some(4096)));
+        assert!(!input_window_exhausted(None, Some(4096)));
+    }
+
+    #[test]
+    fn work_evidence_keeps_successful_mutations_separate_from_handoff() {
+        let mut progress = WorkProgress::default();
+        progress.record_guarded_success(r#"{"tool":"read","path":"a.txt"}"#);
+        progress.record_guarded_success(r#"{"tool":"mkdir","path":"site"}"#);
+        progress.record_guarded_success(r#"{"tool":"write","path":"site/index.html","content":"not retained"}"#);
+        let mut completion = Completion::default();
+        assert!(completion.retry());
+        progress.finish(&completion, Some("length".into()), false);
+        assert_eq!(progress.confirmed_mutation_count, 2);
+        assert_eq!(progress.recent_mutations[1].path, "site/index.html");
+        assert_eq!(progress.confirmation_status, "unconfirmed");
+        assert!(!progress.handoff_complete);
+        assert!(!serde_json::to_string(&progress).unwrap().contains("not retained"));
+        for _ in 0..40 { progress.record_guarded_success(r#"{"tool":"edit","path":"site/index.html"}"#); }
+        assert_eq!(progress.confirmed_mutation_count, 42);
+        assert_eq!(progress.recent_mutations.len(), RECENT_MUTATION_LIMIT);
     }
 
     #[test]
