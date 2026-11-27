@@ -142,7 +142,7 @@ impl FileVersions {
 
     fn conflict(&mut self, target: &Path, error: &io::Error) {
         let message = error.to_string();
-        if ["FILE_LOCKED:", "FILE_CHANGED:", "READ_REQUIRED:"].iter().any(|prefix| message.starts_with(prefix)) {
+        if ["FILE_LOCKED:", "FILE_CHANGED:", "READ_REQUIRED:"].iter().any(|prefix| message.starts_with(*prefix)) {
             self.conflicts.insert(crate::run::path_key(target), message);
         }
     }
@@ -404,6 +404,39 @@ mod tests {
         change(root, &mut a, r#"{"tool":"edit","path":"shared.txt","edits":[{"oldText":"new from B","newText":"new from B and A"}]}"#).unwrap();
         assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "new from B and A");
         assert!(a.unresolved_conflicts().is_none());
+    }
+
+    #[test]
+    fn parallel_runs_keep_new_files_locked_and_reject_stale_reads_after_release() {
+        use crate::run::{DelegationScope, Snapshot};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let state = std::cell::RefCell::new(Snapshot::new(None));
+        let scope = |id| DelegationScope::Queued {
+            session_id: id, parallel: true, context_tokens: None, max_tasks: 2, max_models: 1,
+        };
+        let a = state.borrow_mut().begin_delegation("local", scope(1)).unwrap();
+        let b = state.borrow_mut().begin_delegation("local", scope(2)).unwrap();
+        let mut va = FileVersions::default();
+        let mut vb = FileVersions::default();
+        let apply = |id, versions: &mut FileVersions, request: &str| {
+            mutate(root, &[], versions, request,
+                |path| state.borrow_mut().claim_file(id, path).map_err(io::Error::other),
+                |path| { state.borrow_mut().release_file(id, path); })
+        };
+        let read = r#"{"path":"new.txt"}"#;
+        apply(a, &mut va, r#"{"tool":"write","path":"new.txt","content":"first"}"#).unwrap();
+        vb.read(root, read).unwrap();
+        let b_write = r#"{"tool":"write","path":"new.txt","content":"second"}"#;
+        assert!(apply(b, &mut vb, b_write).unwrap_err().to_string().contains("FILE_LOCKED"));
+        apply(a, &mut va, r#"{"tool":"write","path":"new.txt","content":"first updated"}"#).unwrap();
+        state.borrow_mut().finish_delegation(a, true);
+        assert!(apply(b, &mut vb, b_write).unwrap_err().to_string().contains("FILE_CHANGED"));
+        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "first updated");
+        vb.read(root, read).unwrap();
+        apply(b, &mut vb, r#"{"tool":"edit","path":"new.txt","edits":[{"oldText":"first updated","newText":"first updated + second"}]}"#).unwrap();
+        assert!(vb.unresolved_conflicts().is_none());
+        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "first updated + second");
     }
 
     #[test]
