@@ -113,11 +113,22 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-main { display: flex; flex-direction: column; min-width: 0; }
 .project-selection { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
 .project-heading { flex: 1 1 175px; min-width: 0; }
-.project-heading p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-heading h3, .project-dialog h3 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
-#project-chat-workspace { margin-top: 4px; font: .74rem/1.5 var(--mono); }
-.project-working-model { display: flex; align-items: center; gap: 6px; margin-top: 7px; color: #d4e8c4; font: .75rem/1.4 var(--mono); overflow-wrap: anywhere; }
-.project-working-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--accent); }
+.project-header-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 9px; margin-top: 4px; color: var(--muted); font-size: .72rem; line-height: 1.4; min-width: 0; }
+#project-breadcrumb { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.project-job-status { flex: 0 0 auto; }
+.project-job-status[data-state="completed"] { color: #a9c0a6; }
+.project-job-status[data-state="failed"], .project-job-status[data-state="blocked"] { color: #f0a09a; }
+.project-working-model { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; font: .72rem/1.4 var(--mono); overflow-wrap: anywhere; }
+.project-working-model[data-active="true"] { color: #d4e8c4; }
+.project-working-dot { display: none; width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--accent); }
+.project-working-model[data-active="true"] .project-working-dot { display: block; }
+.project-workspace-button { display: inline-flex; align-items: center; justify-content: center; padding: 3px; border-radius: 4px; background: transparent; color: var(--muted); }
+.project-workspace-button:hover:not(:disabled), .project-workspace-button[aria-expanded="true"] { background: #27362b; color: var(--accent); }
+.terminal-popover.project-workspace-popover { width: min(380px, calc(100vw - 16px)); max-width: calc(100vw - 16px); }
+#project-workspace-paths { display: grid; gap: 5px; padding: 4px 8px 7px; }
+#project-workspace-paths code { font-size: .75rem; overflow-wrap: anywhere; }
+#project-workspace-dependencies { overflow-wrap: anywhere; border-top: 1px solid var(--line); }
 .project-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .84rem; }
 .project-action-menu { position: fixed; inset: auto; margin: 0; min-width: 156px; max-width: calc(100vw - 16px); padding: 5px; border: 1px solid #536453; border-radius: 8px; background: #202b24; color: inherit; box-shadow: 0 8px 20px #0005; }
 .project-action-menu:popover-open { display: grid; gap: 2px; }

@@ -100,6 +100,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
   let history = [];
   let thinkingDelegation;
   let renderedChatId;
+  const workspaceButton = get('project-chat-workspace');
+  const workspacePopover = get('project-workspace-popover');
   const expandedDetails = new Set();
   const activityOverrides = new Map();
   let animateNextHistory = false;
@@ -182,10 +184,18 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const taskPending = pendingTask(owner);
     const active = chat && (sending.has(chat.id) || delegation || taskPending);
     const workingModel = delegation?.[1].model ?? sending.get(chat?.id)?.model;
+    const displayedModel = workingModel ?? owner?.job?.model;
     const workingModelNode = get('project-working-model');
     const workingName = get('project-working-model-name');
-    workingModelNode.hidden = !workingModel;
-    if (workingName.textContent !== (workingModel ?? '')) workingName.textContent = workingModel ?? '';
+    workingModelNode.hidden = !displayedModel;
+    workingModelNode.dataset.active = String(Boolean(workingModel));
+    if (workingName.textContent !== (displayedModel ?? '')) workingName.textContent = displayedModel ?? '';
+    workingModelNode.title = displayedModel ?? '';
+    const jobStatus = get('project-job-status');
+    const status = delegation ? 'В работе' : owner?.job ? taskStatus(owner.job) : '';
+    jobStatus.hidden = !status;
+    jobStatus.dataset.state = delegation ? 'running' : owner?.job?.status ?? '';
+    if (jobStatus.textContent !== status) jobStatus.textContent = status;
     const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
     const contextNotice = delegation?.[1].context_notice ?? run?.chat_context?.[chat?.id] ?? run?.chat_context?.[owner?.id];
     const contextStatus = {
@@ -423,6 +433,33 @@ export function createProjects({ onSelection = () => {} } = {}) {
       : archiveView ? 'Архив пуст.' : 'Рабочих проектов пока нет.';
   }
 
+  function closeWorkspacePopover() {
+    if (workspacePopover.matches(':popover-open')) workspacePopover.hidePopover();
+  }
+
+  function positionWorkspacePopover() {
+    if (!workspacePopover.matches(':popover-open')) return;
+    const rect = workspaceButton.getBoundingClientRect();
+    const width = workspacePopover.offsetWidth;
+    const height = workspacePopover.offsetHeight;
+    const top = rect.bottom + height + 12 <= window.innerHeight ? rect.bottom + 4 : rect.top - height - 4;
+    workspacePopover.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
+    workspacePopover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
+  }
+
+  workspaceButton.onclick = () => {
+    if (workspacePopover.matches(':popover-open')) closeWorkspacePopover();
+    else {
+      workspacePopover.showPopover({ source: workspaceButton });
+      positionWorkspacePopover();
+    }
+  };
+  workspacePopover.addEventListener('toggle', () => {
+    workspaceButton.setAttribute('aria-expanded', String(workspacePopover.matches(':popover-open')));
+  });
+  window.addEventListener('resize', positionWorkspacePopover);
+  window.addEventListener('scroll', positionWorkspacePopover, true);
+
   function closeEntryMenu() {
     if (entryMenu.matches(':popover-open')) entryMenu.hidePopover();
   }
@@ -651,6 +688,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
       if (chat.group) collapsedGroups.delete(`${projectId}/group/${chat.group.id}`);
     }
     if (chatId !== previousChat) {
+      closeWorkspacePopover();
       closeEntryMenu();
       history = [];
       prompt.value = drafts.get(chatId) ?? '';
@@ -659,25 +697,25 @@ export function createProjects({ onSelection = () => {} } = {}) {
     renderTree(projects);
     get('project-selection').hidden = !project;
     const breadcrumb = get('project-breadcrumb');
+    get('project-header-meta').hidden = !chat;
     breadcrumb.hidden = !chat;
-    breadcrumb.textContent = chat ? [project.name, chat.group?.name].filter(Boolean).join(' · ') : '';
+    breadcrumb.textContent = chat ? [...new Set([project.name, chat.group?.name].filter(Boolean))].join(' / ') : '';
+    breadcrumb.title = breadcrumb.textContent;
     get('current-project-title').textContent = chat ? chatLabel(chat) : project?.name ?? '';
-    const jobStatus = get('project-job-status');
-    jobStatus.hidden = !chat?.job;
-    const dependencies = chat?.job?.after?.map(id => {
+    const owner = taskChat(chat);
+    const dependencies = owner?.job?.after?.map(id => {
       const dependency = project.sessions.find(candidate => candidate.id === id);
       return dependency ? chatLabel(dependency, project) : `#${id}`;
     }).join(', ');
-    jobStatus.textContent = chat?.job
-      ? [taskStatus(chat.job), chat.job.model, dependencies && `После ${dependencies}`].filter(Boolean).join(' · ') : '';
-    const workspace = get('project-chat-workspace');
-    workspace.hidden = !chat;
-    const owner = taskChat(chat);
+    workspaceButton.hidden = !chat;
     const primary = pendingTask(owner) ? owner.folder : project?.folders[0];
     const workingFolders = chat ? [primary, ...project.folders.filter(folder => folder !== primary)].filter(Boolean) : [];
-    workspace.textContent = !chat ? '' : !primary ? 'Внутренняя рабочая папка проекта' :
-      [primary, ...(workingFolders.length > 1 ? [`+${workingFolders.length - 1}`] : [])].join(' · ');
-    workspace.title = workingFolders.join('\n');
+    const paths = workingFolders.length ? workingFolders : ['Внутренняя рабочая папка проекта'];
+    get('project-workspace-paths').replaceChildren(...paths.map(path => element('code', path)));
+    const dependencyText = get('project-workspace-dependencies');
+    dependencyText.hidden = !dependencies;
+    dependencyText.textContent = dependencies ? `После: ${dependencies}` : '';
+    positionWorkspacePopover();
     const notice = get('project-archive-notice');
     notice.hidden = !project?.archived && !chat?.archived;
     notice.textContent = project?.archived ? 'Проект в архиве. Восстанови проект, чтобы продолжить работу.'
