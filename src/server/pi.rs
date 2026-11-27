@@ -39,6 +39,7 @@ struct Completion {
 
 impl Completion {
     fn confirm(&mut self, request: &str) -> Result<(), String> {
+        self.invalidate();
         let value: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
         let summary = value["summary"].as_str().map(str::trim)
             .filter(|s| !s.is_empty() && s.len() <= 8_000)
@@ -493,7 +494,14 @@ pub(super) async fn run(
                         let id = event["id"].as_str().ok_or("Missing Pi completion request ID")?;
                         let request = event["placeholder"].as_str().ok_or("Missing Pi completion request")?;
                         let result = match completion.confirm(request) {
-                            Ok(()) => json!({"ok": true}),
+                            Ok(()) => {
+                                let (status, summary) = match completion.confirmation.as_ref().expect("confirmed outcome") {
+                                    Confirmation::Completed(summary) => ("completed", summary),
+                                    Confirmation::Blocked(summary) => ("blocked", summary),
+                                };
+                                log(Kind::Pi, "Confirmed outcome", summary, Some(status));
+                                json!({"ok": true})
+                            }
                             Err(error) => json!({"ok": false, "message": error}),
                         };
                         rpc_send(stdin, json!({
@@ -703,7 +711,7 @@ pub(super) async fn run(
                     event["error"].as_str().unwrap_or("unknown error")
                 ));
             }
-            Some("agent_end") if legacy_rpc && (!completion_required || completion_terminal) => {
+            Some("agent_end") if legacy_rpc && !completion_required => {
                 // Pi 0.x checks extension shutdown requests after handling an RPC command.
                 rpc_send(
                     stdin.as_mut().expect("Pi RPC input"),
