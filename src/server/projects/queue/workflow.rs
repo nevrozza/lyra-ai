@@ -12,6 +12,9 @@ use crate::{
 };
 
 const MAX_REVIEWS: u8 = 3;
+const FIX_INSTRUCTIONS_LIMIT: usize = 2_000;
+const REVIEW_SCOPE_LIMIT: usize = 32_000;
+const LAUNCH_SCOPE_LIMIT: usize = 4_000;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Config {
@@ -32,7 +35,7 @@ impl Config {
         Self {
             review: Step {
                 model,
-                prompt: prompt[..prompt.floor_char_boundary(4_000)].to_owned(),
+                prompt: prompt[..prompt.floor_char_boundary(REVIEW_SCOPE_LIMIT)].to_owned(),
             },
             launch: None,
             max_fixes: None,
@@ -50,10 +53,13 @@ impl Config {
             let name = crate::model_name(model).map_err(invalid)?;
             *model = mcp::resolve_model(installed, &name).map_err(invalid)?;
         }
-        for step in std::iter::once(&self.review).chain(self.launch.as_ref()) {
-            if step.prompt.trim().is_empty() || step.prompt.len() > 4_000 {
-                return Err(invalid("Укажите цель проверки и запуска до 4000 байт."));
-            }
+        if self.review.prompt.trim().is_empty() || self.review.prompt.len() > REVIEW_SCOPE_LIMIT {
+            return Err(invalid("Укажите ТЗ проверки до 32000 байт."));
+        }
+        if self.launch.as_ref().is_some_and(|step|
+            step.prompt.trim().is_empty() || step.prompt.len() > LAUNCH_SCOPE_LIMIT)
+        {
+            return Err(invalid("Укажите цель проверки запуска до 4000 байт."));
         }
         if self.max_fixes.is_some_and(|limit| limit > 8) {
             return Err(invalid("max_fixes должен быть от 0 до 8."));
@@ -217,6 +223,9 @@ fn first_round() -> u8 {
 struct Finding {
     location: String,
     issue: String,
+    // Existing review jobs and persisted findings can predate detailed briefs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
     check: String,
     model: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -351,6 +360,11 @@ impl Workflow {
                         {
                             return Err("В списке фиксов есть замечание без короткого места, описания или критерия проверки.".into());
                         }
+                        if finding.instructions.as_ref().is_some_and(|instructions|
+                            instructions.trim().is_empty() || instructions.len() > FIX_INSTRUCTIONS_LIMIT)
+                        {
+                            return Err("ТЗ локального фикса должно содержать от 1 до 2000 байт.".into());
+                        }
                         if !candidates
                             .iter()
                             .any(|candidate| candidate.model == finding.model)
@@ -423,9 +437,11 @@ impl Workflow {
 
     fn fix_step(&mut self, finding: &Finding, stage: Stage) -> NextStep {
         self.fixes += 1;
-        let report = serde_json::to_string(finding).expect("serialize fix report");
         let mut prompt = format!(
-            "Apply exactly one small local fix for the finding below. Verify that it still applies to the current project files. Read only the smallest relevant section and its immediate callers or tests. Keep other behavior and files intact wherever possible. Run a focused check if the shell is available.\nFinding: {report}"
+            "Apply exactly one local fix. Verify the evidence against current files and relevant predecessor handoffs before editing. Read the affected code, immediate callers and tests. Preserve other behavior, interfaces and concurrent contributions. Do not bypass guarded file tools.\n\n## Goal and evidence\nLocation: {}\nProblem: {}\n\n## Technical assignment\n{}\n\n## Acceptance and verification\n{}\nRun the focused check if available; report its actual outcome, changed paths and any blockers. If the proposed fix no longer applies, verify whether the issue is already resolved; do not invent a new defect or broaden the task.",
+            finding.location, finding.issue,
+            finding.instructions.as_deref().unwrap_or("Legacy finding without a separate correction plan: inspect the specified location and use the issue and acceptance check to make the smallest verified correction. Report missing decisions rather than guessing."),
+            finding.check,
         );
         if stage == Stage::BatchFix {
             prompt.push_str(r#"
@@ -498,8 +514,9 @@ fn review_prompt(scope: &str, round: u8) -> String {
 
 Return only one JSON object as the final answer:
 {{"status":"pass","summary":"checks passed, at most 360 characters"}}
-{{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"one concrete problem, at most 360 characters","check":"one focused acceptance check, at most 240 characters","model":"exact installed model tag","after":[]}}]}}
+{{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"observed defect and evidence, at most 360 characters","instructions":"concrete correction steps, relevant code pointers, constraints and edge cases; at most {FIX_INSTRUCTIONS_LIMIT} UTF-8 bytes","check":"focused acceptance check and expected result, at most 240 characters","model":"exact installed model tag","after":[]}}]}}
 {{"status":"blocked","reason":"why the check cannot be completed, at most 360 characters"}}
+For each new finding, provide a self-contained technical assignment in instructions, not just a diagnosis. State verified files/symbols, the correction sequence, expected interfaces and invariants, edge cases and what must stay unchanged. Distinguish verified facts from hypotheses. Low needs exact mechanical before/after instructions; Medium needs concrete implementation steps and contracts; High may choose the implementation within explicit requirements. Never invent paths, APIs or test commands. Name the relevant prior finding if its result is required. The instructions are passed to the selected fix worker. Keep the entire JSON within the review answer limit of 32000 UTF-8 bytes; prioritize actionable detail, not raw source or logs.
 Use after for findings touching the same file or requiring earlier results, referring to earlier findings by one-based position. Independent fixes can run in parallel using dynamic file locks and version checks; review runs after all fixes succeed. Never bypass file tools via run_command. Report a blocked verdict if an essential file is locked.
 Use pass only after covering the full task diff and confirming the acceptance criteria. For each fix, choose from the provided list and honor any model restrictions in the review scope. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability. Prefer a model with a passed Pi check when available. Use blocked if you cannot cover the full change or complete a necessary check. Keep the whole report compact, without source excerpts.
 
@@ -517,4 +534,28 @@ fn launch_prompt(scope: &str) -> String {
 Startup goal:
 {scope}"#
     )
+}
+
+#[cfg(test)]
+mod brief_tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_review_retains_the_full_valid_implementation_brief() {
+        let brief = format!("{}\nFinal acceptance: preserve the original API.", "a".repeat(5_000));
+        let config = Config::for_dashboard("local".into(), &brief);
+        assert_eq!(config.review.prompt, brief);
+        let prompt = review_prompt(&config.review.prompt, 1);
+        assert!(prompt.contains("Final acceptance: preserve the original API."));
+        assert!(prompt.contains("\"instructions\""));
+        assert!(prompt.contains("2000 UTF-8 bytes"));
+    }
+
+    #[test]
+    fn persisted_legacy_findings_remain_readable() {
+        let finding: Finding = serde_json::from_str(
+            r#"{"location":"src/a.rs","issue":"missing guard","check":"guard rejects invalid input","model":"local","write_paths":["src/a.rs"]}"#,
+        ).unwrap();
+        assert!(finding.instructions.is_none());
+    }
 }

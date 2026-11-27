@@ -19,6 +19,8 @@ use super::{
 };
 
 const ANSWER_LIMIT: usize = 8_000;
+// Automatic review verdicts carry technical assignments for multiple fixes.
+const REVIEW_ANSWER_LIMIT: usize = 32_000;
 const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
 mod review_diff;
@@ -228,6 +230,7 @@ pub(super) async fn run(
     let reviewing = task
         .as_ref()
         .is_some_and(|task| matches!(task.role, Some(Role::Review)));
+    let answer_limit = if reviewing { REVIEW_ANSWER_LIMIT } else { ANSWER_LIMIT };
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let project_instructions;
     let agents_file = if let (Some(project), Some(directory), Some(task)) =
@@ -572,7 +575,7 @@ pub(super) async fn run(
                         }
                         Some("text_delta") => {
                             delta_bytes = delta_bytes.saturating_add(delta.len());
-                            append_tail(&mut text_deltas, delta, ANSWER_LIMIT);
+                            append_tail(&mut text_deltas, delta, answer_limit);
                         }
                         _ => {}
                     }
@@ -639,8 +642,8 @@ pub(super) async fn run(
                 } else {
                     (text.as_str(), text.len())
                 };
-                text_clipped = text_bytes > ANSWER_LIMIT;
-                answer = text[..text.floor_char_boundary(ANSWER_LIMIT)].to_owned();
+                text_clipped = text_bytes > answer_limit;
+                answer = text[..text.floor_char_boundary(answer_limit)].to_owned();
                 if !answer.trim().is_empty() {
                     log(
                         Kind::Answer,

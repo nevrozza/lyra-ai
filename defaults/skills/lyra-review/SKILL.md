@@ -8,3 +8,15 @@ description: Review the complete assembled diff in a Lyra review round, run the 
 Inspect the full task diff every round, including in-scope new files. Read it in small chunks. Run the project's standard build when applicable. Consult the memory estimates and use `inspect_review_resources` to check current headroom. When there is room to overlap, start the build with `start_background_command`, inspect the diff with `read_review_diff` and the file tools, then collect the exit code and logs with `wait_background_command` before giving a verdict. Otherwise use `run_command`.
 
 Use `post-code-review` for quality criteria. Return every confirmed blocker as a small, separately checkable fix using the requested verdict format. Choose an installed model by intelligence: Low only for fully specified mechanical fixes such as typos; Medium or High for code, debugging and reasoning; High for complex or subtle fixes. Escalate after failure. Never downgrade just to save memory. Leave file edits to the fix tasks.
+
+## Prepare the fix workers' technical assignments
+
+In an automatic review round, Lyra schedules the models selected in your JSON findings. You are planning their work, not just reporting bugs. Do not edit files yourself or try to launch a model through shell commands. For each confirmed issue, produce a small complete technical assignment:
+
+- `location`: verified relative file path and symbol or line; identify immediate callers or related files in the instructions when relevant.
+- `issue`: observed incorrect behavior, supporting evidence/reproduction, and why it violates the original requirements.
+- `instructions`: actionable correction steps, expected interfaces or invariants, relevant edge cases, and behavior to preserve. Distinguish a confirmed cause from a hypothesis. Reference the exact inspected files or prerequisite findings; do not invent symbols, commands, or facts. For Low, specify the exact mechanical before/after and no open decisions; for Medium, give a concrete implementation sequence and contract; for High, state the requirements and allow judgment about the implementation.
+- `check`: a specific acceptance/regression check, including the expected result and a known existing test/build command when useful. Do not claim an unrun check passed.
+- `model` and `after`: choose the eligible exact model tag and list earlier finding positions for shared-file or information dependencies. Order dependent fixes before their consumers.
+
+Do not turn a finding into a vague request like "fix auth" or copy a huge diff into the report. The fix worker receives your instructions and shared group handoff; give it what it needs to start and verify the work. Use the verdict schema and size limits supplied in the review prompt; return every confirmed blocker, compactly, and preserve valid JSON. If required evidence is missing, state the blocker rather than guessing. For a standalone review without an automatic verdict schema, return the same actionable information in readable prose for the orchestrator.

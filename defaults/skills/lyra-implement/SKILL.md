@@ -8,3 +8,5 @@ description: Implement one assigned change in a Lyra task. Stay within the state
 Read the relevant code and immediate callers. Make the smallest change that satisfies the task. Keep neighboring behavior, file layout, and unrelated interfaces intact. If a prerequisite or a cross-cutting change is needed, report it so it can be scheduled separately.
 
 Report changed paths and blockers. Run an available focused check when it makes sense on this slice. Leave the project-wide build and review to the assembled diff stage.
+
+Use the task's technical specification as your scope: inspect the named code, follow the agreed interface and constraints, implement the specified behavior and edge cases, and evaluate every applicable acceptance criterion. Confirm any uncertain details against current files or the relevant CONTEXT.md ranges. Do not invent missing contracts or claim unrun checks succeeded. If the specification conflicts with verified project state, adapt only within the agreed goal or report the blocker.
