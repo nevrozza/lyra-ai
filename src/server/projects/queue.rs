@@ -733,10 +733,10 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
             Ok(None) => continue, // another runner is starting or safe headroom is unavailable
             Err(error) => {
                 eprintln!("Could not plan context for {}: {error}", task.job.model);
-                requested // preserve the existing worker-side error handling
+                mcp::AutoChoice::unavailable("model settings unavailable")
             }
         };
-        let scope = scope(selected);
+        let scope = scope(selected.tokens);
         let mut delegation = None;
         if !app.task.send_if_modified(|state| {
             delegation = state.begin_delegation(&task.job.model, scope);
@@ -751,7 +751,7 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
         // Set only the execution copy, not the stored prompt: Auto is recalculated
         // for each dispatch, and a later retry can still use an explicit window.
         if let Some(input) = task.job.input.as_mut() {
-            input.context_tokens = selected.and_then(NonZeroU32::new);
+            input.context_tokens = selected.tokens.and_then(NonZeroU32::new);
         }
         let key = task.key();
         let claimed = work(app.clone(), move |app| {
@@ -766,12 +766,12 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
             continue;
         }
         app.task.send_modify(Snapshot::projects_changed);
-        tokio::spawn(run_task(app.clone(), task, delegation));
+        tokio::spawn(run_task(app.clone(), task, delegation, selected));
     }
     Ok(())
 }
 
-async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64) {
+async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, selection: mcp::AutoChoice) {
     let key = task.key();
     let mut candidates = Vec::new();
     let (status, result) = if let Some(mut input) = task.job.input.take() {
@@ -852,7 +852,7 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64) {
         if let Err((_, error)) = preparation {
             fail_dispatch(&app, delegation, error)
         } else {
-            let request = mcp::queued_request(
+            let mut request = mcp::queued_request(
                 &key,
                 task.job.model,
                 input,
@@ -864,6 +864,7 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64) {
                     }),
                 task.job.chat_session_id,
             );
+            request.context_selection = Some(selection);
             mcp::run_queued(app.clone(), request, task.job.origin, delegation).await
         }
     } else {
