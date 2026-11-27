@@ -52,14 +52,15 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
     }
     // Pi uses the OpenAI-compatible API, where Ollama takes num_ctx from the model.
     let legacy = alias(model);
-    if ollama::running_models().is_some_and(|models| {
-        models
-            .iter()
-            .any(|entry| entry.name == legacy && entry.context_length == Some(u64::from(tokens)))
-    }) {
-        return Ok(legacy);
-    }
     let alias = profile(model, tokens);
+    if let Some(loaded) = ollama::running_models().and_then(|models| {
+        models.into_iter().find(|entry| {
+            (entry.name == legacy || entry.name == alias)
+                && entry.context_length == Some(u64::from(tokens))
+        })
+    }) {
+        return Ok(loaded.name);
+    }
     #[derive(Deserialize)]
     struct Created {
         status: String,
@@ -265,7 +266,17 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
         .as_str()
         .and_then(|architecture| info.model_info[format!("{architecture}.context_length")].as_u64())
         .filter(|&tokens| tokens > 0);
-    let auto_cache = auto_cache_estimate(&info.model_info);
+    let auto_cache = auto_cache_estimate(&info.model_info).or_else(|| {
+        // Non-verbose /api/show can omit per-layer GGUF arrays. Fetch them
+        // only when the compact hybrid metadata did not suffice.
+        let arch = info.model_info["general.architecture"].as_str()?;
+        if !matches!(arch, "gemma4" | "qwen35" | "qwen35moe") { return None; }
+        let detailed = ollama::agent(Duration::from_secs(8))
+            .post("http://127.0.0.1:11434/api/show")
+            .send_json(json!({"model": model, "verbose": true})).ok()?
+            .into_json::<Show>().ok()?;
+        auto_cache_estimate(&detailed.model_info)
+    });
     Some(Estimate {
         auto_kv_bytes_per_token: auto_cache.map(|cache| cache.0),
         auto_fixed_cache_bytes: auto_cache.map(|cache| cache.1),
