@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use axum::{
@@ -33,6 +34,10 @@ const BUILT_IN_SKILLS: &[(&str, &str)] = &[
     ("lyra-review", REVIEW),
 ];
 
+fn is_builtin(name: &str) -> bool {
+    BUILT_IN_SKILLS.iter().any(|(builtin, _)| *builtin == name)
+}
+
 pub(super) fn is_role_skill(name: &str) -> bool {
     matches!(name, "lyra-implement" | "lyra-fix" | "lyra-review")
 }
@@ -40,12 +45,42 @@ const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
 
 pub(super) struct Store {
     directory: PathBuf,
+    lock: Mutex<()>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct Skill {
+pub(super) struct Skill {
     name: String,
     description: String,
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
+    #[serde(default)]
+    role_template: bool,
+    #[serde(default)]
+    builtin: bool,
+}
+
+fn enabled_by_default() -> bool { true }
+
+#[derive(Default, Deserialize, Serialize)]
+struct SkillState {
+    #[serde(default)]
+    disabled: BTreeSet<String>,
+    #[serde(default)]
+    removed: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetEnabled {
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveSkill {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +99,8 @@ type HttpError = (StatusCode, String);
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/skills", get(list).post(install))
+        .route("/skills/enabled", post(set_enabled))
+        .route("/skills/remove", post(remove))
         .route(
             "/skills/upload",
             post(upload).layer(DefaultBodyLimit::max(24 * 1024 * 1024)),
@@ -84,7 +121,10 @@ async fn install(
     tokio::task::spawn_blocking(move || {
         app.skills
             .install(&import.path)
-            .map(|skill| (StatusCode::CREATED, Json(skill)))
+            .map(|skill| {
+                app.task.send_modify(crate::run::Snapshot::skills_changed);
+                (StatusCode::CREATED, Json(skill))
+            })
     })
     .await
     .map_err(storage_error)?
@@ -97,19 +137,58 @@ async fn upload(
     tokio::task::spawn_blocking(move || {
         app.skills
             .upload(files)
-            .map(|skill| (StatusCode::CREATED, Json(skill)))
+            .map(|skill| {
+                app.task.send_modify(crate::run::Snapshot::skills_changed);
+                (StatusCode::CREATED, Json(skill))
+            })
     })
     .await
     .map_err(storage_error)?
 }
 
+async fn set_enabled(
+    State(app): State<Arc<App>>,
+    Json(input): Json<SetEnabled>,
+) -> Result<Json<Skill>, HttpError> {
+    tokio::task::spawn_blocking(move || {
+        let skill = app.skills.set_enabled(&input.name, input.enabled)?;
+        app.task.send_modify(crate::run::Snapshot::skills_changed);
+        Ok(Json(skill))
+    })
+        .await
+        .map_err(storage_error)?
+}
+
+async fn remove(
+    State(app): State<Arc<App>>,
+    Json(input): Json<RemoveSkill>,
+) -> Result<StatusCode, HttpError> {
+    tokio::task::spawn_blocking(move || {
+        let snapshot = app.task.borrow();
+        if snapshot.busy() {
+            return Err((StatusCode::CONFLICT, "Дождитесь завершения активных запусков перед удалением скилла.".into()));
+        }
+        app.skills.remove(&input.name)?;
+        drop(snapshot);
+        app.task.send_modify(crate::run::Snapshot::skills_changed);
+        Ok(StatusCode::NO_CONTENT)
+    }).await.map_err(storage_error)?
+}
+
 impl Store {
     pub(super) fn new(directory: PathBuf) -> Self {
-        Self { directory }
+        Self { directory, lock: Mutex::new(()) }
     }
 
     pub(super) fn install_defaults(&self) -> io::Result<()> {
+        let _guard = self.lock.lock().expect("skill store lock");
         fs::create_dir_all(&self.directory)?;
+        let mut state = self.state()?;
+        // Restore built-ins removed by an earlier version, but respect the user's
+        // intent not to use them by restoring them in the disabled state.
+        let removed = std::mem::take(&mut state.removed);
+        let migrated = !removed.is_empty();
+        state.disabled.extend(removed.into_iter().filter(|name| is_builtin(name)));
         for &(name, manifest) in BUILT_IN_SKILLS {
             let directory = self.directory.join(name);
             match fs::create_dir(&directory) {
@@ -129,10 +208,12 @@ impl Store {
             io::Write::write_all(&mut file, manifest.as_bytes())?;
             file.persist(directory.join(MANIFEST))?;
         }
+        if migrated { self.save_state(&state)?; }
         Ok(())
     }
 
     fn install(&self, path: &Path) -> Result<Skill, HttpError> {
+        let _guard = self.lock.lock().expect("skill store lock");
         if !path.is_absolute() {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -159,10 +240,11 @@ impl Store {
                 "Имя скилла изменилось во время установки.".into(),
             ));
         }
-        Self::publish(&root, &package, copied_skill)
+        self.publish(&root, &package, copied_skill)
     }
 
     fn upload(&self, files: Vec<UploadedFile>) -> Result<Skill, HttpError> {
+        let _guard = self.lock.lock().expect("skill store lock");
         if files.is_empty() || files.len() > 2048 {
             return Err(source_error(invalid("Выберите от 1 до 2048 файлов.")));
         }
@@ -187,7 +269,7 @@ impl Store {
             io::Write::write_all(&mut target, &data).map_err(storage_error)?;
         }
         let skill = manifest(&package).map_err(source_error)?;
-        Self::publish(&root, &package, skill)
+        self.publish(&root, &package, skill)
     }
 
     fn root(&self) -> Result<PathBuf, HttpError> {
@@ -204,7 +286,8 @@ impl Store {
         }
     }
 
-    fn publish(root: &Path, package: &Path, skill: Skill) -> Result<Skill, HttpError> {
+    fn publish(&self, root: &Path, package: &Path, mut skill: Skill) -> Result<Skill, HttpError> {
+        let mut state = self.state().map_err(storage_error)?;
         let target = Self::install_target(root, &skill)?;
         if let Err(error) = fs::rename(package, &target) {
             return Err(if fs::symlink_metadata(&target).is_ok() {
@@ -213,10 +296,97 @@ impl Store {
                 storage_error(error)
             });
         }
+        let changed = state.removed.remove(&skill.name) | state.disabled.remove(&skill.name);
+        if changed {
+            if let Err(error) = self.save_state(&state) {
+                fs::rename(&target, package).map_err(storage_error)?;
+                return Err(storage_error(error));
+            }
+        }
+        skill.enabled = true;
+        skill.role_template = is_role_skill(&skill.name);
+        skill.builtin = is_builtin(&skill.name);
         Ok(skill)
     }
 
-    fn list(&self) -> io::Result<Vec<Skill>> {
+    fn state(&self) -> io::Result<SkillState> {
+        match fs::read(self.directory.join(".skill-state.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(SkillState::default()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn save_state(&self, state: &SkillState) -> io::Result<()> {
+        let mut file = tempfile::NamedTempFile::new_in(&self.directory)?;
+        serde_json::to_writer(&mut file, state).map_err(io::Error::other)?;
+        file.as_file().sync_all()?;
+        file.persist(self.directory.join(".skill-state.json"))?;
+        Ok(())
+    }
+
+    fn installed_skill(&self, name: &str) -> Result<(PathBuf, Skill), HttpError> {
+        if !valid_name(name) {
+            return Err((StatusCode::BAD_REQUEST, "Некорректное имя скилла.".into()));
+        }
+        let target = self.directory.join(name);
+        let metadata = fs::symlink_metadata(&target).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                (StatusCode::NOT_FOUND, format!("Скилл «{name}» не установлен."))
+            } else { storage_error(error) }
+        })?;
+        if is_link(&metadata) || !metadata.is_dir() {
+            return Err((StatusCode::BAD_REQUEST, "Недопустимая папка скилла.".into()));
+        }
+        let skill = manifest(&target).map_err(storage_error)?;
+        if skill.name != name {
+            return Err((StatusCode::CONFLICT, "Имя скилла не совпадает с папкой.".into()));
+        }
+        Ok((target, skill))
+    }
+
+    fn set_enabled(&self, name: &str, enabled: bool) -> Result<Skill, HttpError> {
+        let _guard = self.lock.lock().expect("skill store lock");
+        let (_, mut skill) = self.installed_skill(name)?;
+        let mut state = self.state().map_err(storage_error)?;
+        if state.removed.contains(name) {
+            return Err((StatusCode::NOT_FOUND, format!("Скилл «{name}» удалён.")));
+        }
+        let changed = if enabled { state.disabled.remove(name) } else { state.disabled.insert(name.into()) };
+        if changed { self.save_state(&state).map_err(storage_error)?; }
+        skill.enabled = enabled;
+        skill.role_template = is_role_skill(name);
+        skill.builtin = is_builtin(name);
+        Ok(skill)
+    }
+
+    fn remove(&self, name: &str) -> Result<(), HttpError> {
+        let _guard = self.lock.lock().expect("skill store lock");
+        if is_builtin(name) {
+            return Err((StatusCode::FORBIDDEN, "Встроенный скилл нельзя удалить. Его можно отключить.".into()));
+        }
+        let (target, _) = self.installed_skill(name)?;
+        let mut state = self.state().map_err(storage_error)?;
+        state.disabled.remove(name);
+        let trash = staging(&self.directory)?;
+        let package = trash.path().join("package");
+        fs::rename(&target, &package).map_err(storage_error)?;
+        if let Err(error) = self.save_state(&state) {
+            fs::rename(&package, &target).map_err(storage_error)?;
+            return Err(storage_error(error));
+        }
+        // TempDir cleans up all package files; no original import folder is touched.
+        trash.close().map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub(super) fn list(&self) -> io::Result<Vec<Skill>> {
+        let _guard = self.lock.lock().expect("skill store lock");
+        self.list_unlocked()
+    }
+
+    fn list_unlocked(&self) -> io::Result<Vec<Skill>> {
+        let state = self.state()?;
         let entries = match fs::read_dir(&self.directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -233,7 +403,8 @@ impl Store {
             if is_link(&metadata) || !metadata.is_dir() {
                 continue;
             }
-            let skill = manifest(&entry.path())
+            if state.removed.contains(name) { continue; }
+            let mut skill = manifest(&entry.path())
                 .map_err(|error| io::Error::new(error.kind(), format!("{name}: {error}")))?;
             if skill.name != name {
                 return Err(invalid(format!(
@@ -241,10 +412,18 @@ impl Store {
                     skill.name
                 )));
             }
+            skill.enabled = !state.disabled.contains(name);
+            skill.role_template = is_role_skill(name);
+            skill.builtin = is_builtin(name);
             skills.push(skill);
         }
         skills.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         Ok(skills)
+    }
+
+    pub(super) fn enabled(&self, name: &str) -> Result<bool, String> {
+        self.list().map(|skills| skills.iter().any(|skill| skill.name == name && skill.enabled))
+            .map_err(|error| storage_error(error).1)
     }
 
     pub(super) fn paths(&self, selected: Option<&[String]>) -> Result<Vec<PathBuf>, String> {
@@ -254,8 +433,10 @@ impl Store {
         let installed = self.list().map_err(|error| storage_error(error).1)?;
         if let Some(selected) = selected {
             for name in selected {
-                if !installed.iter().any(|skill| &skill.name == name) {
-                    return Err(format!("Pi skill is not installed: {name}"));
+                match installed.iter().find(|skill| &skill.name == name) {
+                    None => return Err(format!("Pi skill is not installed: {name}")),
+                    Some(skill) if !skill.enabled => return Err(format!("Pi skill is disabled: {name}")),
+                    Some(_) => {}
                 }
             }
         }
@@ -267,7 +448,7 @@ impl Store {
         Ok(installed
             .into_iter()
             .filter(|skill| {
-                selected.map_or_else(
+                skill.enabled && selected.map_or_else(
                     || !is_role_skill(&skill.name),
                     |names| names.contains(&skill.name),
                 )
@@ -342,9 +523,13 @@ fn manifest(directory: &Path) -> io::Result<Skill> {
     }
     let text = fs::read_to_string(path)?;
     let (yaml, _) = split_frontmatter(&text)?;
-    let skill: Skill = serde_saphyr::from_str(yaml)
+    let mut skill: Skill = serde_saphyr::from_str(yaml)
         .map_err(|error| invalid(format!("Некорректный YAML в SKILL.md: {error}")))?;
     validate(&skill)?;
+    // Catalog metadata comes from the store, never from imported frontmatter.
+    skill.enabled = true;
+    skill.role_template = is_role_skill(&skill.name);
+    skill.builtin = is_builtin(&skill.name);
     Ok(skill)
 }
 
@@ -507,6 +692,69 @@ mod tests {
                 .join("post-code-review")
                 .join(MANIFEST)]
         );
+    }
+
+    #[test]
+    fn builtins_are_protected_but_can_be_disabled_and_reenabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("installed");
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        for &(name, _) in BUILT_IN_SKILLS {
+            assert!(store.list().unwrap().iter().any(|skill| skill.name == name && skill.builtin));
+            assert!(matches!(store.remove(name), Err((StatusCode::FORBIDDEN, _))));
+            assert!(directory.join(name).join(MANIFEST).is_file());
+            store.set_enabled(name, false).unwrap();
+            assert!(!store.enabled(name).unwrap());
+            assert!(store.paths(Some(&[name.into()])).unwrap_err().contains("disabled"));
+        }
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        assert!(store.paths(None).unwrap().is_empty());
+        for &(name, _) in BUILT_IN_SKILLS {
+            assert!(!store.enabled(name).unwrap());
+            store.set_enabled(name, true).unwrap();
+            assert_eq!(store.paths(Some(&[name.into()])).unwrap().len(), 1);
+        }
+        assert!(store.remove("../outside").is_err());
+    }
+
+    #[test]
+    fn imported_skills_can_be_removed_and_reinstalled() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("installed");
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        let upload = || vec![UploadedFile {
+            path: MANIFEST.into(),
+            data: STANDARD.encode("---\nname: custom\ndescription: Test\n---\n"),
+        }];
+        let skill = store.upload(upload()).unwrap();
+        assert!(!skill.builtin);
+        store.set_enabled("custom", false).unwrap();
+        store.remove("custom").unwrap();
+        assert!(!directory.join("custom").exists());
+        let store = Store::new(directory);
+        store.install_defaults().unwrap();
+        assert!(!store.list().unwrap().iter().any(|skill| skill.name == "custom"));
+        assert!(store.upload(upload()).unwrap().enabled);
+    }
+
+    #[test]
+    fn previously_removed_builtins_are_restored_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("installed");
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        fs::remove_dir_all(directory.join("ast-index")).unwrap();
+        store.save_state(&SkillState {
+            removed: BTreeSet::from(["ast-index".into()]),
+            ..SkillState::default()
+        }).unwrap();
+        store.install_defaults().unwrap();
+        assert!(directory.join("ast-index").join(MANIFEST).is_file());
+        assert!(!store.enabled("ast-index").unwrap());
+        assert!(store.state().unwrap().removed.is_empty());
     }
 
     #[test]
