@@ -222,6 +222,10 @@ impl Snapshot {
         self.delegations.len()
     }
 
+    pub fn active_context_profiles(&self) -> Vec<(String, Option<u32>)> {
+        self.delegations.values().map(|active| (active.model.clone(), active.context_tokens)).collect()
+    }
+
     pub fn active_context_for_model(&self, model: &str) -> Option<Option<u32>> {
         self.delegations.values().find(|active| active.model == model)
             .map(|active| active.context_tokens)
