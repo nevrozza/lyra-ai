@@ -141,6 +141,10 @@ pub(super) struct Archive {
 #[derive(Serialize)]
 pub(super) struct Message {
     role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<ToolTrace>,
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<String>,
@@ -620,7 +624,9 @@ impl Store {
                     messages.pop_front();
                 }
                 messages.push_back(Message {
+                    tool: None,
                     role: "notice",
+                    timestamp: entry_timestamp(&entry),
                     text: "История сжата для модели. Исходная переписка сохранена.".into(),
                     thinking: None,
                     model: None,
@@ -638,13 +644,18 @@ impl Store {
                     messages.pop_front();
                 }
                 messages.push_back(Message {
+                    tool: None,
                     role: "notice",
+                    timestamp: entry_timestamp(&entry),
                     text: format!("Использован скилл: {skill}"),
                     thinking: None,
                     model: None,
                     origin: None,
                     request_id: None,
                 });
+            }
+            if dashboard && message["role"] == "toolResult" {
+                finish_tool(&mut messages, message, entry_timestamp(&entry));
             }
             let role = match message["role"].as_str() {
                 Some("user") => "user",
@@ -717,7 +728,9 @@ impl Store {
                     None
                 };
                 messages.push_back(Message {
+                    tool: None,
                     role,
+                    timestamp: dashboard.then(|| entry_timestamp(&entry)).flatten(),
                     text: text[..text.floor_char_boundary(24_000)].to_owned(),
                     thinking: thinking.map(|mut text| {
                         text.truncate(text.floor_char_boundary(CHAT_THINKING_LIMIT));
@@ -727,6 +740,9 @@ impl Store {
                     origin: metadata.as_ref().map(|metadata| metadata.origin),
                     request_id: metadata.and_then(|metadata| metadata.request_id),
                 });
+            }
+            if dashboard && role == "assistant" {
+                append_tool_calls(&mut messages, content, entry_timestamp(&entry));
             }
         }
         if !saw_queued_prompt
@@ -743,6 +759,102 @@ impl Store {
         }
         Ok(messages)
     }
+}
+
+// Pi messages use Unix milliseconds; session entries also carry an ISO timestamp.
+fn entry_timestamp(entry: &Value) -> Option<u64> {
+    entry["message"]["timestamp"].as_u64().or_else(|| {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(entry["timestamp"].as_str()?).ok()?;
+        u64::try_from(timestamp.timestamp_millis()).ok()
+    })
+}
+
+const TOOL_PREVIEW_LIMIT: usize = 8_000;
+
+#[derive(Serialize)]
+struct ToolTrace {
+    id: String,
+    name: String,
+    arguments: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finished_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+}
+
+fn tool_preview(mut text: String) -> String {
+    if text.len() > TOOL_PREVIEW_LIMIT {
+        text.truncate(text.floor_char_boundary(TOOL_PREVIEW_LIMIT));
+        text.push_str("\n… (вывод сокращён)");
+    }
+    text
+}
+
+fn skill_read_name(part: &Value) -> Option<&str> {
+    if part["name"] != "read" {
+        return None;
+    }
+    let path = part["arguments"]["path"].as_str()?;
+    let mut parts = path.rsplit(['/', '\\']);
+    if !parts.next()?.eq_ignore_ascii_case("SKILL.md") {
+        return None;
+    }
+    parts.next().filter(|name| !name.is_empty() && *name != "." && *name != "..")
+}
+
+fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestamp: Option<u64>) {
+    for part in content.as_array().into_iter().flatten() {
+        if part["type"] != "toolCall" || skill_read_name(part).is_some() {
+            continue;
+        }
+        let (Some(id), Some(name)) = (part["id"].as_str(), part["name"].as_str()) else {
+            continue;
+        };
+        if messages.len() == 100 {
+            messages.pop_front();
+        }
+        messages.push_back(Message {
+            role: "tool",
+            timestamp,
+            tool: Some(ToolTrace {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments: tool_preview(serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default()),
+                status: "pending",
+                finished_at: None,
+                result: None,
+            }),
+            text: String::new(),
+            thinking: None,
+            model: None,
+            origin: None,
+            request_id: None,
+        });
+    }
+}
+
+fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Option<u64>) {
+    let (Some(id), Some(name)) = (message["toolCallId"].as_str(), message["toolName"].as_str()) else {
+        return;
+    };
+    let Some(tool) = messages.iter_mut().rev().filter_map(|entry| entry.tool.as_mut())
+        .find(|tool| tool.id == id && tool.name == name && tool.status == "pending") else {
+        return;
+    };
+    tool.status = if message["isError"] == true { "error" } else { "ok" };
+    let content = &message["content"];
+    let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
+        content.as_array().into_iter().flatten().map(|part| {
+            match part["type"].as_str() {
+                Some("text") => part["text"].as_str().unwrap_or_default(),
+                Some("image") => "[изображение]",
+                _ => "[нетекстовый результат]",
+            }
+        }).collect::<Vec<_>>().join("\n")
+    });
+    tool.result = Some(tool_preview(text));
+    tool.finished_at = timestamp;
 }
 
 // Pi exposes skill descriptions in its prompt and reads the actual SKILL.md
@@ -763,15 +875,7 @@ impl SkillReads {
                         continue;
                     }
                     let Some(id) = part["id"].as_str() else { continue };
-                    let Some(path) = part["arguments"]["path"].as_str() else { continue };
-                    // Both native Windows paths and forward-slash paths occur in Pi calls.
-                    let mut parts = path.rsplit(['/', '\\']);
-                    if !parts.next().is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md")) {
-                        continue;
-                    }
-                    if let Some(name) = parts.next().filter(|name| {
-                        !name.is_empty() && *name != "." && *name != ".."
-                    }) {
+                    if let Some(name) = skill_read_name(part) {
                         self.pending.insert(id.to_owned(), name.to_owned());
                     }
                 }
@@ -929,6 +1033,40 @@ fn storage(error: impl std::fmt::Display) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_timestamp_uses_pi_message_or_saved_entry_time() {
+        assert_eq!(entry_timestamp(&serde_json::json!({"message":{"timestamp":1234}})), Some(1234));
+        assert_eq!(entry_timestamp(&serde_json::json!({"timestamp":"1970-01-01T00:00:02Z"})), Some(2000));
+        assert_eq!(entry_timestamp(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn tool_calls_match_results_by_id_and_hide_skill_reads() {
+        let mut messages = VecDeque::new();
+        let calls = serde_json::json!([
+            {"type":"toolCall","id":"a","name":"read","arguments":{"path":"src/main.rs"}},
+            {"type":"toolCall","id":"b","name":"run_command","arguments":{"command":"cargo test"}},
+            {"type":"toolCall","id":"c","name":"read","arguments":{"path":"skills/review/SKILL.md"}}
+        ]);
+        append_tool_calls(&mut messages, &calls, Some(1000));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tool.as_ref().unwrap().status, "pending");
+        assert_eq!(messages[0].timestamp, Some(1000));
+        finish_tool(&mut messages, &serde_json::json!({
+            "toolCallId":"b","toolName":"run_command","isError":true,
+            "content":[{"type":"text","text":"failed"}]
+        }), Some(2000));
+        assert_eq!(messages[1].tool.as_ref().unwrap().status, "error");
+        assert_eq!(messages[1].tool.as_ref().unwrap().result.as_deref(), Some("failed"));
+        finish_tool(&mut messages, &serde_json::json!({
+            "toolCallId":"a","toolName":"read","isError":false,
+            "content":[{"type":"text","text":"code"}]
+        }), Some(2000));
+        assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
+        assert_eq!(messages[0].tool.as_ref().unwrap().finished_at, Some(2000));
+        assert_eq!(messages[0].tool.as_ref().unwrap().result.as_deref(), Some("code"));
+    }
 
     #[test]
     fn skill_notices_follow_successful_reads_only() {

@@ -108,7 +108,14 @@ h2 { font-size: .96rem; font-weight: 650; }
 @keyframes project-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .project-spinner { animation: none; } }
 #project-messages { display: grid; gap: 14px; width: min(100%, 740px); margin: 0 auto; padding: 0; list-style: none; }
-#project-messages li { display: grid; gap: 5px; max-width: 90%; overflow-wrap: anywhere; }
+#project-messages li { display: grid; gap: 5px; max-width: 90%; overflow-wrap: anywhere; position: relative; }
+#project-messages .project-message-time { order: 1; justify-self: end; padding: 0 4px; font-size: .68rem; color: var(--muted); opacity: 0; transition: opacity .12s; }
+#project-messages li:hover > .project-message-time,
+#project-messages li:focus-within > .project-message-time { opacity: 1; }
+#project-messages li[data-role="notice"] > .project-message-time { justify-self: center; }
+@media (hover: none) {
+  #project-messages .project-message-time { opacity: 1; }
+}
 #project-messages li[data-role="user"] { justify-self: end; }
 #project-messages li[data-role="user"] > strong { justify-self: end; }
 #project-messages li[data-role="user"] > p { background: #263a2e; }
@@ -120,6 +127,14 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-thinking { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
 .project-thinking summary { cursor: pointer; font-size: .8rem; }
 .project-thinking > p, #project-messages .project-thinking > p { margin: 7px 0 0; padding: 0; font-size: .8rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+#project-messages li[data-role="tool"] { justify-self: start; width: min(100%, 560px); }
+.project-tool { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; color: var(--muted); }
+.project-tool summary { cursor: pointer; font-size: .8rem; }
+.project-tool summary span { font-family: ui-monospace, monospace; color: inherit; }
+.project-tool summary small { float: right; margin-left: 12px; font-size: .72rem; }
+.project-tool[data-status="error"] summary small { color: #f0a09a; }
+.project-tool h4 { margin: 10px 0 4px; font-size: .75rem; font-weight: 500; }
+.project-tool pre { margin: 0; padding: 8px; border-radius: 6px; background: #141b17; font-size: .76rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
 #project-live-thinking { box-sizing: border-box; width: min(100%, 740px); margin: 0 auto; }
 #project-messages li[data-role="notice"] { justify-self: center; }
 #project-messages li[data-role="notice"] p { padding: 4px 0; font-size: .78rem; color: var(--muted); text-align: center; }
