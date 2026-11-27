@@ -22,6 +22,9 @@ struct Options {
     /// Local dashboard port.
     #[arg(long, default_value_t = 8787)]
     port: u16,
+    /// Additional LAN IPv4 address to accept (no authentication; trusted networks only).
+    #[arg(long)]
+    lan_ip: Option<std::net::Ipv4Addr>,
     /// Startup log supplied by the Windows launcher.
     #[arg(long)]
     startup_log: Option<PathBuf>,

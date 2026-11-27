@@ -27,6 +27,7 @@ use crate::{Options, benchmark, ollama, ram, run, telemetry};
 
 struct App {
     host: String,
+    lan_host: Option<String>,
     origin: String,
     task: watch::Sender<run::Snapshot>,
     metrics: Mutex<telemetry::Cache>,
@@ -46,7 +47,14 @@ struct App {
 
 pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     std::sync::LazyLock::force(&ai_settings::AI_SETTINGS);
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, options.port)).await?;
+    if options.lan_ip.is_some_and(|ip| !ip.is_private()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "LAN IP must be a private IPv4 address"));
+    }
+    let listener = TcpListener::bind((
+        if options.lan_ip.is_some() { Ipv4Addr::UNSPECIFIED } else { Ipv4Addr::LOCALHOST },
+        options.port,
+    )).await?;
+    let lan_host = options.lan_ip.map(|ip| format!("{ip}:{}", listener.local_addr().expect("bound listener").port()));
     let host = format!("127.0.0.1:{}", listener.local_addr()?.port());
     let data = std::path::absolute(crate::data_directory())?;
     let skills = skills::Store::new(data.join("skills"));
@@ -73,6 +81,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     let app = Arc::new(App {
         origin: format!("http://{host}"),
         host,
+        lan_host,
         task: watch::channel(run::Snapshot::new(model)).0,
         metrics: Mutex::default(),
         ram: Mutex::default(),
@@ -110,6 +119,9 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
         .with_state(app.clone());
 
     println!("Dashboard: {}", app.origin);
+    if let Some(host) = &app.lan_host {
+        println!("WARNING: unauthenticated LAN access enabled: http://{host}/");
+    }
     let dispatch = tokio::spawn(projects::queue::dispatch(app.clone()));
     let cleanup = tokio::spawn(models::clean_context_profiles(app));
     let result = tokio::select! {
@@ -122,16 +134,15 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
 }
 
 async fn local_only(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {
-    let valid_host = request
-        .headers()
-        .get(header::HOST)
-        .is_some_and(|value| value == app.host.as_str());
+    let host = request.headers().get(header::HOST).and_then(|value| value.to_str().ok());
+    let valid_host = host.is_some_and(|host| host == app.host || app.lan_host.as_deref() == Some(host));
+    let expected_origin = host.map(|host| format!("http://{host}"));
     let origin = request.headers().get(header::ORIGIN);
     let valid_origin = if request.uri().path() == "/mcp" {
-        origin.is_none()
+        origin.is_none() || origin.is_some_and(|value| expected_origin.as_deref().is_some_and(|expected| value == expected))
     } else {
         request.method() != axum::http::Method::POST
-            || origin.is_some_and(|value| value == app.origin.as_str())
+            || origin.is_some_and(|value| expected_origin.as_deref().is_some_and(|expected| value == expected))
     };
     if !valid_host || !valid_origin {
         return StatusCode::FORBIDDEN.into_response();
