@@ -1364,6 +1364,41 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn dependency_text_is_available_before_consumer_dispatch_without_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": project.id, "group_name": "API",
+            "group_brief": "Keep the API stable",
+            "tasks": [
+                {"name":"Design","key":"design","external":true,"prompt":"Define the API"},
+                {"name":"Backend","model":"local","prompt":"Implement design","after":["design"]},
+                {"name":"Frontend","model":"local","prompt":"Use design","after":["design"]}
+            ]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        let design = tasks[0].project_session_id;
+        let backend = tasks[1].project_session_id;
+        assert!(store.ready_tasks().unwrap().is_empty());
+        assert!(!store.handoff_for(project.id, backend).unwrap().unwrap().markdown().contains("GET /items"));
+        store.complete_external(serde_json::from_value(json!({
+            "project_id": project.id, "project_session_id": design, "succeeded": true,
+            "summary": "GET /items returns an array", "artifacts": []
+        })).unwrap()).unwrap();
+        assert_eq!(store.ready_tasks().unwrap().len(), 2);
+        for task in &tasks[1..] {
+            let snapshot = store.handoff_for(project.id, task.project_session_id).unwrap().unwrap();
+            let markdown = snapshot.markdown();
+            assert!(markdown.contains("Keep the API stable"));
+            assert!(markdown.contains("GET /items returns an array"));
+            assert!(markdown.contains("completed; prerequisite"));
+            assert!(snapshot.excerpt(4096).contains("GET /items returns an array"));
+        }
+    }
+
+    #[test]
     fn groups_can_span_batches_and_are_project_scoped() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));
