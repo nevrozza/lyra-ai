@@ -204,6 +204,8 @@ struct AwaitAttention {
 struct AwaitTask {
     project_session_id: u64,
     name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     group_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -613,10 +615,18 @@ pub(in crate::server) async fn await_tasks(
         }
         // Ignore token streaming, telemetry and unrelated watch updates.
         // Read the queue again even on timeout.
-        let _ = tokio::time::timeout_at(deadline, state.wait_for(|snapshot| {
-            snapshot.closed() || snapshot.projects_revision() != revision
-        })).await;
+        wait_for_queue_change(&mut state, revision, deadline).await;
     }
+}
+
+async fn wait_for_queue_change(
+    state: &mut tokio::sync::watch::Receiver<Snapshot>,
+    revision: u64,
+    deadline: tokio::time::Instant,
+) -> bool {
+    matches!(tokio::time::timeout_at(deadline, state.wait_for(|snapshot| {
+        snapshot.closed() || snapshot.projects_revision() != revision
+    })).await, Ok(Ok(_)))
 }
 
 fn retry_conflict() -> (StatusCode, String) {
@@ -1388,7 +1398,7 @@ impl Store {
             for session in &project.sessions {
                 if !relevant.contains(&session.id) { continue; }
                 let Some(job) = &session.job else { continue };
-                if job.status != Status::Queued { continue; }
+                if !matches!(job.status, Status::Queued | Status::Blocked) { continue; }
                 for id in &job.after {
                     if project.dependency_state(*id) != Dependency::Ready {
                         dependencies.insert(*id);
@@ -1434,6 +1444,7 @@ impl Store {
             tasks.push(AwaitTask {
                 project_session_id: session.id,
                 name: session.name.clone(),
+                model: job.model.clone(),
                 group_id: session.group.as_ref().map(|group| group.id),
                 chat_session_id: job.chat_session_id,
                 workflow_root_id: job.workflow_root(),
@@ -1659,6 +1670,20 @@ mod tests {
         assert!(store.set_job(&impl_key, &[Status::OutputLimit], Status::Cancelled, None).unwrap());
         let snapshot = store.await_snapshot(&query).unwrap();
         assert_eq!(snapshot.outcome.attention[0].reason, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn await_wakeup_ignores_unrelated_changes_and_observes_already_committed_revision() {
+        let (tx, mut rx) = tokio::sync::watch::channel(Snapshot::new(None));
+        let revision = rx.borrow_and_update().projects_revision();
+        tx.send_modify(Snapshot::skills_changed);
+        assert!(!wait_for_queue_change(&mut rx, revision,
+            tokio::time::Instant::now() + Duration::from_millis(10)).await);
+        // A queue commit between the snapshot read and registering the waiter
+        // must wake it even though the event has already happened.
+        tx.send_modify(Snapshot::projects_changed);
+        assert!(wait_for_queue_change(&mut rx, revision,
+            tokio::time::Instant::now() + Duration::from_secs(1)).await);
     }
 
     #[test]
