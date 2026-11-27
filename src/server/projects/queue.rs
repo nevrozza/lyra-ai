@@ -707,20 +707,36 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
         app.task.send_modify(Snapshot::projects_changed);
     }
     let ready = work(app.clone(), |app| app.projects.ready_tasks()).await?;
-    for task in ready {
+    for mut task in ready {
         let parallel = task.job.parallel;
-        let scope = DelegationScope::Queued {
+        let _admission = app.context_admission.lock().await;
+        let requested = task.job.input.as_ref()
+            .and_then(|input| input.context_tokens).map(NonZeroU32::get);
+        let scope = |context_tokens| DelegationScope::Queued {
             session_id: task.project_session_id,
             parallel,
-            context_tokens: task
-                .job
-                .input
-                .as_ref()
-                .and_then(|input| input.context_tokens)
-                .map(NonZeroU32::get),
+            context_tokens,
             max_tasks: AI_SETTINGS.parallel_project_tasks,
             max_models: AI_SETTINGS.parallel_project_models,
         };
+        let can_attempt = {
+            let state = app.task.borrow();
+            let hint = requested.or_else(|| state.active_context_for_model(&task.job.model).flatten());
+            state.can_begin_delegation(&task.job.model, scope(hint))
+        };
+        if !can_attempt {
+            if !parallel { break; }
+            continue;
+        }
+        let selected = match mcp::plan_queued_context(app, &task.job.model, requested, parallel).await {
+            Ok(Some(selected)) => selected,
+            Ok(None) => continue, // another runner is starting or safe headroom is unavailable
+            Err(error) => {
+                eprintln!("Could not plan context for {}: {error}", task.job.model);
+                requested // preserve the existing worker-side error handling
+            }
+        };
+        let scope = scope(selected);
         let mut delegation = None;
         if !app.task.send_if_modified(|state| {
             delegation = state.begin_delegation(&task.job.model, scope);
@@ -732,6 +748,11 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
             continue;
         }
         let delegation = delegation.expect("queue reservation");
+        // Set only the execution copy, not the stored prompt: Auto is recalculated
+        // for each dispatch, and a later retry can still use an explicit window.
+        if let Some(input) = task.job.input.as_mut() {
+            input.context_tokens = selected.and_then(NonZeroU32::new);
+        }
         let key = task.key();
         let claimed = work(app.clone(), move |app| {
             app.projects
