@@ -70,7 +70,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-system-link:hover { color: var(--accent); }
 .project-split { display: grid; grid-template-columns: minmax(205px, 24%) minmax(0, 1fr); min-height: min(570px, 75dvh); }
 .project-sidebar { display: grid; grid-template-rows: auto auto minmax(0, 1fr); align-content: start; gap: 14px; min-width: 0; padding: 16px 12px; border-right: 1px solid var(--line); border-radius: 0 0 0 12px; background: #141a17; }
-.project-sidebar nav { max-height: 520px; overflow: auto; }
+.project-sidebar nav { max-height: 520px; min-width: 0; overflow-y: auto; overflow-x: hidden; }
 .project-new { justify-self: stretch; text-align: left; padding: 9px 11px; }
 .project-filters { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; }
 .project-filters button { flex: 1; min-width: 0; padding: 5px; border-radius: 5px; background: transparent; color: var(--muted); font-size: .77rem; }
@@ -78,7 +78,14 @@ h2 { font-size: .96rem; font-weight: 650; }
 #project-tree, #project-tree ul { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
 #project-tree ul { margin: 4px 0 8px 12px; padding-left: 8px; border-left: 1px solid var(--line); }
 #project-tree button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 7px 9px; background: transparent; color: var(--muted); text-align: left; font-size: .83rem; font-weight: 450; }
-#project-tree button > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#project-tree, #project-tree ul, #project-tree li { min-width: 0; }
+#project-tree button { min-width: 0; box-sizing: border-box; }
+#project-tree button > span:first-child { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#project-tree .project-tree-status { flex-shrink: 0; margin-left: auto; }
+#project-tree .project-tree-error { flex: 0 0 13px; width: 13px; text-align: center; color: #f0a09a; font-size: 1.15rem; line-height: 13px; }
+#project-tree .project-group-chevron { flex: 0 0 10px; text-align: center; }
+#project-tree button.project-group-heading { color: #d7e2d3; font-weight: 550; }
+#project-tree .project-group-chats { margin: 2px 0 6px 11px; padding-left: 7px; border-left: 2px solid #485d4c; }
 #project-tree button.project-tree-heading { color: #e5ecdf; font-weight: 650; }
 #project-tree .project-task-group { margin: 6px 0 0 10px; font-size: .73rem; }
 .project-task-state { flex: none; color: var(--muted); font-size: .69rem; }
