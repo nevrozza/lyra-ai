@@ -294,3 +294,69 @@ impl Store {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::projects::SaveProject;
+    use serde_json::json;
+
+    #[test]
+    fn group_brief_and_separate_direct_handoffs_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        let store = Store::new(root.clone());
+        let project = store.save(SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let first = store.create_session(serde_json::from_value(json!({
+            "project_id": project.id, "name": "Design", "group_name": "Feature",
+            "group_brief": "Preserve API compatibility"
+        })).unwrap()).unwrap();
+        let group_id = first.group.as_ref().unwrap().id;
+        let create = |name: &str| store.create_session(serde_json::from_value(json!({
+            "project_id": project.id, "group_id": group_id, "name": name
+        })).unwrap()).unwrap();
+        let second = create("Backend");
+        let third = create("Frontend");
+        let key = || GroupKey { project_id: project.id, group_id };
+        assert_eq!(store.group_context(key()).unwrap().brief_revision, 1);
+        assert!(store.record_group_answer(project.id, first.id, "Use GET /items", false, 100).unwrap());
+        assert!(store.record_group_answer(project.id, second.id, "Return JSON", false, 101).unwrap());
+        assert!(!store.record_group_answer(project.id, first.id, "Old answer", false, 99).unwrap());
+        let store = Store::new(root);
+        let snapshot = store.handoff_for(project.id, third.id).unwrap().unwrap();
+        let text = snapshot.markdown();
+        assert!(text.contains("Preserve API compatibility"));
+        assert!(text.contains("Use GET /items"));
+        assert!(text.contains("Return JSON"));
+        assert!(!text.contains("Old answer"));
+        assert!(!text.contains("Frontend"));
+        let updated = store.update_group_brief(UpdateBrief {
+            project_id: project.id, group_id, brief_revision: 1, brief: "New constraints".into(),
+        }).unwrap();
+        assert_eq!(updated.brief_revision, 2);
+        assert!(updated.markdown.contains("Use GET /items"));
+        assert!(store.update_group_brief(UpdateBrief {
+            project_id: project.id, group_id, brief_revision: 1, brief: "Stale".into(),
+        }).is_err());
+        assert!(store.group_context(GroupKey { project_id: project.id + 1000, group_id }).is_err());
+    }
+
+    #[test]
+    fn excerpt_is_bounded_and_prioritizes_dependencies() {
+        let snapshot = Snapshot {
+            name: "Feature".into(), brief: "Goal".into(),
+            entries: vec![
+                Entry { id: 1, name: "Design".into(), status: "completed", required: true,
+                    text: "Contract: /items".into(), truncated: false },
+                Entry { id: 9, name: "Unrelated".into(), status: "completed", required: false,
+                    text: "я".repeat(8000), truncated: false },
+            ],
+        };
+        let excerpt = snapshot.excerpt(4096);
+        assert!(excerpt.len() <= 2048);
+        assert!(excerpt.contains("Contract: /items"));
+        assert!(snapshot.markdown().len() > excerpt.len());
+    }
+}
