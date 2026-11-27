@@ -1,13 +1,11 @@
-import { contextLabel, markBenchmarkSelection } from './context-settings.js';
+import { markBenchmarkSelection } from './context-settings.js';
 import { element, get, memoryAmount, oneDecimal, whole } from './ui.js';
 
 const elapsed = (ms) => ms == null ? '—' : ms < 1000 ? `${oneDecimal.format(ms)} мс` : `${oneDecimal.format(ms / 1000)} с`;
 const rate = (tokens) => tokens == null ? '—' : oneDecimal.format(tokens);
 const mem = (bytes) => bytes == null ? '—' : memoryAmount(bytes);
-const physicalPeak = (point) => point.gpu_memory?.length ? point.gpu_memory.reduce((sum, gpu) => sum + gpu.sampled_peak_bytes, 0) : null;
 const coldDelta = (point) => point.cold_isolated && point.gpu_memory?.length ? point.gpu_memory.reduce((sum, gpu) => sum + Math.max(0, gpu.sampled_peak_bytes - gpu.baseline_bytes), 0) : null;
 const ramDelta = (point) => point.cold_isolated && point.system_ram?.samples > 0 ? Math.max(0, point.system_ram.sampled_peak_bytes - point.system_ram.baseline_bytes) : null;
-const share = (point) => point.ollama_total_bytes > 0 && point.model_vram_bytes != null ? `${oneDecimal.format(Math.min(100, point.model_vram_bytes / point.ollama_total_bytes * 100))}%` : '—';
 function renderRows(node, rows) {
   node.replaceChildren(...rows.map(([label, value, hint]) => {
     const row = document.createElement('div');
@@ -30,36 +28,27 @@ export const benchmarkStages = {
 };
 
 export function renderBenchmark(record, message) {
-  const result = record?.latest;
+  const profile = record?.memory_profile;
+  const points = profile?.points ?? [];
   const summary = get('benchmark-summary');
-  const measuredAt = result && Date.parse(result.measured_at);
-  summary.textContent = message ?? (result ?
-    (Number.isFinite(measuredAt) ? `Результаты от ${benchmarkDate.format(measuredAt)}` : 'Результаты бенчмарка') :
-    (record?.memory_profile ? 'Полный профиль сохранён; быстрый замер ещё не выполнен.' : 'Замеров пока нет.'));
+  const dates = points.map(point => Date.parse(point.measured_at)).filter(Number.isFinite);
+  const measuredAt = dates.length ? Math.max(...dates) : NaN;
+  summary.textContent = message ?? (profile ?
+    (Number.isFinite(measuredAt) ? `Результаты от ${benchmarkDate.format(measuredAt)}` : 'Результаты полного бенчмарка') :
+    'Полный бенчмарк ещё не выполнен.');
   const facts = get('benchmark-results');
-  facts.hidden = !result;
-  if (result) {
-    const launch = record.average_launch?.mean_ms;
-    const measuredContext = result.measured_context_tokens;
+  facts.hidden = !profile;
+  if (profile) {
+    const launch = record.average_launch;
     const rows = [
-      ['Контекст прогона', measuredContext != null
-        ? (result.context_tokens == null ? `Авто · ${contextLabel(measuredContext)}` : contextLabel(measuredContext))
-        : contextLabel(result.context_tokens)],
-      ['Среднее время запуска', launch == null ? '—' : elapsed(launch), 'Среднее время загрузки модели в память по холодным запускам'],
-      ['Скорость • вход / выход', `${rate(result.prompt_tokens_per_second)} / ${rate(result.generated_tokens_per_second)} ток/с`],
-      ['Размер модели в каталоге', mem(result.model_weight_bytes)],
-      ['VRAM / RAM (Ollama)', `${mem(result.model_vram_bytes)} / ${mem(result.model_ram_bytes)}`, 'Оценка Ollama /api/ps; может не отражать физическую память'],
-      ['GPU по Ollama', share(result), 'Доля памяти runner по отчёту Ollama, не независимый замер'],
-      ['Пик VRAM (GPU)', mem(physicalPeak(result)), 'Сумма выборочных пиков занятости GPU; включает другие процессы'],
-      ['Прирост VRAM (холодный)', mem(coldDelta(result)), 'Разность между выборочным пиком и baseline, не счётчик процесса'],
-      ['Прирост RAM (система)', mem(ramDelta(result)), 'Выборочный прирост общей занятости RAM, включая другие процессы и изменения кэша ОС'],
-      ['Холодная загрузка', result.was_loaded ? 'Прогретая модель' : elapsed(result.load_ms)],
+      ['Среднее время запуска', elapsed(launch?.mean_ms),
+        'Среднее по завершённым холодным замерам последнего полного прогона, включая остановленный прогон'],
+      ['Холодных замеров', whole.format(launch?.samples ?? 0)],
+      ['Всего замеров', whole.format(points.length)],
     ];
     renderRows(facts, rows);
   } else facts.replaceChildren();
-  const profile = record?.memory_profile;
   get('benchmark-profile').hidden = !profile;
-  const points = profile?.points ?? [];
   get('benchmark-profile-note').textContent = !profile ? '' : points.length === 0
     ? 'Замеры прервались до первой точки. Причина в диагностике.'
     : 'Auto сравнивает замеры с бюджетом VRAM и пропускает окна с падением скорости генерации на 30% и больше.';
@@ -77,16 +66,22 @@ export function renderBenchmark(record, message) {
         `Факт: ${whole.format(point.measured_context_tokens)}`));
     }
     const memory = element('td', mem(point.profile_gpu_bytes));
-    const speed = element('td', rate(point.generated_tokens_per_second));
+    const speed = element('td', '');
+    const input = element('div', `↑ ${rate(point.prompt_tokens_per_second)}`);
+    input.title = 'Ввод: обработка промпта, ток/с (без кэшированных токенов)';
+    const output = element('div', `↓ ${rate(point.generated_tokens_per_second)}`);
+    output.title = 'Вывод: генерация ответа, ток/с';
+    speed.append(input, output);
+    const launch = element('td', point.was_loaded ? 'Прогрета' : elapsed(point.load_ms));
     const status = element('td', slowdown != null ? `Медленнее на ${slowdown}%` : verified ? 'Подтверждён' : 'Не подтверждён');
     status.dataset.verified = String(verified);
     if (slowdown != null) status.dataset.slowdown = 'true';
-    status.title = `Холодная загрузка: ${elapsed(point.load_ms)}. Прирост VRAM: ${mem(coldDelta(point))}. По Ollama: ${mem(point.model_vram_bytes)} VRAM / ${mem(point.model_ram_bytes)} RAM.`;
+    status.title = `Холодная загрузка: ${elapsed(point.load_ms)}. Прирост VRAM: ${mem(coldDelta(point))}. Прирост RAM: ${mem(ramDelta(point))}. По Ollama: ${mem(point.model_vram_bytes)} VRAM / ${mem(point.model_ram_bytes)} RAM.`;
     const choice = element('span', 'Выбор Auto');
     choice.className = 'benchmark-auto-choice';
     choice.hidden = true;
     status.append(choice);
-    row.append(title, memory, speed, status);
+    row.append(title, memory, speed, launch, status);
     return row;
   }));
   markBenchmarkSelection();

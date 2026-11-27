@@ -254,10 +254,10 @@
           </header>
           <div class="benchmark-body">
             <div class="model-actions">
-              <button id="benchmark-run" class="unload" type="button" disabled>Быстрый бенчмарк</button>
-              <button id="benchmark-profile-run" class="unload" type="button" disabled>Полный профиль контекста</button>
+              <button id="benchmark-profile-run" class="unload" type="button" disabled>Полный бенчмарк</button>
+              <button id="benchmark-stop" class="unload" type="button" title="Завершить текущий замер и сохранить результаты" hidden disabled>Остановить</button>
             </div>
-            <p id="benchmark-summary" class="secondary"></p>
+            <p id="benchmark-summary" class="secondary" role="status"></p>
             <dl id="benchmark-results" class="facts" hidden></dl>
             <section id="benchmark-profile" aria-labelledby="benchmark-profile-title" hidden>
               <h3 id="benchmark-profile-title">Профиль VRAM по контексту</h3>
@@ -268,7 +268,8 @@
                   <thead><tr>
                     <th scope="col">Токены</th>
                     <th scope="col">VRAM для Auto</th>
-                    <th scope="col">Ток/с</th>
+                    <th scope="col" title="Обработка входных токенов / генерация выходных токенов">Скорость, ток/с</th>
+                    <th scope="col" title="Время холодной загрузки модели">Запуск</th>
                     <th scope="col">Результат</th>
                   </tr></thead>
                   <tbody id="benchmark-profile-results"></tbody>

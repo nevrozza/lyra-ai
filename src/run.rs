@@ -35,6 +35,8 @@ pub struct Snapshot {
     operation_model: Option<String>,
     model_error: Option<String>,
     benchmark_running: bool,
+    benchmark_profile_running: bool,
+    benchmark_stop_requested: bool,
     benchmark_stage: Option<benchmark::Stage>,
     benchmark_revision: u64,
     metrics_revision: u64,
@@ -122,6 +124,8 @@ impl Snapshot {
             operation_model: None,
             model_error: None,
             benchmark_running: false,
+            benchmark_profile_running: false,
+            benchmark_stop_requested: false,
             benchmark_stage: None,
             benchmark_revision: 0,
             metrics_revision: 0,
@@ -452,10 +456,33 @@ impl Snapshot {
             return false;
         }
         self.benchmark_running = true;
+        self.benchmark_profile_running = false;
+        self.benchmark_stop_requested = false;
         self.benchmark_stage = Some(benchmark::Stage::Preparing);
         self.operation_model = Some(model);
         self.model_error = None;
         true
+    }
+
+    pub fn begin_benchmark_profile(&mut self, model: String) -> bool {
+        if !self.begin_benchmark(model) { return false; }
+        self.benchmark_profile_running = true;
+        true
+    }
+
+    pub fn request_benchmark_stop(&mut self, model: &str) -> bool {
+        if self.closed || !self.benchmark_profile_running
+            || self.operation_model.as_deref() != Some(model)
+            || matches!(self.benchmark_stage, Some(benchmark::Stage::Saving))
+        {
+            return false;
+        }
+        self.benchmark_stop_requested = true;
+        true
+    }
+
+    pub fn benchmark_stop_requested(&self) -> bool {
+        self.benchmark_stop_requested || self.closed
     }
 
     pub fn set_benchmark_stage(&mut self, stage: benchmark::Stage) {
@@ -464,6 +491,8 @@ impl Snapshot {
 
     pub fn finish_benchmark(&mut self, result: Result<(), String>) {
         self.benchmark_running = false;
+        self.benchmark_profile_running = false;
+        self.benchmark_stop_requested = false;
         self.benchmark_stage = None;
         self.metrics_revision += 1;
         match result {
@@ -601,6 +630,31 @@ mod tests {
             snapshot.finish_delegation(id, false);
         }
         snapshot.finish_delegation(resumed, true);
+        assert!(!snapshot.busy());
+    }
+}
+
+
+#[cfg(test)]
+mod benchmark_stop_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_active_profile_can_be_stopped_and_remains_busy_until_cleanup() {
+        let mut snapshot = Snapshot::new(Some("model".into()));
+        assert!(snapshot.begin_benchmark("model".into()));
+        assert!(!snapshot.request_benchmark_stop("model"));
+        snapshot.finish_benchmark(Ok(()));
+        assert!(snapshot.begin_benchmark_profile("model".into()));
+        assert!(!snapshot.request_benchmark_stop("other"));
+        assert!(snapshot.request_benchmark_stop("model"));
+        assert!(snapshot.benchmark_stop_requested());
+        assert!(snapshot.busy());
+        assert!(!snapshot.begin_benchmark_profile("model".into()));
+        snapshot.set_benchmark_stage(benchmark::Stage::Saving);
+        assert!(!snapshot.request_benchmark_stop("model"));
+        snapshot.finish_benchmark(Ok(()));
+        assert!(!snapshot.benchmark_stop_requested());
         assert!(!snapshot.busy());
     }
 }
