@@ -272,29 +272,33 @@ export function createProjects({ onSelection = () => {} } = {}) {
       item.append(row);
       const chats = visibleChats(project);
       const list = element('ul', '');
-      const toggle = element('button', '');
-      toggle.type = 'button';
-      toggle.className = 'project-collapse-toggle';
-      toggle.dataset.projectEntry = `${project.id}/collapse`;
       const chevron = element('span', '');
+      chevron.className = 'project-group-chevron';
       chevron.setAttribute('aria-hidden', 'true');
-      toggle.append(chevron);
+      heading.append(chevron);
       const applyProjectCollapsed = () => {
         const closed = collapsedProjects.has(project.id);
         list.hidden = closed;
-        toggle.hidden = !chats.length;
-        toggle.setAttribute('aria-expanded', String(!closed));
-        toggle.setAttribute('aria-label', `${closed ? 'Развернуть' : 'Свернуть'} проект: ${project.name}`);
-        toggle.title = toggle.getAttribute('aria-label');
+        chevron.hidden = !chats.length;
+        if (chats.length) heading.setAttribute('aria-expanded', String(!closed));
+        else heading.removeAttribute('aria-expanded');
         chevron.textContent = closed ? '▸' : '▾';
       };
-      toggle.onclick = () => {
+      heading.onclick = () => {
+        // Select a different project first; clicking the current project
+        // toggles its children without closing the conversation.
+        if (project.id !== projectId) {
+          collapsedProjects.delete(project.id);
+          report();
+          select({ project: project.id, chat: undefined });
+          return;
+        }
+        if (!chats.length) return;
         if (collapsedProjects.has(project.id)) collapsedProjects.delete(project.id);
         else collapsedProjects.add(project.id);
         applyProjectCollapsed();
         updateControls();
       };
-      row.insertBefore(toggle, row.querySelector('.project-entry-more'));
       applyProjectCollapsed();
       const rendered = new Set();
       for (const chat of chats) {
@@ -572,7 +576,6 @@ export function createProjects({ onSelection = () => {} } = {}) {
     }
     button.onclick = () => {
       report();
-      if (session == null) collapsedProjects.delete(id);
       select({ project: id, chat: session });
     };
     return button;
