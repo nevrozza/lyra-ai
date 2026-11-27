@@ -178,7 +178,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 #project-live-thinking { box-sizing: border-box; width: min(100%, 740px); margin: 0 auto; }
 #project-messages > li[data-role="notice"] { justify-self: center; }
 #project-messages > li[data-role="notice"] p { padding: 4px 0; font-size: .78rem; color: var(--muted); text-align: center; }
-.project-composer { display: grid; gap: 10px; width: min(calc(100% - 40px), 740px); margin: 0 auto 16px; padding: 10px 12px; border: 1px solid #435749; border-radius: 12px; background: #141b17; }
+.project-composer { display: grid; gap: 10px; width: min(calc(100% - 40px), 740px); margin: 0 auto 0; padding: 10px 12px; border: 1px solid #435749; border-radius: 12px; background: #141b17; }
 .project-composer:focus-within { border-color: #70886d; }
 .project-composer textarea { width: 100%; min-height: 52px; max-height: 32vh; padding: 5px 3px; resize: vertical; border: none; background: transparent; color: inherit; font: inherit; }
 .project-composer textarea:focus-visible { outline: none; }
@@ -190,6 +190,11 @@ h2 { font-size: .96rem; font-weight: 650; }
 .command-external-host { padding: 0 20px 14px; border-bottom: 1px solid var(--line); }
 .command-chat-host .command-panel { margin-top: 0; background: #1b2520; }
 .project-reading:has(.command-chat-host:not([hidden])) { align-content: start; gap: 14px; }
+.project-permissions { display: flex; align-items: center; width: min(calc(100% - 40px), 740px); margin: 4px auto 10px; }
+.terminal-mode { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 3px; border-radius: 5px; background: transparent; color: var(--muted); font-size: .75rem; font-weight: 450; text-align: left; white-space: normal; }
+.terminal-mode svg { flex-shrink: 0; }
+.terminal-mode[data-mode="allow_all"] { color: #e0bf83; }
+.terminal-mode:hover:not(:disabled) { background: #27362b; color: #edf0ea; }
 .project-mode { flex: 0 0 auto; }
 .project-mode button { min-width: 48px; padding-inline: 7px; }
 .project-composer-controls button, .project-dialog button[type="submit"] { padding: 7px 11px; font-size: .8rem; }
@@ -460,7 +465,7 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
   .project-sidebar nav { max-height: 170px; }
   .project-selection { padding: 11px 12px; }
   .project-reading { min-height: 155px; max-height: 380px; padding: 12px; }
-  .project-composer { width: calc(100% - 24px); margin-bottom: 12px; }
+  .project-composer, .project-permissions { width: calc(100% - 24px); }
   .project-feedback { margin-inline: 12px; }
 
   .layout { grid-template: "system" "models" "activity" / minmax(0, 1fr); }

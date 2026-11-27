@@ -25,8 +25,7 @@
       <header class="panel-header project-workspace-header">
         <h2 id="projects-title">Проекты</h2>
         <p id="project-active-agents" class="secondary" role="status" hidden></p>
-        <button id="command-pending-link" class="unload command-pending-link" type="button" hidden>Запрос команды Pi</button>
-        <button id="command-settings-global" class="unload" type="button">Команды Pi</button>
+        <button id="command-pending-link" class="unload command-pending-link" type="button" hidden>Запрос команды</button>
         <a class="project-system-link" href="#models-panel">Модели и настройки</a>
       </header>
       <div id="command-external-host" class="command-external-host" hidden></div>
@@ -51,7 +50,10 @@
               <p id="project-job-status" class="secondary" role="status" hidden></p>
             </div>
             <div class="project-controls">
-              <button id="project-command-link" class="unload" type="button" aria-haspopup="dialog" aria-controls="command-settings-dialog" hidden>Команды Pi</button>
+              <div id="project-mode-control" class="project-filters project-mode" hidden role="group" aria-label="Режим чата">
+                <button id="project-mode-chat" type="button" aria-pressed="false" disabled title="Разговор без инструментов">Chat</button>
+                <button id="project-mode-work" type="button" aria-pressed="true" disabled title="Работа с папками проекта и командами">Work</button>
+              </div>
               <button id="new-project-chat" class="unload" type="button" hidden>＋ Новый чат</button>
               <button id="new-project-task" class="unload" type="button" hidden>＋ Задача</button>
             </div>
@@ -90,10 +92,6 @@
             <label for="project-prompt" class="visually-hidden">Сообщение для Lyra</label>
             <textarea id="project-prompt" rows="2" placeholder="Спроси модель…" required></textarea>
             <div class="project-controls project-composer-controls">
-              <div class="project-filters project-mode" role="group" aria-label="Режим чата">
-                <button id="project-mode-chat" type="button" aria-pressed="false" disabled title="Разговор без инструментов">Chat</button>
-                <button id="project-mode-work" type="button" aria-pressed="true" disabled title="Работа с папками проекта и командами">Work</button>
-              </div>
               <label class="project-model-label" for="project-chat-model">Модель
                 <select id="project-chat-model"></select>
               </label>
@@ -101,12 +99,19 @@
               <button id="send-project-prompt" type="submit">Отправить</button>
             </div>
           </form>
+          <div class="project-permissions">
+            <button id="command-settings-global" class="terminal-mode" type="button" aria-haspopup="dialog" aria-controls="command-settings-dialog" title="Терминал — глобальные разрешения Lyra">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/></svg>
+              <span id="command-mode-label">Терминал</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+          </div>
         </div>
       </div>
       <dialog id="command-settings-dialog" class="project-dialog" aria-labelledby="command-settings-title">
         <div class="project-form">
-          <h3 id="command-settings-title">Команды Pi</h3>
-          <p class="secondary">Общий режим для всех чатов и внешних вызовов Pi.</p>
+          <h3 id="command-settings-title">Терминал</h3>
+          <p class="secondary">Глобальные разрешения для всей Lyra — всех чатов и внешних вызовов.</p>
           <div class="command-settings">
             <label for="command-mode">Подтверждение</label>
             <select id="command-mode" disabled>
@@ -117,7 +122,7 @@
             <p id="command-settings-error" class="secondary" role="status" hidden></p>
             <p id="command-notification-status" class="secondary" role="status" hidden></p>
           </div>
-          <p class="secondary">Автоматическое разрешение позволяет Pi запускать команды без подтверждения.</p>
+          <p class="secondary">При автоматическом разрешении команды выполняются без подтверждения.</p>
           <div class="project-controls project-dialog-actions">
             <button id="close-command-settings" class="unload" type="button">Закрыть</button>
           </div>
