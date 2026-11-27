@@ -210,6 +210,14 @@ pub(crate) fn validate_window(
 }
 
 pub(crate) fn estimate(model: &str) -> Option<Estimate> {
+    estimate_inner(model, false)
+}
+
+pub(crate) fn estimate_auto(model: &str) -> Option<Estimate> {
+    estimate_inner(model, true)
+}
+
+fn estimate_inner(model: &str, detailed_cache: bool) -> Option<Estimate> {
     #[derive(Deserialize)]
     struct Show {
         #[serde(default)]
@@ -270,7 +278,7 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
         // Non-verbose /api/show can omit per-layer GGUF arrays. Fetch them
         // only when the compact hybrid metadata did not suffice.
         let arch = info.model_info["general.architecture"].as_str()?;
-        if !matches!(arch, "gemma4" | "qwen35" | "qwen35moe") { return None; }
+        if !detailed_cache || !matches!(arch, "gemma4" | "qwen35" | "qwen35moe") { return None; }
         let detailed = ollama::agent(Duration::from_secs(8))
             .post("http://127.0.0.1:11434/api/show")
             .send_json(json!({"model": model, "verbose": true})).ok()?
