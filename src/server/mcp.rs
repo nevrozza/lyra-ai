@@ -447,7 +447,7 @@ fn tools() -> Value {
                 "properties": {
                     "stop_reason": {"type": ["string", "null"]},
                     "truncated": {"type": "boolean"},
-                    "work_progress": {"type": "object", "description": "Work execution evidence and received handoff status; not proof of task acceptance. Confirmation and continuation fields are retained for legacy results; new runs do not request confirmation or automatic continuation.", "properties": {
+                    "work_progress": {"type": "object", "description": "Work execution evidence, worker-reported finish_task outcome and received handoff status; not proof of task acceptance. A missing confirmation remains unconfirmed without automatic continuation. continuation_attempts is zero for new runs.", "properties": {
                         "generation_stop_reason": {"type": ["string", "null"]},
                         "confirmation_status": {"enum": ["unconfirmed", "completed", "blocked"]},
                         "confirmation_summary": {"type": "string"},
