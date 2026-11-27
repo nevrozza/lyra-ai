@@ -220,16 +220,16 @@
               </div>
             </div>
             <details id="model-roles" class="model-roles" open>
-              <summary>Роли моделей</summary>
-              <p class="secondary">Предпочтения при автоматическом выборе модели.</p>
+              <summary>Уровни интеллекта моделей</summary>
+              <p class="secondary">Low — механические правки; Medium — код; High — сложный код и ревью.</p>
               <form id="model-roles-form">
-                <label for="role-implement">Реализация</label>
-                <select id="role-implement" name="implement" disabled></select>
-                <label for="role-fix">Исправления</label>
-                <select id="role-fix" name="fix" disabled></select>
-                <label for="role-review">Ревью</label>
-                <select id="role-review" name="review" disabled></select>
-                <button id="save-model-roles" class="unload" type="submit" disabled>Сохранить роли</button>
+                <label for="role-medium">Medium — средний</label>
+                <select id="role-medium" name="medium" disabled></select>
+                <label for="role-low">Low — низкий</label>
+                <select id="role-low" name="low" disabled></select>
+                <label for="role-high">High — высокий</label>
+                <select id="role-high" name="high" disabled></select>
+                <button id="save-model-roles" class="unload" type="submit" disabled>Сохранить уровни</button>
                 <p id="model-roles-feedback" class="secondary" role="status"></p>
               </form>
             </details>
