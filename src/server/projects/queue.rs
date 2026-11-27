@@ -70,7 +70,6 @@ fn is_false(value: &bool) -> bool {
 #[derive(Clone, Deserialize, Serialize)]
 pub(in crate::server) struct Prompt {
     pub(in crate::server) prompt: String,
-    pub(in crate::server) max_output_tokens: Option<u32>,
     pub(in crate::server) skills: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(in crate::server) context_tokens: Option<NonZeroU32>,
@@ -108,7 +107,6 @@ struct NewJob {
     model: String,
     prompt: String,
     workspace: Option<PathBuf>,
-    max_output_tokens: Option<u32>,
     context_tokens: Option<NonZeroU32>,
     skills: Option<Vec<String>>,
     #[serde(default)]
@@ -482,7 +480,6 @@ pub(in crate::server) async fn enqueue(
             if task.external {
                 if task.follow_up.is_some()
                     || task.skills.is_some()
-                    || task.max_output_tokens.is_some()
                     || task.context_tokens.is_some()
                     || task.parallel
                     || task.role.is_some()
@@ -501,7 +498,7 @@ pub(in crate::server) async fn enqueue(
             }
             let model = crate::model_name(&task.model).map_err(invalid)?;
             task.model = mcp::resolve_model(&installed, &model).map_err(invalid)?;
-            mcp::validate_pi_generation(&task.prompt, task.max_output_tokens).map_err(invalid)?;
+            mcp::validate_pi_generation(&task.prompt).map_err(invalid)?;
             app.skills.paths(task.skills.as_deref()).map_err(invalid)?;
             if task.follow_up.is_none()
                 && !matches!(task.role, Some(pi::Role::Review))
@@ -757,15 +754,6 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64) {
     let key = task.key();
     let mut candidates = Vec::new();
     let (status, result) = if let Some(mut input) = task.job.input.take() {
-        if task
-            .job
-            .workflow
-            .as_ref()
-            .is_some_and(workflow::Workflow::is_follow_up)
-        {
-            // Older automatic follow-ups may still carry Lyra's former default cap.
-            input.max_output_tokens = None;
-        }
         if let Some(handoff) = input.retry_prompt.take() {
             input.prompt = match &task.job.workflow {
                 Some(flow) if flow.is_follow_up() => format!(
@@ -1296,7 +1284,6 @@ impl Store {
                         batch_id: input.batch_id.clone(),
                         input: Some(Prompt {
                             prompt: new.prompt,
-                            max_output_tokens: new.max_output_tokens,
                             skills: new.skills,
                             context_tokens: new.context_tokens,
                             retry_prompt: None,
@@ -1600,6 +1587,13 @@ impl Project {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn old_saved_prompt_ignores_generation_cap_but_new_tasks_reject_it() {
+        let old: Prompt = serde_json::from_value(json!({"prompt":"work","max_output_tokens":256})).unwrap();
+        assert!(serde_json::to_value(old).unwrap().get("max_output_tokens").is_none());
+        assert!(serde_json::from_value::<NewJob>(json!({"name":"work","model":"local","prompt":"work","max_output_tokens":256})).is_err());
+    }
 
     #[test]
     fn await_snapshot_waits_for_automatic_review_and_omits_known_successes() {
