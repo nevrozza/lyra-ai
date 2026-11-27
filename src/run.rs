@@ -485,6 +485,12 @@ impl Snapshot {
         self.benchmark_stop_requested || self.closed
     }
 
+    pub fn begin_benchmark_pi_stage(&mut self) -> bool {
+        if !self.benchmark_profile_running || self.benchmark_stop_requested() { return false; }
+        self.benchmark_stage = Some(benchmark::Stage::CheckingPi);
+        true
+    }
+
     pub fn set_benchmark_stage(&mut self, stage: benchmark::Stage) {
         self.benchmark_stage = Some(stage);
     }
@@ -649,12 +655,25 @@ mod benchmark_stop_tests {
         assert!(!snapshot.request_benchmark_stop("other"));
         assert!(snapshot.request_benchmark_stop("model"));
         assert!(snapshot.benchmark_stop_requested());
+        assert!(!snapshot.begin_benchmark_pi_stage());
         assert!(snapshot.busy());
         assert!(!snapshot.begin_benchmark_profile("model".into()));
         snapshot.set_benchmark_stage(benchmark::Stage::Saving);
         assert!(!snapshot.request_benchmark_stop("model"));
         snapshot.finish_benchmark(Ok(()));
         assert!(!snapshot.benchmark_stop_requested());
+        assert!(!snapshot.busy());
+    }
+    #[test]
+    fn full_benchmark_stays_busy_during_pi_and_can_stop() {
+        let mut snapshot = Snapshot::new(Some("model".into()));
+        assert!(snapshot.begin_benchmark_profile("model".into()));
+        snapshot.set_benchmark_stage(benchmark::Stage::Saving);
+        assert!(snapshot.begin_benchmark_pi_stage());
+        assert!(snapshot.busy());
+        assert!(snapshot.request_benchmark_stop("model"));
+        assert!(snapshot.busy());
+        snapshot.finish_benchmark(Ok(()));
         assert!(!snapshot.busy());
     }
 }
