@@ -219,6 +219,20 @@
                 <button id="unload-model" class="unload" type="button" disabled>Выгрузить</button>
               </div>
             </div>
+            <details id="model-roles" class="model-roles" open>
+              <summary>Роли моделей</summary>
+              <p class="secondary">Предпочтения при автоматическом выборе модели.</p>
+              <form id="model-roles-form">
+                <label for="role-implement">Реализация</label>
+                <select id="role-implement" name="implement" disabled></select>
+                <label for="role-fix">Исправления</label>
+                <select id="role-fix" name="fix" disabled></select>
+                <label for="role-review">Ревью</label>
+                <select id="role-review" name="review" disabled></select>
+                <button id="save-model-roles" class="unload" type="submit" disabled>Сохранить роли</button>
+                <p id="model-roles-feedback" class="secondary" role="status"></p>
+              </form>
+            </details>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
           </div>
         </section>

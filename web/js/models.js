@@ -23,6 +23,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRead = 0;
   let descriptionSaving = false;
 
+  const roleSettings = createRoleSettings(session);
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
     displayedModel, getRecord: () => benchmarkRecord, loadedModel, isMemoryChanging, refreshControls, requestMetrics,
@@ -60,6 +61,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       !session.online;
     settings.updateControls(blocked, installed);
     list.setDisabled(session.closed);
+    roleSettings.update();
   }
 
   function displayedModel() {
@@ -249,5 +251,93 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     refreshMemoryWarning: settings.refreshMemoryWarning,
     beginMemorySample: settings.beginSample,
     acceptMemorySample: settings.acceptSample,
+  };
+}
+
+function createRoleSettings(session) {
+  const form = get('model-roles-form');
+  const fields = [...form.querySelectorAll('select')];
+  const button = get('save-model-roles');
+  const feedback = get('model-roles-feedback');
+  let saved;
+  let draft;
+  let busy = false;
+  let online = false;
+  let optionsKey;
+
+  function render() {
+    const installed = session.metrics?.installed_models ?? [];
+    const key = JSON.stringify([installed, draft]);
+    if (key !== optionsKey) {
+      optionsKey = key;
+      for (const field of fields) {
+        const value = draft?.[field.name];
+        const options = [new Option('Авто', ''), ...installed.map(name => new Option(name, name))];
+        if (value && !installed.includes(value)) options.push(new Option(value, value));
+        field.replaceChildren(...options);
+        field.value = value ?? '';
+      }
+    }
+    for (const field of fields) field.disabled = !online || busy || !draft;
+    button.disabled = !online || busy || !draft || fields.every(field => draft[field.name] === saved[field.name]);
+  }
+
+  async function refresh() {
+    if (busy) return;
+    busy = true;
+    render();
+    try {
+      const response = await fetch('/model/roles');
+      if (!response.ok) throw new Error();
+      saved = await response.json();
+      draft = { ...saved };
+      feedback.textContent = '';
+    } catch {
+      feedback.textContent = 'Не удалось загрузить роли моделей.';
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
+  for (const field of fields) {
+    field.addEventListener('change', () => {
+      draft[field.name] = field.value || null;
+      feedback.textContent = '';
+      render();
+    });
+  }
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (button.disabled) return;
+    busy = true;
+    render();
+    try {
+      const response = await fetch('/model/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(draft),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      saved = await response.json();
+      draft = { ...saved };
+      feedback.textContent = 'Роли сохранены.';
+    } catch (error) {
+      feedback.textContent = error.message || 'Не удалось сохранить роли моделей.';
+    } finally {
+      busy = false;
+      render();
+    }
+  });
+
+  return {
+    update() {
+      const connected = session.online && !session.closed;
+      const reconnected = connected && !online;
+      online = connected;
+      if (reconnected) refresh();
+      else render();
+    },
   };
 }

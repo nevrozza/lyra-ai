@@ -429,6 +429,10 @@ mod tests {
             sessions: Default::default(),
             commands: std::sync::Mutex::new(State::new(mode_path.clone())),
             skills: super::super::skills::Store::new(workspace.path().join("skills")),
+            project_models: super::super::ai_settings::ProjectModelStore::load(
+                workspace.path().join("project-models.json"),
+            )
+            .unwrap(),
             agents_file: workspace.path().join("AGENTS.md"),
             projects: super::super::projects::Store::new(workspace.path().join("projects")),
             folder_picker: Default::default(),

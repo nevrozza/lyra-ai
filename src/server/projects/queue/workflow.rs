@@ -167,14 +167,12 @@ pub(super) fn add_candidates(
     candidates: &[Candidate],
     metrics: &crate::telemetry::Metrics,
     reviewer: &str,
+    preferred_fix: Option<&str>,
 ) {
     use std::fmt::Write;
     let models = serde_json::to_string(candidates).expect("serialize model shortlist");
-    if let Some(preferred) = AI_SETTINGS
-        .project_models
-        .fix
-        .as_ref()
-        .filter(|name| candidates.iter().any(|candidate| candidate.model == **name))
+    if let Some(preferred) =
+        preferred_fix.filter(|name| candidates.iter().any(|candidate| candidate.model == *name))
     {
         let _ = write!(
             prompt,

@@ -565,7 +565,14 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
             })
             .await
             .unwrap_or_default();
-            workflow::add_candidates(&mut input.prompt, &candidates, metrics, &task.job.model);
+            let preferred = app.project_models.get().await;
+            workflow::add_candidates(
+                &mut input.prompt,
+                &candidates,
+                metrics,
+                &task.job.model,
+                preferred.fix.as_deref(),
+            );
         }
         let preparation = if let (Some(reviewer), Some(metrics)) = (release, metrics) {
             let reviewer = reviewer.to_owned();

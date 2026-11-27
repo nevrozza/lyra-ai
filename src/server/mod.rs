@@ -37,6 +37,7 @@ struct App {
     sessions: std::sync::Mutex<sessions::History>,
     commands: std::sync::Mutex<commands::State>,
     skills: skills::Store,
+    project_models: ai_settings::ProjectModelStore,
     agents_file: PathBuf,
     projects: projects::Store,
     folder_picker: Mutex<()>,
@@ -83,6 +84,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
             crate::data_directory().join("command-mode.json"),
         )),
         skills,
+        project_models: ai_settings::ProjectModelStore::load(data.join("project-models.json"))?,
         agents_file,
         projects: projects::Store::new(data.join("projects")),
         folder_picker: Mutex::default(),
@@ -97,6 +99,7 @@ pub(super) async fn serve(options: Options) -> std::io::Result<()> {
     let router = assets::routes()
         .merge(runtime::routes())
         .merge(models::routes())
+        .merge(ai_settings::routes())
         .merge(mcp::routes())
         .merge(sessions::routes())
         .merge(commands::routes())

@@ -1,3 +1,4 @@
+use std::panic::AssertUnwindSafe;
 use std::{fmt::Write, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
@@ -7,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -939,8 +941,13 @@ async fn run_pi(
             },
             result = tokio::time::timeout(
                 Duration::from_secs(900),
-                pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)),
-            ) => Some(result.unwrap_or_else(|_| Err("Pi timed out".into()))),
+                AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)))
+                    .catch_unwind(),
+            ) => Some(match result {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(_)) => Err("Pi failed with an internal Lyra error".into()),
+                Err(_) => Err("Pi timed out".into()),
+            }),
         }
     };
     let Some(result) = result else {
@@ -1192,7 +1199,7 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
             output,
             "\n{}",
             json!({
-                "project_models": AI_SETTINGS.project_models,
+                "project_models": app.project_models.get().await,
                 "parallel_project_tasks": AI_SETTINGS.parallel_project_tasks,
                 "parallel_project_models": AI_SETTINGS.parallel_project_models,
             })

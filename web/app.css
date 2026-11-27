@@ -233,6 +233,13 @@ h2 { font-size: .96rem; font-weight: 650; }
 .unload { background: transparent; border: 1px solid #536453; color: #d7e9cf; padding: 6px 10px; font-size: .78rem; }
 .unload:hover:not(:disabled) { background: #2c382e; }
 .unload:disabled { background: transparent; border-color: var(--line); color: var(--muted); opacity: .6; }
+.model-roles { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); }
+.model-roles summary { cursor: pointer; font-size: .9rem; }
+#model-roles-form { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px 10px; margin-top: 10px; font-size: .85rem; }
+#model-roles-form select { min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #141b17; color: inherit; font: inherit; }
+#save-model-roles { grid-column: 1 / -1; justify-self: start; }
+#model-roles-feedback { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+#model-roles-feedback:empty { display: none; }
 .model-error { margin-top: 8px; color: #f0ac9c; overflow-wrap: anywhere; }
 .facts { margin: 15px 0 0; }
 .facts > div + div { margin-top: 7px; }

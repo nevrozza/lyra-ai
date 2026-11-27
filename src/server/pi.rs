@@ -32,16 +32,20 @@ pub(super) enum Role {
 }
 
 impl Role {
-    fn instructions(self) -> &'static str {
+    fn instructions(self) -> io::Result<&'static str> {
         let manifest = match self {
             Self::Implement => super::skills::IMPLEMENT,
             Self::Fix => super::skills::FIX,
             Self::Review => super::skills::REVIEW,
         };
-        manifest
-            .split_once("\n---\n")
-            .expect("role skill frontmatter")
-            .1
+        super::skills::split_frontmatter(manifest)
+            .map(|(_, body)| body)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Некорректный служебный скилл Pi: {error}"),
+                )
+            })
     }
 }
 
@@ -728,7 +732,7 @@ async fn write_project_instructions(
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
-        text.push_str(role.instructions());
+        text.push_str(role.instructions()?);
     }
     if project.session_file.is_some() {
         text.push_str("\nEarlier turns and saved summaries, when present, belong to this same local Lyra chat even if the user switched models. Use the conversation you actually received to answer questions about earlier turns. Say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");

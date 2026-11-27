@@ -341,20 +341,25 @@ fn manifest(directory: &Path) -> io::Result<Skill> {
         return Err(invalid(format!("{MANIFEST} должен быть обычным файлом.")));
     }
     let text = fs::read_to_string(path)?;
-    let mut lines = text.trim_start_matches('\u{feff}').lines();
-    if lines.next() != Some("---") {
-        return Err(invalid("В SKILL.md нужен блок YAML между строками «---»."));
-    }
-    let mut yaml = String::new();
-    for line in lines {
-        if line == "---" {
-            let skill: Skill = serde_saphyr::from_str(&yaml)
-                .map_err(|error| invalid(format!("Некорректный YAML в SKILL.md: {error}")))?;
-            validate(&skill)?;
-            return Ok(skill);
+    let (yaml, _) = split_frontmatter(&text)?;
+    let skill: Skill = serde_saphyr::from_str(yaml)
+        .map_err(|error| invalid(format!("Некорректный YAML в SKILL.md: {error}")))?;
+    validate(&skill)?;
+    Ok(skill)
+}
+
+pub(super) fn split_frontmatter(text: &str) -> io::Result<(&str, &str)> {
+    let (_, remainder) = text
+        .trim_start_matches('\u{feff}')
+        .split_once('\n')
+        .filter(|(line, _)| line.trim_end_matches('\r') == "---")
+        .ok_or_else(|| invalid("В SKILL.md нужен блок YAML между строками «---»."))?;
+    let mut offset = 0;
+    for line in remainder.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            return Ok((&remainder[..offset], &remainder[offset + line.len()..]));
         }
-        yaml.push_str(line);
-        yaml.push('\n');
+        offset += line.len();
     }
     Err(invalid("В SKILL.md нет закрывающей строки «---»."))
 }
@@ -442,6 +447,20 @@ fn storage_error(error: impl std::fmt::Display) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_bundled_role_skill_bodies_with_windows_line_endings() {
+        for manifest in [IMPLEMENT, FIX, REVIEW] {
+            let normalized = manifest.replace("\r\n", "\n");
+            let (_, body) = split_frontmatter(&normalized).unwrap();
+            let windows = format!("\u{feff}{}", normalized.replace('\n', "\r\n"));
+            let (_, windows_body) = split_frontmatter(&windows).unwrap();
+            assert!(!body.trim().is_empty());
+            assert_eq!(windows_body.replace("\r\n", "\n"), body);
+        }
+        assert!(split_frontmatter("---\r\nname: broken").is_err());
+        assert!(split_frontmatter("No manifest\n---\n").is_err());
+    }
 
     #[test]
     fn refreshes_built_in_skills_alongside_imported_skills() {
