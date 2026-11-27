@@ -22,8 +22,8 @@ const ANSWER_LIMIT: usize = 8_000;
 // Automatic review verdicts carry technical assignments for multiple fixes.
 const REVIEW_ANSWER_LIMIT: usize = 32_000;
 const COMPLETION_RETRIES: u8 = 2;
-const COMPLETION_RULE: &str = "\n\n# Task completion\nA Work task is not complete just because you stopped generating. Before ending, compare the actual result against the original assignment and check it using available evidence/tools. Do the remaining work first. Call finish_task as your last tool with completed or blocked and a concrete outcome or blocker. Then return the requested final handoff, including the exact JSON verdict when required. Never confirm a promise of future work. If you use another tool afterward, confirm again. If a required check is unavailable, report it honestly; use blocked if the missing check prevents completing the assignment.\n";
-const COMPLETION_REMINDER: &str = "Lyra completion check: your previous turn ended without a valid confirmed outcome and final handoff. Recheck the original assignment in this conversation against actual results. Do any remaining work now with the available tools. Do not merely announce plans. When done, call finish_task with completed or blocked and concrete evidence, then return the requested final handoff.";
+const COMPLETION_RULE: &str = "\n\n# Task completion\nComplete the actual assignment, not a plan. Before ending, use the smallest sufficient verification against the original requirements. For a single operation, an unambiguous successful tool result is enough if it confirms the requested outcome; do not repeat it just for reporting. Distinguish confirmed changes, checks actually performed, and remaining or unverified requirements. Call finish_task as your last tool with completed only if the assignment is done, or blocked if essential work or verification is missing. Give a concise concrete summary, then immediately return the required final handoff or exact JSON verdict. If more tool work is needed, confirm again afterward.\n";
+const COMPLETION_REMINDER: &str = "Lyra completion check: no valid confirmation and final handoff yet. Use the actual results already recorded; do not redo confirmed work. Check what remains against the original assignment, finish only the missing work or verification, call finish_task with a concrete completed or blocked outcome, then return the required final handoff.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Confirmation {
@@ -91,9 +91,9 @@ impl Role {
         if !skill_enabled {
             // Keep the task role contract and tool restrictions independent of optional skill text.
             return Ok(match self {
-                Self::Implement => "Implement the assigned task within its scope. Report changed paths and checks.",
+                Self::Implement => "Implement the assigned task within its scope. Preserve existing contracts; for a new project, build and save a working core scenario first. Follow the approved specification and report unmet criteria.",
                 Self::Fix => "Verify and correct the assigned finding within its scope. Report changed paths and checks.",
-                Self::Review => "Review the requested change without editing files. Report findings using the requested verdict format.",
+                Self::Review => "Review without editing files. For material criteria, report the verification method, evidence and outcome; distinguish confirmed defects from unverified behavior. Do not claim a runtime or visual check from source inspection alone. Use the requested verdict format.",
             });
         }
         let manifest = match self {

@@ -58,15 +58,15 @@ export default function (pi) {
         }
     }
     if (!textOnly) {
-        const completionDescription = "Confirm the assigned task's actual outcome after checking the original requirements and available evidence. Use completed only when required work is actually done; use blocked when essential work or verification cannot be completed. Call this as your last tool, then return the requested final handoff (including JSON if required).";
+        const completionDescription = "Record the checked outcome of the assignment: completed or blocked. Call as the last tool.";
         guardedDescriptions.set("finish_task", completionDescription);
         pi.registerTool({
             name: "finish_task", label: "Confirm task outcome", description: completionDescription,
             parameters: Type.Object({
                 status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")]),
-                summary: Type.String({ minLength: 1, maxLength: 2000, description: "Concrete outcome and checks actually performed, or the remaining blocker; not a promise of future work." }),
+                summary: Type.String({ minLength: 1, maxLength: 2000, description: "Concise confirmed changes, actual checks, and any remaining or unverified requirements." }),
             }),
-            promptSnippet: "Confirm completed or blocked after checking the assignment, then return the requested final answer.",
+            promptSnippet: "Record the verified task outcome before the final answer.",
             executionMode: "sequential",
             async execute(_id, args, signal, _onUpdate, ctx) {
                 const value = await ctx.ui.input("lyra:finish-task", JSON.stringify(args), { signal });
