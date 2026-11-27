@@ -287,13 +287,13 @@ function createRoleSettings(session) {
     busy = true;
     render();
     try {
-      const response = await fetch('/model/roles');
+      const response = await fetch('/model/intelligence');
       if (!response.ok) throw new Error();
       saved = await response.json();
       draft = { ...saved };
       feedback.textContent = '';
     } catch {
-      feedback.textContent = 'Не удалось загрузить роли моделей.';
+      feedback.textContent = 'Не удалось загрузить уровни интеллекта моделей.';
     } finally {
       busy = false;
       render();
@@ -314,7 +314,7 @@ function createRoleSettings(session) {
     busy = true;
     render();
     try {
-      const response = await fetch('/model/roles', {
+      const response = await fetch('/model/intelligence', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(draft),
@@ -322,9 +322,9 @@ function createRoleSettings(session) {
       if (!response.ok) throw new Error(await response.text());
       saved = await response.json();
       draft = { ...saved };
-      feedback.textContent = 'Роли сохранены.';
+      feedback.textContent = 'Уровни сохранены.';
     } catch (error) {
-      feedback.textContent = error.message || 'Не удалось сохранить роли моделей.';
+      feedback.textContent = error.message || 'Не удалось сохранить уровни интеллекта моделей.';
     } finally {
       busy = false;
       render();
