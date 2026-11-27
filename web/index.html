@@ -253,9 +253,17 @@
             <span id="benchmark-model" class="service"></span>
           </header>
           <div class="benchmark-body">
-            <button id="benchmark-run" class="unload" type="button" disabled>Запустить бенчмарк</button>
+            <div class="model-actions">
+              <button id="benchmark-run" class="unload" type="button" disabled>Быстрый бенчмарк</button>
+              <button id="benchmark-profile-run" class="unload" type="button" disabled>Полный профиль контекста</button>
+            </div>
             <p id="benchmark-summary" class="secondary"></p>
             <dl id="benchmark-results" class="facts" hidden></dl>
+            <details id="benchmark-profile" hidden>
+              <summary>Замеры по размерам контекста</summary>
+              <p id="benchmark-profile-note" class="secondary"></p>
+              <dl id="benchmark-profile-results" class="facts"></dl>
+            </details>
             <div class="model-actions">
               <label class="pin"><input id="pi-support" type="checkbox" aria-describedby="pi-check-status" disabled> Поддерживает Pi</label>
               <button id="pi-benchmark-run" class="unload" type="button" disabled>Проверить Pi</button>

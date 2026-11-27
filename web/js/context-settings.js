@@ -18,6 +18,8 @@ export function createContextSettings(session, {
   let contextEstimateRequest = 0;
   let contextBytesPerToken;
   let configuredAutoContext;
+  let autoSource;
+  let autoReason;
   let waitingForMemorySample = false;
   let memorySampleEpoch = 0;
 
@@ -70,8 +72,8 @@ export function createContextSettings(session, {
     get('context-choice').textContent = label;
     contextSize.setAttribute('aria-valuetext', label);
     get('context-note').textContent = tokens == null ?
-      (auto ? 'При запуске Lyra заново подберёт окно по свободной VRAM. Оценка для одного агента.' :
-        'Авто: подбор по VRAM при запуске. Если оценка недоступна, используется окно Ollama.') :
+      (auto ? (autoSource === 'measured' ? 'По полному бенчмарку модели. ' : 'Оценка по доступной VRAM. ') + 'Размер уточняется при запуске.' :
+        autoReason ? `Авто недоступен: ${autoReason}. Запустите полный бенчмарк или выберите окно вручную.` : 'Ожидаем оценку Auto.') :
       estimated ? 'Оценка для KV-кэша в FP16. Веса модели и рабочие буферы занимают память дополнительно.' :
       contextBytesPerToken === null ? 'Для этой модели оценка памяти недоступна.' :
       'Размер применяется при следующей загрузке.';
@@ -101,6 +103,8 @@ export function createContextSettings(session, {
     const request = ++contextEstimateRequest;
     contextBytesPerToken = undefined;
     configuredAutoContext = undefined;
+    autoSource = undefined;
+    autoReason = undefined;
     renderContextChoice();
     if (!model) return;
     let estimate;
@@ -113,6 +117,8 @@ export function createContextSettings(session, {
     if (request !== contextEstimateRequest) return;
     contextBytesPerToken = estimate?.bytes_per_token_f16 ?? null;
     configuredAutoContext = estimate?.auto_context_tokens;
+    autoSource = estimate?.auto_context_source;
+    autoReason = estimate?.auto_context_reason;
     renderContextChoice();
   }
 

@@ -12,7 +12,7 @@ use crate::context;
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Model {
     pub(crate) name: String,
-    size: Option<u64>,
+    pub(crate) size: Option<u64>,
     pub(crate) size_vram: Option<u64>,
     #[serde(skip_deserializing)]
     pub(crate) context_profile: bool,
@@ -251,16 +251,27 @@ struct CatalogEntry {
     model: Option<String>,
     remote_host: Option<String>,
     size: Option<u64>,
+    digest: Option<String>,
 }
 
 pub(crate) fn model_catalog() -> Option<BTreeMap<String, Option<u64>>> {
+    Some(model_catalog_details()?.into_iter().map(|(name, (size, _))| (name, size)).collect())
+}
+
+pub(crate) fn server_version() -> Option<String> {
+    let response: Value = agent(Duration::from_millis(800))
+        .get("http://127.0.0.1:11434/api/version").call().ok()?.into_json().ok()?;
+    response["version"].as_str().map(str::to_owned)
+}
+
+pub(crate) fn model_catalog_details() -> Option<BTreeMap<String, (Option<u64>, Option<String>)>> {
     let models = model_tags()?
         .into_iter()
         .filter(|entry| entry.remote_host.as_deref().unwrap_or_default().is_empty())
         .filter_map(|entry| {
             Some((
                 entry.name.or(entry.model)?,
-                entry.size.filter(|&size| size > 0),
+                (entry.size.filter(|&size| size > 0), entry.digest),
             ))
         })
         .filter(|(name, _)| {

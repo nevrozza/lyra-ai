@@ -2,7 +2,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
@@ -20,8 +20,8 @@ use super::{
 
 const WORK_HANDOFF_RULE: &str = "\n\n# Work result\nPerform the assigned work with the available tools. Before your final answer, call finish_task with completed or blocked and a concise factual summary of changes, checks actually run and any unmet requirements. Use completed only when you have finished the assigned work. Then return the requested final handoff or exact verdict format. Do not claim unperformed checks. If you perform more tool work, record the updated outcome before ending.\n";
 
-fn input_window_exhausted(input: Option<u64>, window: Option<u32>) -> bool {
-    input.zip(window).is_some_and(|(input, window)| input >= u64::from(window))
+fn input_window_exhausted(input: Option<u64>, output: Option<u64>, window: Option<u32>) -> bool {
+    input.zip(window).is_some_and(|(input, window)| input.saturating_add(output.unwrap_or(0)) >= u64::from(window))
 }
 
 // Evidence records successful guarded operations, not the model's claims.
@@ -44,6 +44,20 @@ pub(super) struct WorkProgress {
     continuation_attempts: u8,
     confirmed_mutation_count: usize,
     recent_mutations: Vec<ConfirmedMutation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<PiDiagnostics>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+struct PiDiagnostics {
+    context_selection: String,
+    context_window: Option<u32>,
+    last_input_tokens: Option<u64>,
+    last_output_tokens: Option<u64>,
+    observed_ollama_context_tokens: Option<u64>,
+    provider_request_count: u64,
+    last_provider_request: Option<Value>,
+    elapsed_ms: u64,
 }
 
 impl Default for WorkProgress {
@@ -56,6 +70,7 @@ impl Default for WorkProgress {
             continuation_attempts: 0,
             confirmed_mutation_count: 0,
             recent_mutations: Vec::new(),
+            diagnostics: None,
         }
     }
 }
@@ -112,6 +127,9 @@ impl WorkProgress {
             if self.handoff_complete { "received" } else { "incomplete" },
             self.confirmed_mutation_count, self.continuation_attempts,
         );
+        if let Some(diagnostics) = &self.diagnostics {
+            note.push_str(&format!("\nPi diagnostics: {}", serde_json::to_string(diagnostics).unwrap_or_default()));
+        }
         let recent = self.recent_mutations.len().min(8);
         if recent > 0 {
             note.push_str("\nMost recent confirmed operations (not proof of task completion):");
@@ -188,6 +206,7 @@ pub(super) struct Task<'a> {
     pub(super) model: &'a str,
     pub(super) delegation: u64,
     pub(super) context_window: Option<u32>,
+    pub(super) context_description: &'a str,
     pub(super) think: Option<&'a ollama::Think>,
     pub(super) role: Option<Role>,
     pub(super) role_skill_enabled: bool,
@@ -449,7 +468,14 @@ pub(super) async fn run(
     let mut work_progress = WorkProgress::default();
     let mut last_error = None;
     let mut stop_reason = None;
+    let started = Instant::now();
+    let mut diagnostic = PiDiagnostics {
+        context_selection: task.as_ref().map(|task| task.context_description.to_owned()).unwrap_or_default(),
+        context_window,
+        ..Default::default()
+    };
     let mut last_input_tokens = None;
+    let mut last_output_tokens = None;
     let mut successful_file_tools = [false; 3];
     let mut ready = commands.is_none();
     let mut legacy_rpc = false;
@@ -511,6 +537,14 @@ pub(super) async fn run(
                     }
                     Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:active-tools:")) => {
                         log(Kind::Pi, "Active tools", event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:active-tools:"), Some("ok"));
+                    }
+                    Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:provider-request:")) => {
+                        let raw = event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:provider-request:");
+                        if let Ok(value) = serde_json::from_str::<Value>(raw) {
+                            diagnostic.provider_request_count = diagnostic.provider_request_count.saturating_add(1);
+                            diagnostic.last_provider_request = Some(value);
+                            log(Kind::Pi, "Provider request limits (hook)", raw, None);
+                        }
                     }
                     Some("notify") if event["message"] == "lyra:context-near-limit" => {
                         report_context(task.as_ref(), ContextNotice::NearLimit);
@@ -788,6 +822,12 @@ pub(super) async fn run(
                         .saturating_add(usage["cacheRead"].as_u64().unwrap_or_default())
                         .saturating_add(usage["cacheWrite"].as_u64().unwrap_or_default())
                 });
+                last_output_tokens = usage["output"].as_u64();
+                diagnostic.last_input_tokens = last_input_tokens;
+                diagnostic.last_output_tokens = last_output_tokens;
+                log(Kind::Pi, "Provider generation", &json!({"input_tokens": last_input_tokens,
+                    "output_tokens": last_output_tokens, "stop_reason": reason, "context_window": context_window,
+                    "elapsed_ms": started.elapsed().as_millis()}).to_string(), None);
                 last_error = match reason {
                     Some("error" | "aborted") => Some(
                         message["errorMessage"]
@@ -849,7 +889,7 @@ pub(super) async fn run(
     let truncated = matches!(stop_reason.as_deref(), Some("length" | "aborted" | "toolUse" | "deferred"));
     let generation_stop_reason = stop_reason.clone();
     let context_overflow = stop_reason.as_deref() == Some("length")
-        && input_window_exhausted(last_input_tokens, context_window);
+        && input_window_exhausted(last_input_tokens, last_output_tokens, context_window);
     if last_error.is_none()
         && !matches!(stop_reason.as_deref(), Some("aborted" | "length"))
         && let Some(conflicts) = file_versions.unresolved_conflicts()
@@ -887,6 +927,15 @@ pub(super) async fn run(
     }
     // A normal answer is only a received handoff, not proof that the task is done.
     let handoff_complete = last_error.is_none() && stop_reason.as_deref() == Some("stop") && !truncated && !answer.trim().is_empty();
+    diagnostic.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if task.is_some() {
+        let backend = backend.clone();
+        diagnostic.observed_ollama_context_tokens = tokio::task::spawn_blocking(move || {
+            ollama::running_models()?.into_iter().find(|entry| ollama::same_model(&entry.name, &backend))?.context_length
+        }).await.ok().flatten();
+    }
+    log(Kind::Pi, "Run diagnostics", &serde_json::to_string(&diagnostic).unwrap_or_default(), None);
+    work_progress.diagnostics = Some(diagnostic);
     work_progress.finish(generation_stop_reason, handoff_complete);
     Ok(Reply {
         context_overflow,
@@ -1193,9 +1242,10 @@ mod tests {
 
     #[test]
     fn context_exhaustion_is_still_detected() {
-        assert!(input_window_exhausted(Some(4096), Some(4096)));
-        assert!(!input_window_exhausted(Some(3000), Some(4096)));
-        assert!(!input_window_exhausted(None, Some(4096)));
+        assert!(input_window_exhausted(Some(4096), None, Some(4096)));
+        assert!(input_window_exhausted(Some(8000), Some(8384), Some(16384)));
+        assert!(!input_window_exhausted(Some(3000), Some(1000), Some(4096)));
+        assert!(!input_window_exhausted(None, Some(4096), Some(4096)));
     }
 
     #[test]

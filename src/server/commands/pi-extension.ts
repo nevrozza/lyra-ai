@@ -6,7 +6,7 @@ export default function (pi) {
     const guardedWrite = process.env.LYRA_PI_GUARDED_WRITE === "1" && !textOnly && !review;
     const origin = process.env.LYRA_MESSAGE_ORIGIN;
     const effort = process.env.LYRA_THINKING_EFFORT;
-    pi.on("before_provider_request", ({ payload }) => {
+    pi.on("before_provider_request", ({ payload }, ctx) => {
         // Lyra only registers the Ollama OpenAI-compatible provider. Override
         // Pi's provider-generated max token fields even for default thinking.
         // Ollama maps max_tokens=-1 to unlimited num_predict (no finite cap).
@@ -16,6 +16,15 @@ export default function (pi) {
             request.reasoning_effort = effort;
             if (request.reasoning) request.reasoning = { ...request.reasoning, effort };
         }
+        // Never log prompt content or credentials. This is the payload returned
+        // by the last Lyra hook, not a capture of the downstream HTTP transport.
+        ctx?.ui?.notify("lyra:provider-request:" + JSON.stringify({
+            original_max_tokens: payload?.max_tokens ?? null,
+            original_max_completion_tokens: payload?.max_completion_tokens ?? null,
+            max_tokens: request.max_tokens,
+            max_completion_tokens: request.max_completion_tokens ?? null,
+            context_window: ctx?.model?.contextWindow ?? null,
+        }));
         return request;
     });
     let earlierMessages = [];
