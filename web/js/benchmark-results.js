@@ -5,7 +5,7 @@ const elapsed = (ms) => ms == null ? '—' : ms < 1000 ? `${oneDecimal.format(ms
 const rate = (tokens) => tokens == null ? '—' : oneDecimal.format(tokens);
 const mem = (bytes) => bytes == null ? '—' : memoryAmount(bytes);
 const physicalPeak = (point) => point.gpu_memory?.length ? point.gpu_memory.reduce((sum, gpu) => sum + gpu.sampled_peak_bytes, 0) : null;
-const coldDelta = (point) => !point.was_loaded && point.gpu_memory?.length ? point.gpu_memory.reduce((sum, gpu) => sum + Math.max(0, gpu.sampled_peak_bytes - gpu.baseline_bytes), 0) : null;
+const coldDelta = (point) => point.cold_isolated && point.gpu_memory?.length ? point.gpu_memory.reduce((sum, gpu) => sum + Math.max(0, gpu.sampled_peak_bytes - gpu.baseline_bytes), 0) : null;
 const share = (point) => point.ollama_total_bytes > 0 && point.model_vram_bytes != null ? `${oneDecimal.format(Math.min(100, point.model_vram_bytes / point.ollama_total_bytes * 100))}%` : '—';
 function renderRows(node, rows) {
   node.replaceChildren(...rows.map(([label, value, hint]) => {
@@ -34,7 +34,7 @@ export function renderBenchmark(record, message) {
   const measuredAt = result && Date.parse(result.measured_at);
   summary.textContent = message ?? (result ?
     (Number.isFinite(measuredAt) ? `Результаты от ${benchmarkDate.format(measuredAt)}` : 'Результаты бенчмарка') :
-    'Замеров пока нет.');
+    (record?.memory_profile ? 'Полный профиль сохранён; быстрый замер ещё не выполнен.' : 'Замеров пока нет.'));
   const facts = get('benchmark-results');
   facts.hidden = !result;
   if (result) {
@@ -59,8 +59,8 @@ export function renderBenchmark(record, message) {
   get('benchmark-profile-note').textContent = profile ?
     (profile.stopped_reason ?? 'Все запланированные окна измерены.') + ' Пик VRAM — выборочный замер всего GPU; GPU% — отчёт Ollama.' : '';
   renderRows(get('benchmark-profile-results'), (profile?.points ?? []).map(point => [
-    `${contextLabel(point.context_tokens)} → ${contextLabel(point.measured_context_tokens)}`,
+    `${contextLabel(point.context_tokens)} → ${point.measured_context_tokens == null ? 'неизвестно' : contextLabel(point.measured_context_tokens)}`,
     `Δ ${mem(coldDelta(point))} · Ollama ${mem(point.model_vram_bytes)} / RAM ${mem(point.model_ram_bytes)} · GPU ${share(point)} · ${elapsed(point.load_ms)} · ${rate(point.generated_tokens_per_second)} ток/с${point.profile_gpu_bytes == null ? ' · не подтверждён' : ' · проверен для Auto'}`,
-    `Запрошенное → фактическое окно; холодный запуск; скорость входа ${rate(point.prompt_tokens_per_second)} ток/с`,
+    `Запрошенное → фактическое окно; холодный запуск; пик GPU ${mem(physicalPeak(point))}; скорость входа ${rate(point.prompt_tokens_per_second)} ток/с`,
   ]));
 }
