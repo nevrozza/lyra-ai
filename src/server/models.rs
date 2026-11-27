@@ -16,8 +16,9 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/pin", post(pin_model))
         .route("/model/unload", post(unload_model))
         .route("/model/select", post(select_model))
-        .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
+        .route("/model/benchmark", get(get_benchmark))
         .route("/model/benchmark/profile", post(start_profile))
+        .route("/model/benchmark/stop", post(stop_profile))
         .route("/model/description", post(describe_model))
         .route("/model/benchmark/pi", post(start_pi_benchmark))
         .route("/model/context", post(set_model_context))
@@ -314,22 +315,14 @@ async fn set_model_thinking(
     }
 }
 
-async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
-    start_benchmark_mode(app, headers, false).await
-}
-
 async fn start_profile(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
-    start_benchmark_mode(app, headers, true).await
-}
-
-async fn start_benchmark_mode(app: Arc<App>, headers: HeaderMap, full: bool) -> StatusCode {
     let model = match control_model(&app, &headers).await {
         Ok(model) => model,
         Err(status) => return status,
     };
     let admission = app.context_admission.lock().await;
     if !app.task.send_if_modified(|snapshot| {
-        matches_selection(snapshot, &headers) && snapshot.begin_benchmark(model.clone())
+        matches_selection(snapshot, &headers) && snapshot.begin_benchmark_profile(model.clone())
     }) {
         return StatusCode::CONFLICT;
     }
@@ -337,35 +330,39 @@ async fn start_benchmark_mode(app: Arc<App>, headers: HeaderMap, full: bool) -> 
     tokio::spawn(async move {
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
-            if full {
-                let profile = benchmark::measure_profile(&model, |stage| {
-                    store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(stage));
-                })?;
-                store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(benchmark::Stage::Saving));
-                return store.benchmarks.save_profile(model, profile)
-                    .map_err(|error| format!("Не удалось сохранить профиль: {error}"));
-            }
-            let tokens = model_context(&store, &model)?;
-            let measurement = benchmark::measure(&model, tokens, |stage| {
-                store
-                    .task
-                    .send_modify(|snapshot| snapshot.set_benchmark_stage(stage));
-            })?;
-            store
-                .task
-                .send_modify(|snapshot| snapshot.set_benchmark_stage(benchmark::Stage::Saving));
-            store
-                .benchmarks
-                .save(model, measurement)
-                .map_err(|error| format!("Не удалось сохранить бенчмарк: {error}"))
+            let profile = benchmark::measure_profile(&model, |stage| {
+                store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(stage));
+            }, || store.task.borrow().benchmark_stop_requested())?;
+            store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(benchmark::Stage::Saving));
+            store.benchmarks.save_profile(model, profile)
+                .map_err(|error| format!("Не удалось сохранить профиль: {error}"))
         })
         .await
         .unwrap_or_else(|error| Err(error.to_string()));
         app.metrics.lock().await.invalidate();
-        app.task
-            .send_modify(|snapshot| snapshot.finish_benchmark(result));
+        app.task.send_modify(|snapshot| snapshot.finish_benchmark(result));
     });
     StatusCode::ACCEPTED
+}
+
+async fn stop_profile(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    // Do not query Ollama here: cancellation must remain available while it is busy.
+    let explicit = match headers.get("x-lyra-target-model") {
+        Some(value) => match value.to_str().ok().and_then(|name| model_name(name).ok()) {
+            Some(model) => Some(model),
+            None => return StatusCode::BAD_REQUEST,
+        },
+        None => None,
+    };
+    if app.task.send_if_modified(|snapshot| {
+        if !matches_selection(snapshot, &headers) { return false; }
+        let target = explicit.clone().or_else(|| snapshot.model().map(str::to_owned));
+        target.is_some_and(|model| snapshot.request_benchmark_stop(&model))
+    }) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::CONFLICT
+    }
 }
 
 async fn select_model(

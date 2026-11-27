@@ -70,6 +70,9 @@ impl Record {
     }
 
     fn average_launch(&self) -> Option<TimingAverage> {
+        if let Some(profile) = &self.memory_profile {
+            return profile.average_launch();
+        }
         self.average_launch.or_else(|| {
             self.last_cold_load
                 .as_ref()
@@ -191,6 +194,20 @@ fn identity(digest: String, version: String, gpus: &[telemetry::Gpu]) -> Option<
 }
 
 impl MemoryProfile {
+    fn average_launch(&self) -> Option<TimingAverage> {
+        let average = self.points.iter()
+            .filter(|point| !point.was_loaded && point.load_ms.is_finite() && point.load_ms >= 0.0)
+            .fold(TimingAverage::default(), |average, point| average.with_sample(point.load_ms));
+        (average.samples > 0).then_some(average)
+    }
+
+    fn latest_generation_rate(&self) -> Option<f64> {
+        self.points.iter()
+            .filter_map(|point| point.generated_tokens_per_second.map(|rate| (&point.measured_at, rate)))
+            .max_by(|left, right| left.0.cmp(right.0))
+            .map(|(_, rate)| rate)
+    }
+
     pub(crate) fn matches(&self, metrics: &telemetry::Metrics, model: &str) -> bool {
         let current = metrics.model_digests.as_ref().and_then(|digests| digests.get(model))
             .zip(metrics.ollama_version.as_ref())
@@ -321,7 +338,10 @@ impl Store {
                 records.get(name).map_or((None, None), |record| {
                     (
                         record.average_launch().map(|timing| timing.mean_ms),
-                        record.latest.as_ref().and_then(|run| run.generated_tokens_per_second),
+                        match &record.memory_profile {
+                            Some(profile) => profile.latest_generation_rate(),
+                            None => record.latest.as_ref().and_then(|run| run.generated_tokens_per_second),
+                        },
                     )
                 })
             })
@@ -364,34 +384,6 @@ impl Store {
     pub fn save_pi_check(&self, model: String, passed: bool) -> io::Result<()> {
         self.update(|records| {
             records.entry(model).or_default().pi_check = Some(passed);
-            true
-        })
-    }
-
-    pub fn save(&self, model: String, measurement: Measurement) -> io::Result<()> {
-        self.update(|records| {
-            let entry = records.entry(model).or_default();
-            entry.average_run = Some(
-                entry
-                    .average_run()
-                    .unwrap_or_default()
-                    .with_sample(measurement.total_ms),
-            );
-            entry.average_launch = entry.average_launch();
-            if !measurement.was_loaded {
-                entry.average_launch = Some(
-                    entry
-                        .average_launch
-                        .unwrap_or_default()
-                        .with_sample(measurement.load_ms),
-                );
-                entry.last_cold_load = Some(ColdLoad {
-                    measured_at: measurement.measured_at.clone(),
-                    load_ms: measurement.load_ms,
-                    context_tokens: measurement.context_tokens,
-                });
-            }
-            entry.latest = Some(measurement);
             true
         })
     }
@@ -538,7 +530,14 @@ fn profile_windows(maximum: u64) -> Vec<u32> {
     windows
 }
 
-pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<MemoryProfile, String> {
+const USER_STOPPED: &str = "Прогон остановлен пользователем.";
+
+pub fn measure_profile(
+    model: &str,
+    mut on_stage: impl FnMut(Stage),
+    should_stop: impl Fn() -> bool,
+) -> Result<MemoryProfile, String> {
+    if should_stop() { return Err(USER_STOPPED.into()); }
     let estimate = context::estimate(model).ok_or("Model metadata unavailable")?;
     let maximum = estimate.max_context_tokens.ok_or("Model context ceiling unknown")?;
     let catalog = ollama::model_catalog_details().ok_or("Ollama catalog unavailable")?;
@@ -554,6 +553,7 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
     }) {
         return Err("Unpin Ollama models and unload external runners before full profiling".into());
     }
+    if should_stop() { return Err(USER_STOPPED.into()); }
     ollama::unload_idle_profiles(&loaded, |_| false)?;
     if loaded.iter().any(|entry| ollama::same_model(&entry.name, model)) {
         ollama::change_model(model, ollama::ModelAction::Unload, None)?;
@@ -564,6 +564,10 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
     let mut windows = profile_windows(maximum).into_iter();
     // Refine the first window that exceeds the Auto budget or slows down sharply.
     loop {
+        if should_stop() {
+            profile.stopped_reason = Some(USER_STOPPED.into());
+            break;
+        }
         let tokens = match (lower, upper) {
             (Some(low), Some(high)) if high.saturating_sub(low) > 2048 => {
                 let mid = (low + (high - low) / 2) / 1024 * 1024;
@@ -579,6 +583,10 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
                 profile.stopped_reason = Some("Cannot verify cold isolation: another model remains loaded or Ollama unavailable".into());
                 break;
             }
+        }
+        if should_stop() {
+            profile.stopped_reason = Some(USER_STOPPED.into());
+            break;
         }
         match measure(model, Some(tokens), &mut on_stage) {
             Ok(mut point) => {
@@ -616,7 +624,7 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
     Ok(profile)
 }
 
-pub fn measure(
+fn measure(
     model: &str,
     context_tokens: Option<u32>,
     mut on_stage: impl FnMut(Stage),
@@ -798,6 +806,30 @@ mod profile_tests {
             "load_ms":1000,"total_ms":2000,"prompt_ms":200,"generation_ms":800,"prompt_tokens":20,
             "generated_tokens":128,"prompt":"test","token_limit":128,"seed":42,"temperature":0
         })).unwrap()
+    }
+
+    #[test]
+    fn profile_average_uses_only_cold_points_of_this_run() {
+        let gib = 1u64 << 30;
+        let mut first = point(4096, 9*gib, gib, gib);
+        first.load_ms = 1000.0;
+        let mut second = point(8192, 9*gib, gib, gib);
+        second.load_ms = 3000.0;
+        let mut warm = point(16384, 9*gib, gib, gib);
+        warm.was_loaded = true;
+        warm.load_ms = 5.0;
+        let mut profile = MemoryProfile {
+            identity: ProfileIdentity { digest: "model".into(), ollama_version: "version".into(),
+                gpu_uuid: "gpu".into(), driver_version: "driver".into(), gpu_total_bytes: 12*gib,
+                environment: BTreeMap::new() },
+            points: vec![first, second, warm],
+            stopped_reason: Some(USER_STOPPED.into()),
+        };
+        let average = profile.average_launch().unwrap();
+        assert_eq!(average.samples, 2);
+        assert_eq!(average.mean_ms, 2000.0);
+        profile.points.clear();
+        assert!(profile.average_launch().is_none());
     }
 
     #[test]

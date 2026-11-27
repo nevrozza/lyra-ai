@@ -12,7 +12,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   const piBenchmarkRun = get('pi-benchmark-run');
   const piCheckStatus = get('pi-check-status');
   const unloadModel = get('unload-model');
-  const benchmarkRun = get('benchmark-run');
+  const benchmarkStop = get('benchmark-stop');
   const profileRun = get('benchmark-profile-run');
   const description = get('model-description');
   const saveDescription = get('save-description');
@@ -23,6 +23,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
+  let stopSubmitting = false;
 
   const roleSettings = createRoleSettings(session);
   const list = createModelList({ selectModel, statusFor: modelStatus });
@@ -46,11 +47,16 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const installed = session.metrics?.installed_models?.includes(observedModel);
     pinModel.disabled = blocked || !installed || session.metrics?.models == null;
     unloadModel.disabled = blocked || !installed || !loadedModel(session.metrics?.models, observedModel);
-    benchmarkRun.disabled = blocked || !installed || session.metrics?.models == null;
-    piBenchmarkRun.disabled = benchmarkRun.disabled;
-    profileRun.disabled = benchmarkRun.disabled || Boolean(session.metrics?.models?.some(entry =>
+    const benchmarkBlocked = blocked || !installed || session.metrics?.models == null;
+    piBenchmarkRun.disabled = benchmarkBlocked;
+    profileRun.disabled = benchmarkBlocked || Boolean(session.metrics?.models?.some(entry =>
       (!entry.context_profile && !sameModelName(entry.name, observedModel)) ||
       Date.parse(entry.expires_at) - Date.now() > farFuture));
+    const profiling = session.run?.benchmark_profile_running && session.run.operation_model === observedModel;
+    benchmarkStop.hidden = !profiling;
+    benchmarkStop.disabled = session.closed || !session.online || !profiling || stopSubmitting ||
+      session.run?.benchmark_stop_requested || session.run?.benchmark_stage === 'saving';
+    benchmarkStop.textContent = session.run?.benchmark_stop_requested || stopSubmitting ? 'Останавливаем…' : 'Остановить';
     const piCheck = benchmarkRecord?.pi_check;
     piSupport.checked = piCheck === true;
     const checkingPi = (modelSubmitting?.model === observedModel && modelSubmitting?.action === 'benchmark-pi') ||
@@ -80,8 +86,23 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   });
 
   unloadModel.addEventListener('click', () => changeModel('unload', '/model/unload'));
-  benchmarkRun.addEventListener('click', () => changeModel('benchmark', '/model/benchmark'));
   profileRun.addEventListener('click', () => changeModel('benchmark-profile', '/model/benchmark/profile'));
+  benchmarkStop.addEventListener('click', async () => {
+    if (benchmarkStop.disabled) return;
+    const model = displayedModel();
+    stopSubmitting = true;
+    modelRequestError = '';
+    refreshControls();
+    try {
+      const response = await postModel('/model/benchmark/stop', session.run?.model, undefined, model);
+      if (!response.ok) throw new Error(modelResponseError(response));
+    } catch (error) {
+      if (displayedModel() === model && session.run?.benchmark_profile_running) modelRequestError = error.message;
+    } finally {
+      stopSubmitting = false;
+      renderModel(session.metrics?.models);
+    }
+  });
   piBenchmarkRun.addEventListener('click', () => changeModel('benchmark-pi', '/model/benchmark/pi'));
 
   description.addEventListener('input', refreshControls);
@@ -169,7 +190,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const isOperationModel = name === session.run?.operation_model;
     const action = modelSubmitting && modelSubmitting.model === name ? modelSubmitting.action :
       isOperationModel ? session.run?.model_action : undefined;
-    const benchmarking = action === 'benchmark' || action === 'benchmark-profile' || action === 'benchmark-pi' ||
+    const benchmarking = action === 'benchmark-profile' || action === 'benchmark-pi' ||
       (isOperationModel && session.run?.benchmark_running);
     const delegated = name != null &&
       Object.values(session.run?.delegations ?? {}).some(task => task.model === name);
@@ -203,7 +224,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     }
     let detail = '';
     if (!session.closed && benchmarking) {
-      detail = benchmarkStages[isOperationModel ? session.run?.benchmark_stage : undefined] ?? benchmarkStages.preparing;
+      detail = isOperationModel && session.run?.benchmark_stop_requested ? 'Остановка после текущего замера' :
+        benchmarkStages[isOperationModel ? session.run?.benchmark_stage : undefined] ?? benchmarkStages.preparing;
     } else if (mode === 'resident' && !pinned && remaining > 0) {
       detail = `до выгрузки ≈ ${duration(remaining)}`;
     }
@@ -227,7 +249,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const { loaded, action, benchmarking, pinned } = modelStatus(model, models);
     const checkingPi = action === 'benchmark-pi' ||
       (model === session.run?.operation_model && session.run?.benchmark_stage === 'checking_pi');
-    benchmarkRun.textContent = benchmarking && !checkingPi ? 'Бенчмарк выполняется…' : 'Быстрый бенчмарк';
+    profileRun.textContent = benchmarking && !checkingPi ?
+      (session.run?.benchmark_stop_requested ? 'Остановка бенчмарка…' : 'Бенчмарк выполняется…') : 'Полный бенчмарк';
     profileRun.title = 'Последовательные холодные замеры. Lyra выгрузит свои незакреплённые профили.';
     get('ollama').textContent = models === null ? 'Ollama недоступна' : 'Ollama';
     pinModel.checked = action === 'pin' || (action !== 'unpin' && pinned);
