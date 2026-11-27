@@ -371,11 +371,6 @@ impl Job {
         })
     }
 
-    pub(super) fn user_cancelled(&self) -> bool {
-        self.status == Status::Cancelled && self.result.as_ref()
-            .is_some_and(|result| result.stop_reason.as_deref() == Some(super::USER_STOP_REASON))
-    }
-
     pub(super) fn status_message(&self) -> Option<Message> {
         if !matches!(
             self.status,
