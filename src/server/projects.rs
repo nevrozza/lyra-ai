@@ -947,6 +947,9 @@ fn tool_preview(mut text: String) -> String {
 }
 
 fn skill_read_name(part: &Value) -> Option<&str> {
+    if part["name"] == "load_skill" {
+        return part["arguments"]["name"].as_str().filter(|name| !name.is_empty());
+    }
     if part["name"] != "read" {
         return None;
     }
@@ -1012,8 +1015,7 @@ fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Opt
     tool.finished_at = timestamp;
 }
 
-// Pi exposes skill descriptions in its prompt and reads the actual SKILL.md
-// through its normal read tool. Match the persisted call to its successful result
+// Match explicit skill loads or direct SKILL.md reads to their successful results
 // so failed reads and mere mentions never create a dashboard notice.
 #[derive(Default)]
 struct SkillReads {
@@ -1026,7 +1028,7 @@ impl SkillReads {
             "user" => self.pending.clear(),
             "assistant" => {
                 for part in message["content"].as_array().into_iter().flatten() {
-                    if part["type"] != "toolCall" || part["name"] != "read" {
+                    if part["type"] != "toolCall" || !matches!(part["name"].as_str(), Some("read" | "load_skill")) {
                         continue;
                     }
                     let Some(id) = part["id"].as_str() else { continue };
@@ -1037,7 +1039,7 @@ impl SkillReads {
             }
             "toolResult" => {
                 let skill = self.pending.remove(message["toolCallId"].as_str()?)?;
-                if message["toolName"] == "read" && message["isError"] == false {
+                if matches!(message["toolName"].as_str(), Some("read" | "load_skill")) && message["isError"] == false {
                     return Some(skill);
                 }
             }
