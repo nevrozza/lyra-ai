@@ -129,6 +129,10 @@ impl Cache {
     }
 }
 
+pub(crate) fn system_memory() -> Option<Memory> {
+    system().ram
+}
+
 pub(crate) async fn nvidia() -> Vec<Gpu> {
     let mut probe = Command::new("nvidia-smi");
     probe
