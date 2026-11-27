@@ -22,6 +22,12 @@ The MCP timeout defaults to 60 seconds in Codex. Lyra's new waits default to 330
 
 See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#other-configuration-options). Lyra defaults to loopback; its optional LAN mode is unauthenticated and should only be used on a trusted network.
 
+## Local generation and task completion
+
+Lyra no longer exposes `max_output_tokens` in its normal MCP calls, queued tasks or AI settings. Direct Ollama generation uses `num_predict = -1`; the Pi extension overrides the Ollama-compatible request's finite generation cap. Old saved task prompts with a cap remain readable, but the cap is ignored. The fixed benchmark budget remains separate so benchmark measurements stay comparable. Model context windows, natural provider limits and existing execution timeouts still apply.
+
+Work runs end on the original Pi agent run without a mandatory `finish_task` tool or automatic completion-check/continuation prompts. A normal stop and handoff mean only that the run returned, not that every requirement has been met. Actual provider errors, context/output exhaustion, guarded file conflicts, cancellation and recorded file evidence remain observable. Codex must inspect the result and decide whether to continue; the premature-stop problem is intentionally not solved by a new heuristic. Historical completion fields in saved work progress remain readable.
+
 ## Queue work without polling
 
 - `enqueue_and_wait`: submit a settled batch and wait until its work and automatic review/fix rounds complete or require attention. Its `batch` object uses the usual `enqueue_project_tasks` schema and requires a stable `batch_id`. Reuse the same ID and payload only to recover a lost response.
