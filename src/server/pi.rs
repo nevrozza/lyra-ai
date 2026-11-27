@@ -87,7 +87,6 @@ pub(super) struct Task<'a> {
     pub(super) think: Option<&'a ollama::Think>,
     pub(super) role: Option<Role>,
     pub(super) role_skill_enabled: bool,
-    pub(super) writes: &'a [PathBuf],
 }
 
 pub(super) struct Reply {
@@ -225,10 +224,13 @@ pub(super) async fn run(
     let trace = task.as_ref().map(|task| task.trace);
     let commands = trace;
     let text_only = task.as_ref().is_some_and(|task| task.text_only);
-    let writes = task.as_ref().map_or(&[][..], |task| task.writes);
     let reviewing = task
         .as_ref()
         .is_some_and(|task| matches!(task.role, Some(Role::Review)));
+    let guarded = task.is_some() && !text_only && !reviewing;
+    let fallback_roots = [workspace.to_path_buf()];
+    let roots = project.map_or(fallback_roots.as_slice(), |project| project.folders.as_slice());
+    let mut versions = projects::write_scope::Versions::default();
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let project_instructions;
     let agents_file = if let (Some(project), Some(directory), Some(task)) =
@@ -419,17 +421,36 @@ pub(super) async fn run(
                         .await?;
                         ready = true;
                     }
-                    Some("input")
-                        if ready
-                            && !writes.is_empty()
-                            && event["title"] == "lyra:write-scoped-file" =>
-                    {
+                    Some("input") if ready && guarded && event["title"] == "lyra:observe-read" => {
+                        let id = event["id"].as_str().ok_or("Missing Pi read request ID")?;
+                        let request: Value = serde_json::from_str(event["placeholder"].as_str().ok_or("Missing read observation")?)
+                            .map_err(|error| error.to_string())?;
+                        let call_id = request["callId"].as_str().ok_or("Missing read call ID")?;
+                        match request["phase"].as_str() {
+                            Some("begin") => {
+                                let path = request["path"].as_str().ok_or("Missing read path")?;
+                                versions.begin_read(workspace, roots, call_id.to_owned(), Path::new(path));
+                            }
+                            Some("finish") => versions.finish_read(call_id, request["success"] == true),
+                            _ => return Err("Invalid read observation phase".into()),
+                        }
+                        rpc_send(stdin, json!({
+                            "type": "extension_ui_response", "id": id, "value": "ok"
+                        })).await?;
+                    }
+                    Some("input") if ready && guarded && event["title"] == "lyra:write-locked-file" => {
                         let id = event["id"].as_str().ok_or("Missing Pi file request ID")?;
-                        let request = event["placeholder"]
-                            .as_str()
-                            .ok_or("Missing Pi file request")?;
-                        // Finish the filesystem mutation before yielding to cancellation.
-                        let result = projects::write_scope::mutate(workspace, writes, request);
+                        let request = event["placeholder"].as_str().ok_or("Missing Pi file request")?;
+                        let task = task.as_ref().expect("guarded task");
+                        // No await between version validation, claim and mutation.
+                        let result = versions.mutate(workspace, roots, request, |path| {
+                            let mut claim = Err("TASK_STOPPED".into());
+                            task.trace.app().task.send_if_modified(|snapshot| {
+                                claim = snapshot.claim_file(task.delegation, path);
+                                claim.is_ok()
+                            });
+                            claim
+                        });
                         let result = match result {
                             Ok(()) => json!({"ok": true}),
                             Err(error) => json!({"ok": false, "message": error.to_string()}),
@@ -774,34 +795,12 @@ async fn write_project_instructions(
             );
         }
     }
-    if !task.writes.is_empty() {
-        let root = tokio::fs::canonicalize(&project.workspace).await?;
-        let paths: Vec<_> = task
-            .writes
-            .iter()
-            .filter_map(|path| path.strip_prefix(&root).ok())
-            .map(|path| {
-                path.to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/")
-            })
-            .collect();
-        if paths.len() != task.writes.len() {
-            return Err(io::Error::other(
-                "The primary working directory changed after reservation",
-            ));
-        }
-        let _ = writeln!(
-            text,
-            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are available for reading, testing and other tasks, but never use them (including scripts, subprocesses or generated outputs) to modify files outside the reserved paths. Use write/edit for source changes. If a command would modify unreserved files, do not run it. The list can include new files. If another path is needed, report its exact relative path.",
-            json!(paths),
-        );
-    }
     if task.text_only {
         text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
     } else if matches!(task.role, Some(Role::Review)) {
         text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write and edit tools are intentionally unavailable. Report fixes instead of editing.\n");
     } else {
-        text.push_str("\nWork mode: use the write tool to create or replace files and the edit tool for targeted edits. Use the exact path and the tool's advertised argument schema.\n");
+        text.push_str("\nWork mode: use write to create files and edit for targeted changes. Read an existing file before any write or edit; Lyra checks its last observed content version and claims modified files until this task ends. If FILE_CHANGED or READ_REQUIRED, read the current file and adapt your change. If FILE_LOCKED, continue independent work and report an essential dependency; do not wait or repeatedly retry. NEVER bypass these protections with run_command, scripts, subprocesses, redirects, generators, patch utilities, git checkout/reset, or other indirect source modifications. Shell is for inspection, builds and tests, not changing project source files. Do not run a command that would change source files; use write/edit instead.\n");
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
@@ -920,9 +919,9 @@ fn spawn_pi(
         command.env_remove("LYRA_PI_TEXT_ONLY");
         command.env_remove("LYRA_PI_REVIEW");
         command.env_remove("LYRA_PI_SCOPED_WRITE");
-        let scoped_write = task.is_some_and(|task| !task.writes.is_empty());
-        if scoped_write {
-            command.env("LYRA_PI_SCOPED_WRITE", "1");
+        command.env_remove("LYRA_PI_GUARDED_WRITE");
+        if task.is_some() && !text_only {
+            command.env("LYRA_PI_GUARDED_WRITE", "1");
         }
         let reviewing = task.is_some_and(|task| matches!(task.role, Some(Role::Review)));
         if reviewing {
@@ -935,7 +934,7 @@ fn spawn_pi(
                 "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
             } else if extension.is_some() {
                 // Pi's --tools is an allowlist for extension tools as well as built-ins.
-                // For scoped runs the extension overrides write/edit with guarded tools
+                // For Work runs the extension overrides write/edit with guarded tools
                 // and verifies the overrides before accepting the prompt.
                 "read,grep,find,ls,write,edit,run_command"
             } else {
