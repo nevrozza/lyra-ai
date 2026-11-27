@@ -1239,6 +1239,47 @@ mod tests {
     }
 
     #[test]
+    fn user_stop_is_visible_in_both_history_views_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().join("data");
+        let store = Store::new(directory.clone());
+        let project = store.save(SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Chat"
+        })).unwrap()).unwrap();
+        store.record_user_stop(chat.id).unwrap();
+        let store = Store::new(directory);
+        let benchmarks = benchmark::Store::new(None);
+        for dashboard in [false, true] {
+            let messages = store.history(SessionKey {
+                project_id: project.id, project_session_id: chat.id,
+            }, &benchmarks, dashboard).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "notice");
+            assert_eq!(messages[0].text, USER_STOP_TEXT);
+            assert!(messages[0].timestamp.is_some());
+        }
+    }
+
+    #[test]
+    fn user_stop_marks_only_pending_tools_as_cancelled() {
+        let mut messages = VecDeque::new();
+        append_tool_calls(&mut messages, &serde_json::json!([
+            {"type":"toolCall","id":"a","name":"read","arguments":{}},
+            {"type":"toolCall","id":"b","name":"write","arguments":{}}
+        ]), Some(1000));
+        finish_tool(&mut messages, &serde_json::json!({
+            "toolCallId":"a","toolName":"read","content":"ok"
+        }), Some(2000));
+        push_user_stop(&mut messages, 3000);
+        assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
+        assert_eq!(messages[1].tool.as_ref().unwrap().status, "cancelled");
+        assert_eq!(messages[2].text, USER_STOP_TEXT);
+    }
+
+    #[test]
     fn history_timestamp_uses_pi_message_or_saved_entry_time() {
         assert_eq!(entry_timestamp(&serde_json::json!({"message":{"timestamp":1234}})), Some(1234));
         assert_eq!(entry_timestamp(&serde_json::json!({"timestamp":"1970-01-01T00:00:02Z"})), Some(2000));
