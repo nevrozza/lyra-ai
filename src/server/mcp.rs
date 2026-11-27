@@ -772,7 +772,7 @@ async fn run_model(
         let requested = request.context_tokens.map(NonZeroU32::get);
         let auto = if requested.is_none() && tokens.is_none() {
             metrics.as_ref().and_then(|metrics| {
-                let estimate = context::estimate(&source)?;
+                let estimate = context::estimate_auto(&source)?;
                 auto_context_estimate(metrics, &source, &estimate, 1, 1, true)
             })
         } else { None };
@@ -1353,7 +1353,7 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
         let source = model.clone();
         let (record, estimate) = tokio::task::spawn_blocking(move || {
             let record = store.benchmarks.get(&source)?;
-            Ok::<_, std::io::Error>((record, context::estimate(&source).unwrap_or_default()))
+            Ok::<_, std::io::Error>((record, context::estimate_auto(&source).unwrap_or_default()))
         })
         .await
         .map_err(|_| "Could not read model details")?
@@ -1610,7 +1610,7 @@ pub(super) async fn plan_auto_context(
         }
     }
     let source = model.to_owned();
-    let estimate = tokio::task::spawn_blocking(move || context::estimate(&source))
+    let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
         .await.ok().flatten().unwrap_or_default();
     let selected = auto_context_estimate(&metrics, model, &estimate, slots, model_slots, active.is_empty());
     if selected.is_none() && !active.is_empty() { None } else { Some(selected) }
