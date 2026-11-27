@@ -23,3 +23,11 @@ test('tool batches group across reasoning and skill notices, not visible message
     { kind: 'activity', entries: [check] },
   ]);
 });
+
+test('activity auto-opens during work and closes afterward unless manually overridden', () => {
+  const open = context.activityOpen;
+  assert.equal(open(true, undefined), true);
+  assert.equal(open(false, undefined), false);
+  assert.equal(open(true, false), false);
+  assert.equal(open(false, true), true);
+});

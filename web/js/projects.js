@@ -43,6 +43,10 @@ export function groupChatHistory(entries) {
   return blocks;
 }
 
+export function activityOpen(active, manual) {
+  return manual ?? active;
+}
+
 export function createProjects({ onSelection = () => {} } = {}) {
   const tree = get('project-tree');
   const projectDialog = get('project-dialog');
@@ -97,6 +101,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
   let thinkingDelegation;
   let renderedChatId;
   const expandedDetails = new Set();
+  const activityOverrides = new Map();
 
   const selectedProject = () => catalog?.projects.find(project => project.id === projectId);
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
@@ -724,7 +729,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     return node;
   }
 
-  function renderActivity(block, index) {
+  function renderActivity(block, index, active) {
     const item = element('li', '');
     item.dataset.role = 'activity';
     const entries = block.entries;
@@ -752,6 +757,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
       summary.append(status);
     }
     const node = detail(key, 'project-activity', summary);
+    node.open = activityOpen(active, activityOverrides.get(key));
+    node.dataset.initialOpen = String(node.open);
     const rows = element('div', '');
     rows.className = 'project-activity-rows';
     for (const [i, message] of entries.entries()) {
@@ -784,13 +791,22 @@ export function createProjects({ onSelection = () => {} } = {}) {
     // disclosures independent even while tool results stream in.
     expandedDetails.clear();
     if (renderedChatId === chatId) {
-      for (const node of messages.querySelectorAll('details[open][data-detail-key]')) {
-        expandedDetails.add(node.dataset.detailKey);
+      for (const node of messages.querySelectorAll('details[data-detail-key]')) {
+        const key = node.dataset.detailKey;
+        if (node.classList.contains('project-activity')) {
+          // Only a user change becomes an override; an automatic open
+          // must not keep a finished batch expanded on the next render.
+          if (String(node.open) !== node.dataset.initialOpen) activityOverrides.set(key, node.open);
+        } else if (node.open) expandedDetails.add(key);
       }
+    } else {
+      activityOverrides.clear();
     }
     renderedChatId = chatId;
-    messages.replaceChildren(...groupChatHistory(entries).map((block, index) => {
-      if (block.kind === 'activity') return renderActivity(block, index);
+    const blocks = groupChatHistory(entries);
+    const working = Boolean(chatRun(chatId));
+    messages.replaceChildren(...blocks.map((block, index) => {
+      if (block.kind === 'activity') return renderActivity(block, index, working && index === blocks.length - 1);
       const message = block.message;
       const item = element('li', '');
       item.dataset.role = message.role;
@@ -1170,6 +1186,9 @@ export function createProjects({ onSelection = () => {} } = {}) {
       installedModels = models ?? [];
       updateControls();
       const current = chatRun(chatId);
+      if (Boolean(previous) !== Boolean(current) || (current && current[0] !== previous?.[0])) {
+        renderHistory();
+      }
       if ((previous && !current && connected) || (current && (
         current[0] !== previous?.[0] ||
         current[1].history_revision !== previous?.[1].history_revision
