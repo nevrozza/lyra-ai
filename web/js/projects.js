@@ -234,14 +234,15 @@ export function createProjects({ onSelection = () => {} } = {}) {
       ? installedModels[0] : dashboardModel;
     const models = [...new Set([defaultModel, ...installedModels].filter(Boolean))];
     const preferred = chatModels.get(chatId) ?? taskChat(selectedChat())?.job?.model;
-    const selected = models.includes(preferred) ? preferred : '';
-    const key = JSON.stringify([defaultModel, models, selected]);
+    const selected = models.includes(preferred) ? preferred : models[0];
+    if (chatId != null && selected) chatModels.set(chatId, selected);
+    const key = JSON.stringify([models, selected]);
     if (key !== modelOptionsKey) {
       modelOptionsKey = key;
-      const options = [['', defaultModel ? `По умолчанию · ${defaultModel}` : 'Нет доступных моделей']];
-      setOptions(modelSelect, [...options, ...models.map(model => [model, model])], selected);
+      setOptions(modelSelect, models.length ? models.map(model => [model, model]) :
+        [['', 'Нет доступных моделей']], selected ?? '');
     }
-    return selected || defaultModel;
+    return selected;
   }
 
   function renderTree(projects) {
