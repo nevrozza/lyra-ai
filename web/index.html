@@ -213,7 +213,7 @@
               </form>
               <dl id="model-details" class="facts" hidden>
                 <div><dt>Контекст</dt><dd id="context">—</dd></div>
-                <div><dt>VRAM модели</dt><dd id="model-vram">—</dd></div>
+                <div><dt>VRAM раннера по Ollama</dt><dd id="model-vram">—</dd></div>
               </dl>
               <form id="context-form" class="context-settings">
                 <label for="context-size">Размер контекста</label>
@@ -259,11 +259,26 @@
             </div>
             <p id="benchmark-summary" class="secondary"></p>
             <dl id="benchmark-results" class="facts" hidden></dl>
-            <details id="benchmark-profile" hidden>
-              <summary>Замеры по размерам контекста</summary>
+            <section id="benchmark-profile" aria-labelledby="benchmark-profile-title" hidden>
+              <h3 id="benchmark-profile-title">Профиль VRAM по контексту</h3>
+              <p id="benchmark-profile-auto" class="secondary" hidden></p>
               <p id="benchmark-profile-note" class="secondary"></p>
-              <dl id="benchmark-profile-results" class="facts"></dl>
-            </details>
+              <div class="benchmark-table-scroll" role="region" aria-label="Результаты замеров" tabindex="0">
+                <table aria-labelledby="benchmark-profile-title" aria-describedby="benchmark-profile-note">
+                  <thead><tr>
+                    <th scope="col">Токены</th>
+                    <th scope="col">VRAM для Auto</th>
+                    <th scope="col">Ток/с</th>
+                    <th scope="col">Результат</th>
+                  </tr></thead>
+                  <tbody id="benchmark-profile-results"></tbody>
+                </table>
+              </div>
+              <details id="benchmark-profile-diagnostics" hidden>
+                <summary>Диагностика прогона</summary>
+                <p id="benchmark-profile-reason" class="secondary"></p>
+              </details>
+            </section>
             <div class="model-actions">
               <label class="pin"><input id="pi-support" type="checkbox" aria-describedby="pi-check-status" disabled> Поддерживает Pi</label>
               <button id="pi-benchmark-run" class="unload" type="button" disabled>Проверить Pi</button>

@@ -76,6 +76,7 @@ async fn start_pi_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> 
         Ok(model) => model,
         Err(status) => return status,
     };
+    let admission = app.context_admission.lock().await;
     if !app.task.send_if_modified(|snapshot| {
         if !matches_selection(snapshot, &headers) || !snapshot.begin_benchmark(model.clone()) {
             return false;
@@ -85,6 +86,7 @@ async fn start_pi_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> 
     }) {
         return StatusCode::CONFLICT;
     }
+    drop(admission);
     tokio::spawn(async move {
         let result = run_pi_benchmark(&app, model).await;
         app.metrics.lock().await.invalidate();
@@ -107,6 +109,12 @@ async fn run_pi_benchmark(app: &Arc<App>, model: String) -> Result<(), String> {
     let passed = if advertised == Some(false) {
         false
     } else {
+        let tokens = if tokens.is_some() {
+            mcp::release_idle_profiles(&model, tokens, false).await?;
+            tokens
+        } else {
+            mcp::select_idle_auto(app, &model, 1, 1).await?.tokens
+        };
         pi::check(&model, tokens).await?
     };
     let store = app.clone();
@@ -168,11 +176,24 @@ async fn context_estimate(
         .await.ok().flatten().unwrap_or_default();
     let metrics = app.metrics.lock().await.sample().await;
     let record = app.benchmarks.get(&model).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let auto = mcp::auto_context_estimate(&metrics, &model, &record, &estimate, 1, 1, !app.task.borrow().busy());
-    let mut result = serde_json::to_value(estimate).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let reclaimable = if app.task.borrow().busy() { 0 } else {
+        mcp::preview_reclaimable(&app, &metrics, &model, &record)
+    };
+    let auto = mcp::auto_context_estimate(&metrics, &model, &record, &estimate, 1, 1, reclaimable);
+    let preview = |tokens| {
+        let resident = metrics.models.as_deref().unwrap_or_default().iter()
+            .find(|entry| ollama::same_model(&entry.name, &model) && entry.context_length == Some(tokens));
+        mcp::memory_estimate(&metrics, &model, &record, &estimate, resident, Some(tokens), reclaimable)
+    };
+    let memory_by_context: std::collections::BTreeMap<_, _> = context::PRESETS.into_iter()
+        .chain(record.context_tokens)
+        .map(|tokens| (tokens, preview(u64::from(tokens)))).collect();
+    let mut result = serde_json::to_value(&estimate).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     result["auto_context_tokens"] = serde_json::json!(auto.tokens);
     result["auto_context_source"] = serde_json::json!(auto.source);
     result["auto_context_reason"] = serde_json::json!(auto.reason);
+    result["auto_memory"] = serde_json::json!(auto.tokens.map(|tokens| preview(u64::from(tokens))));
+    result["memory_by_context"] = serde_json::json!(memory_by_context);
     Ok(Json(result))
 }
 async fn set_model_context(
@@ -306,11 +327,13 @@ async fn start_benchmark_mode(app: Arc<App>, headers: HeaderMap, full: bool) -> 
         Ok(model) => model,
         Err(status) => return status,
     };
+    let admission = app.context_admission.lock().await;
     if !app.task.send_if_modified(|snapshot| {
         matches_selection(snapshot, &headers) && snapshot.begin_benchmark(model.clone())
     }) {
         return StatusCode::CONFLICT;
     }
+    drop(admission);
     tokio::spawn(async move {
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -408,12 +431,14 @@ async fn change_model(
         Ok(model) => model,
         Err(status) => return status,
     };
+    let admission = app.context_admission.lock().await;
     if !app.task.send_if_modified(|snapshot| {
         matches_selection(snapshot, headers) && snapshot.begin_model_action(model.clone(), action)
     }) {
         return StatusCode::CONFLICT;
     }
 
+    drop(admission);
     execute_model_action(app, model, action, None);
     StatusCode::ACCEPTED
 }
@@ -425,26 +450,23 @@ pub(super) fn execute_model_action(
     ai_action: Option<run::AiAction>,
 ) -> tokio::task::JoinHandle<Result<bool, String>> {
     tokio::spawn(async move {
-        let store = app.clone();
-        let metrics = if action.uses_context() {
-            Some(mcp::fresh_metrics(&app).await)
-        } else { None };
-        let result = tokio::task::spawn_blocking(move || {
+        let result = async {
             let tokens = if action.uses_context() {
-                let record = model_settings(&store, &model)?;
-                record.context_tokens.or_else(|| {
-                    let estimate = context::estimate_auto(&model)?;
-                    let selected = mcp::auto_context_estimate(metrics.as_ref()?, &model, &record, &estimate, 1, 1, true);
+                let record = model_settings(&app, &model)?;
+                if record.context_tokens.is_some() {
+                    mcp::release_idle_profiles(&model, record.context_tokens, false).await?;
+                    record.context_tokens
+                } else {
+                    let selected = mcp::select_idle_auto(&app, &model, 1, 1).await?;
                     if selected.tokens.is_none() { eprintln!("Auto context for {model}: {}. Using Ollama default for load/pin.", selected.reason); }
                     selected.tokens
-                })
+                }
             } else {
                 None
             };
-            ollama::change_model(&model, action, tokens)
-        })
-        .await
-        .unwrap_or_else(|error| Err(error.to_string()));
+            tokio::task::spawn_blocking(move || ollama::change_model(&model, action, tokens))
+                .await.map_err(|error| error.to_string())?
+        }.await;
         app.metrics.lock().await.invalidate();
         app.task.send_modify(|snapshot| {
             snapshot.finish_model_action(action, &result, ai_action);

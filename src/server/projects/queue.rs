@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     num::NonZeroU32,
     path::{Component, PathBuf},
     sync::Arc,
@@ -707,7 +707,9 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
         app.task.send_modify(Snapshot::projects_changed);
     }
     let ready = work(app.clone(), |app| app.projects.ready_tasks()).await?;
-    for mut task in ready {
+    let eligible_models: Vec<_> = ready.iter()
+        .map(|task| task.job.parallel.then(|| task.job.model.clone())).collect();
+    for (index, mut task) in ready.into_iter().enumerate() {
         let parallel = task.job.parallel;
         let _admission = app.context_admission.lock().await;
         let requested = task.job.input.as_ref()
@@ -728,12 +730,31 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
             if !parallel { break; }
             continue;
         }
-        let selected = match mcp::plan_queued_context(app, &task.job.model, requested, parallel).await {
+        let (slots, models) = if parallel {
+            let active = app.task.borrow().active_context_profiles();
+            let waiting = eligible_models[index + 1..].iter().map_while(Option::as_deref);
+            let runner_names: Vec<_> = std::iter::once(task.job.model.as_str())
+                .chain(active.iter().map(|(model, _)| model.as_str()))
+                .chain(waiting).collect();
+            // Marking a lone job parallel permits overlap, but by itself
+            // should not reserve VRAM for work that is not currently ready.
+            let slots = runner_names.iter().filter(|&&model| model == task.job.model).count();
+            let models = runner_names.into_iter().collect::<BTreeSet<_>>().len();
+            (slots.min(AI_SETTINGS.parallel_project_tasks), models.min(AI_SETTINGS.parallel_project_models))
+        } else { (1, 1) };
+        let selected = match mcp::plan_queued_context(app, &task.job.model, requested, slots, models).await {
             Ok(Some(selected)) => selected,
             Ok(None) => continue, // another runner is starting or safe headroom is unavailable
             Err(error) => {
-                eprintln!("Could not plan context for {}: {error}", task.job.model);
-                mcp::AutoChoice::unavailable("model settings unavailable")
+                let key = task.key();
+                let updated = work(app.clone(), move |app| {
+                    app.projects.set_job(&key, &[Status::Queued], Status::Failed, Some(JobResult {
+                        text: format!("Could not prepare model/context: {error}"),
+                        stop_reason: None, truncated: false, context: None, work_progress: None,
+                    }))
+                }).await?;
+                if updated { app.task.send_modify(Snapshot::projects_changed); }
+                continue;
             }
         };
         let scope = scope(selected.tokens);
@@ -789,20 +810,8 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, selection:
             .workflow
             .as_ref()
             .is_some_and(workflow::Workflow::is_review);
-        let release = task
-            .job
-            .workflow
-            .as_ref()
-            .filter(|_| !task.job.parallel)
-            .and_then(|flow| flow.reviewer_to_release(&task.job.model));
-        let metrics = if reviewing || release.is_some() {
-            let mut cache = app.metrics.lock().await;
-            cache.invalidate();
-            Some(cache.sample().await)
-        } else {
-            None
-        };
-        if reviewing && let Some(metrics) = &metrics {
+        if reviewing {
+            let metrics = mcp::fresh_metrics(&app).await;
             let reviewer = task.job.model.clone();
             let sample = metrics.clone();
             candidates = work(app.clone(), move |app| {
@@ -814,22 +823,12 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, selection:
             workflow::add_candidates(
                 &mut input.prompt,
                 &candidates,
-                metrics,
+                &metrics,
                 &task.job.model,
                 &preferred,
             );
         }
-        let preparation = if let (Some(reviewer), Some(metrics)) = (release, metrics) {
-            let reviewer = reviewer.to_owned();
-            let successor = task.job.model.clone();
-            work(app.clone(), move |app| {
-                workflow::release_reviewer(app, &metrics, &reviewer, &successor).map_err(invalid)
-            })
-            .await
-        } else {
-            Ok(())
-        };
-        let preparation = if preparation.is_ok() && !task.job.after.is_empty() {
+        let preparation = if !task.job.after.is_empty() {
             let dependencies = task.job.after.clone();
             let project_id = task.project_id;
             work(app.clone(), move |app| {
@@ -847,7 +846,7 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, selection:
                 }
             })
         } else {
-            preparation
+            Ok(())
         };
         if let Err((_, error)) = preparation {
             fail_dispatch(&app, delegation, error)

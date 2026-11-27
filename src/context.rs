@@ -347,6 +347,29 @@ fn auto_cache_estimate(info: &Value) -> Option<(u64, u64)> {
     }
 }
 
+// Headroom for the display/driver and short-lived peaks between samples.
+// A measured peak already includes the runner's compute buffers.
+pub(crate) const GPU_HEADROOM_BYTES: u64 = 256 << 20;
+
+pub(crate) fn gpu_budget(available: u64, model_slots: usize) -> u64 {
+    available.saturating_sub(GPU_HEADROOM_BYTES) / model_slots.max(1) as u64
+}
+
+pub(crate) fn estimated_runner_bytes(
+    weights: u64, cache: u64, slots: usize,
+) -> (u64, u64) {
+    let slots = slots.max(1) as u64;
+    let base = weights.saturating_add(cache.saturating_mul(slots));
+    let compute = (512u64 << 20).max(base.div_ceil(10))
+        .saturating_add((256u64 << 20).saturating_mul(slots));
+    (base.saturating_add(compute), compute)
+}
+
+pub(crate) fn daemon_slots() -> usize {
+    std::env::var("OLLAMA_NUM_PARALLEL").ok()
+        .and_then(|value| value.parse::<usize>().ok()).unwrap_or(1).max(1)
+}
+
 // Largest aligned context fitting estimated weights, cache, and compute
 // overhead on one GPU. Do not impose a fixed upper preset; model metadata
 // provides the ceiling. Round down to 1024-token boundaries for profile reuse.
@@ -357,19 +380,10 @@ pub(crate) fn fit_window(
     if weights == 0 || bytes_per_token == 0 || maximum == 0 || slots == 0 || model_slots == 0 {
         return None;
     }
-    let slots = u64::try_from(slots).ok()?;
-    let models = u64::try_from(model_slots).ok()?;
-    // Reserve display/driver headroom before dividing among distinct runners.
-    let available = available.saturating_sub(256 << 20) / models;
-    // The same runner shares weights but needs one cache per request slot.
-    let per_slot_workspace = 256u64 << 20;
+    let budget = gpu_budget(available, model_slots);
     let fits = |tokens: u64| {
-        let cache = bytes_per_token.saturating_mul(tokens).saturating_add(fixed_cache)
-            .saturating_mul(slots);
-        let base = weights.saturating_add(cache);
-        let compute = (512u64 << 20).max(base.div_ceil(10))
-            .saturating_add(per_slot_workspace.saturating_mul(slots));
-        base.saturating_add(compute) <= available
+        let cache = bytes_per_token.saturating_mul(tokens).saturating_add(fixed_cache);
+        estimated_runner_bytes(weights, cache, slots).0 <= budget
     };
     let maximum = maximum.min(u64::from(u32::MAX));
     // Avoid auto-selecting a tiny window that cannot hold an agent's system prompt.

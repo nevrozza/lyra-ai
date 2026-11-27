@@ -27,7 +27,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   const roleSettings = createRoleSettings(session);
   const list = createModelList({ selectModel, statusFor: modelStatus });
   const settings = createContextSettings(session, {
-    displayedModel, getRecord: () => benchmarkRecord, loadedModel, isMemoryChanging, refreshControls, requestMetrics,
+    displayedModel, getRecord: () => benchmarkRecord, isMemoryChanging, refreshControls, requestMetrics,
   });
 
   function isMemoryChanging() {
@@ -49,7 +49,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     benchmarkRun.disabled = blocked || !installed || session.metrics?.models == null;
     piBenchmarkRun.disabled = benchmarkRun.disabled;
     profileRun.disabled = benchmarkRun.disabled || Boolean(session.metrics?.models?.some(entry =>
-      !sameModelName(entry.name, observedModel) || Date.parse(entry.expires_at) - Date.now() > farFuture));
+      (!entry.context_profile && !sameModelName(entry.name, observedModel)) ||
+      Date.parse(entry.expires_at) - Date.now() > farFuture));
     const piCheck = benchmarkRecord?.pi_check;
     piSupport.checked = piCheck === true;
     const checkingPi = (modelSubmitting?.model === observedModel && modelSubmitting?.action === 'benchmark-pi') ||
@@ -215,7 +216,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const modelChanged = model !== observedModel;
     observedModel = model;
     if (modelChanged || benchmarkUpdated) readBenchmark(model, modelChanged);
-    if (modelChanged || benchmarkUpdated) settings.readEstimate(model);
+    if (modelChanged || benchmarkUpdated) settings.readEstimate(model, modelChanged);
     list.render(names, models, observedModel);
     const hasModel = Boolean(names?.includes(model));
     get('selected-model').hidden = !hasModel;
@@ -227,7 +228,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const checkingPi = action === 'benchmark-pi' ||
       (model === session.run?.operation_model && session.run?.benchmark_stage === 'checking_pi');
     benchmarkRun.textContent = benchmarking && !checkingPi ? 'Бенчмарк выполняется…' : 'Быстрый бенчмарк';
-    profileRun.title = 'Последовательные холодные замеры. Выгрузите другие модели и снимите закрепление выбранной.';
+    profileRun.title = 'Последовательные холодные замеры. Lyra выгрузит свои незакреплённые профили.';
     get('ollama').textContent = models === null ? 'Ollama недоступна' : 'Ollama';
     pinModel.checked = action === 'pin' || (action !== 'unpin' && pinned);
     const modelError = modelRequestError || (model === session.run?.operation_model ? session.run?.model_error : '');
