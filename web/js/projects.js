@@ -95,6 +95,10 @@ export function createProjects() {
     if (errorStatuses.has(status) || (!owner && run?.chat_errors?.includes(chat.id))) return 'error';
     return '';
   }
+  function chatCompleted(chat, project) {
+    const owner = chat.job ? chat : project.sessions.find(candidate => candidate.job?.chat_session_id === chat.id);
+    return owner ? owner.job.status === 'completed' : Boolean(run?.chat_completed?.includes(chat.id));
+  }
   function stateIcon() {
     const icon = element('span', '');
     icon.className = 'project-tree-status';
@@ -102,13 +106,14 @@ export function createProjects() {
     return icon;
   }
   function setTreeState(icon, state) {
-    const label = state === 'busy' ? 'В работе или в очереди' : state === 'error' ? 'Ошибка или требуется действие' : '';
+    const label = state === 'busy' ? 'В работе или в очереди' : state === 'error' ? 'Ошибка или требуется действие' : state === 'done' ? 'Все чаты завершены' : '';
     if (icon.dataset.state === state) return;
     icon.dataset.state = state;
     icon.hidden = !state;
     icon.classList.toggle('project-spinner', state === 'busy');
     icon.classList.toggle('project-tree-error', state === 'error');
-    icon.textContent = state === 'error' ? '×' : '';
+    icon.classList.toggle('project-tree-done', state === 'done');
+    icon.textContent = state === 'error' ? '×' : state === 'done' ? '✓' : '';
     icon.title = label;
     icon.setAttribute('aria-label', label);
     icon.setAttribute('role', 'img');
@@ -159,7 +164,8 @@ export function createProjects() {
       if (icon.dataset.groupProgress != null) {
         const members = groupMembers(p, Number(icon.dataset.groupProgress));
         const states = members.map(chat => chatState(chat, p, activeChats));
-        setTreeState(icon, states.includes('busy') ? 'busy' : states.includes('error') ? 'error' : '');
+        const done = members.length > 0 && members.every(chat => chatCompleted(chat, p));
+        setTreeState(icon, states.includes('busy') ? 'busy' : states.includes('error') ? 'error' : done ? 'done' : '');
       } else {
         const chat = p.sessions.find(candidate => candidate.id === Number(icon.dataset.chatProgress));
         if (chat) setTreeState(icon, chatState(chat, p, activeChats));
