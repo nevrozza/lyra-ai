@@ -62,7 +62,6 @@ pub(super) struct Task<'a> {
     pub(super) skills: &'a [PathBuf],
     pub(super) agents_file: &'a Path,
     pub(super) project: Option<&'a projects::Task>,
-    pub(super) search_skill: Option<(&'a str, &'a Path)>,
     pub(super) origin: projects::MessageOrigin,
     pub(super) request_id: Option<&'a str>,
     pub(super) text_only: bool,
@@ -725,15 +724,6 @@ async fn write_project_instructions(
                 folder.display()
             );
         }
-    }
-    if let Some((skill, manifest)) = task.search_skill {
-        let instructions = tokio::fs::read_to_string(manifest).await?;
-        let directory = manifest.parent().expect("search skill directory");
-        let _ = write!(
-            text,
-            "\n## Project search: {skill}\n\nUse this skill's workflow for project search before using built-in search. Resolve skill resources relative to {}. If its commands are unavailable or denied, report that and use the available search tools where appropriate.\n\n{instructions}\n",
-            directory.display()
-        );
     }
     if !task.writes.is_empty() {
         let root = tokio::fs::canonicalize(&project.workspace).await?;
