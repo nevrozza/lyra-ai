@@ -13,6 +13,9 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   const benchmarkStop = get('benchmark-stop');
   const profileRun = get('benchmark-profile-run');
   const description = get('model-description');
+  const descriptionForm = get('model-description-form');
+  const editDescription = get('edit-description');
+  const cancelDescription = get('cancel-description');
   const saveDescription = get('save-description');
   let modelSubmitting;
   let modelRequestError = '';
@@ -21,6 +24,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
   let benchmarkRecord;
   let benchmarkRead = 0;
   let descriptionSaving = false;
+  let descriptionEditing = false;
+  let descriptionEditId = 0;
   let stopSubmitting = false;
 
   const roleSettings = createRoleSettings(session);
@@ -65,12 +70,20 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     piCheckStatus.dataset.state = checkingPi ? 'pending' : piCheck === true ? 'passed' :
       piCheck === false || piError ? 'failed' : 'pending';
     piCheckStatus.title = checkingPi ? '' : piError ?? '';
+    const savedDescription = benchmarkRecord?.description ?? '';
+    editDescription.textContent = savedDescription.trim() ? savedDescription : 'Добавить описание…';
+    editDescription.dataset.empty = String(!savedDescription.trim());
+    editDescription.setAttribute('aria-label', savedDescription.trim() ?
+      `Редактировать описание модели: ${savedDescription}` : 'Добавить описание модели');
+    editDescription.hidden = descriptionEditing;
+    editDescription.disabled = session.closed || !session.online || !installed || !benchmarkRecord || descriptionSaving;
+    descriptionForm.hidden = !descriptionEditing;
     description.readOnly = session.closed;
     description.disabled = !installed || !benchmarkRecord || descriptionSaving;
-    const descriptionChanged = benchmarkRecord && description.value !== benchmarkRecord.description;
-    saveDescription.hidden = !descriptionChanged;
+    const descriptionChanged = benchmarkRecord && description.value !== savedDescription;
     saveDescription.disabled = description.readOnly || description.disabled || !descriptionChanged ||
       !session.online;
+    cancelDescription.disabled = descriptionSaving;
     settings.updateControls(blocked, installed);
     list.setDisabled(session.closed);
     roleSettings.update();
@@ -106,12 +119,43 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     }
   });
 
+  editDescription.addEventListener('click', () => {
+    if (editDescription.disabled) return;
+    descriptionEditId++;
+    descriptionEditing = true;
+    description.value = benchmarkRecord?.description ?? '';
+    refreshControls();
+    description.focus();
+  });
+
+  function closeDescriptionEditor() {
+    descriptionEditing = false;
+    descriptionEditId++;
+    description.value = benchmarkRecord?.description ?? '';
+    refreshControls();
+    editDescription.focus();
+  }
+
+  cancelDescription.addEventListener('click', () => {
+    if (!descriptionSaving) closeDescriptionEditor();
+  });
+  descriptionForm.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !descriptionSaving) {
+      event.preventDefault();
+      closeDescriptionEditor();
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !saveDescription.disabled) {
+      event.preventDefault();
+      descriptionForm.requestSubmit();
+    }
+  });
   description.addEventListener('input', refreshControls);
-  get('model-description-form').addEventListener('submit', async (event) => {
+  descriptionForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     const model = displayedModel();
-    if (saveDescription.disabled || !model || !benchmarkRecord) return;
+    if (!descriptionEditing || saveDescription.disabled || !model || !benchmarkRecord) return;
     const text = description.value;
+    const editId = descriptionEditId;
+    let saved = false;
     descriptionSaving = true;
     modelRequestError = '';
     renderModel(session.metrics?.models);
@@ -119,11 +163,18 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       const response = await postModel('/model/description', session.run?.model, { description: text }, model);
       if (!response.ok) throw new Error(modelResponseError(response));
       if (displayedModel() === model && benchmarkRecord) benchmarkRecord.description = text;
+      saved = true;
     } catch (error) {
       if (displayedModel() === model) modelRequestError = `Описание не сохранено. ${error.message}`;
     } finally {
       descriptionSaving = false;
+      const sameEditor = displayedModel() === model && descriptionEditId === editId;
+      if (saved && sameEditor) {
+        descriptionEditing = false;
+        descriptionEditId++;
+      }
       renderModel(session.metrics?.models);
+      if (sameEditor) (saved ? editDescription : description).focus();
     }
   });
 
@@ -131,6 +182,8 @@ export function createModels(session, { refreshControls, requestMetrics }) {
     const request = ++benchmarkRead;
     if (modelChanged) {
       benchmarkRecord = undefined;
+      descriptionEditing = false;
+      descriptionEditId++;
       description.value = '';
       settings.reset();
       renderBenchmark(benchmarkRecord, 'Загружаем результаты…');
@@ -142,7 +195,7 @@ export function createModels(session, { refreshControls, requestMetrics }) {
       if (!response.ok) throw new Error();
       const record = await response.json();
       if (request !== benchmarkRead) return;
-      if (description.value === (benchmarkRecord?.description ?? '')) description.value = record.description;
+      if (!descriptionEditing) description.value = record.description ?? '';
       settings.syncTokens(benchmarkRecord?.context_tokens, record.context_tokens);
       benchmarkRecord = record;
       settings.render();
