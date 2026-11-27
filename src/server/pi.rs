@@ -21,6 +21,50 @@ use super::{
 const ANSWER_LIMIT: usize = 8_000;
 // Automatic review verdicts carry technical assignments for multiple fixes.
 const REVIEW_ANSWER_LIMIT: usize = 32_000;
+const COMPLETION_RETRIES: u8 = 2;
+const COMPLETION_RULE: &str = "\n\n# Task completion\nA Work task is not complete just because you stopped generating. Before ending, compare the actual result against the original assignment and check it using available evidence/tools. Do the remaining work first. Call finish_task as your last tool with completed or blocked and a concrete outcome or blocker. Then return the requested final handoff, including the exact JSON verdict when required. Never confirm a promise of future work. If you use another tool afterward, confirm again. If a required check is unavailable, report it honestly; use blocked if the missing check prevents completing the assignment.\n";
+const COMPLETION_REMINDER: &str = "Lyra completion check: your previous turn ended without a valid confirmed outcome and final handoff. Recheck the original assignment in this conversation against actual results. Do any remaining work now with the available tools. Do not merely announce plans. When done, call finish_task with completed or blocked and concrete evidence, then return the requested final handoff.";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Confirmation {
+    Completed(String),
+    Blocked(String),
+}
+
+#[derive(Default)]
+struct Completion {
+    confirmation: Option<Confirmation>,
+    retries: u8,
+}
+
+impl Completion {
+    fn confirm(&mut self, request: &str) -> Result<(), String> {
+        let value: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        let summary = value["summary"].as_str().map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 8_000)
+            .ok_or("Provide a concrete outcome or blocker in summary")?;
+        self.confirmation = Some(match value["status"].as_str() {
+            Some("completed") => Confirmation::Completed(summary.into()),
+            Some("blocked") => Confirmation::Blocked(summary.into()),
+            _ => return Err("Use status completed or blocked".into()),
+        });
+        Ok(())
+    }
+
+    fn invalidate(&mut self) { self.confirmation = None; }
+
+    fn retry(&mut self) -> bool {
+        if self.retries >= COMPLETION_RETRIES { return false; }
+        self.retries += 1;
+        self.invalidate();
+        true
+    }
+
+    fn confirmed(&self, answer: &str, clipped: bool) -> bool {
+        self.confirmation.is_some() && !answer.trim().is_empty() && !clipped
+    }
+}
+
 const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
 mod review_diff;
@@ -305,6 +349,7 @@ pub(super) async fn run(
         };
         instructions.push_str(&super::skills::prompt_catalog(skills)
             .map_err(|error| format!("Could not prepare skill catalog: {error}"))?);
+        instructions.push_str(COMPLETION_RULE);
         tokio::fs::write(path, instructions).await.map_err(|error| error.to_string())?;
     }
     let agents_file = catalog_instructions.as_deref().or(agents_file);
@@ -345,6 +390,10 @@ pub(super) async fn run(
     let mut answer = String::new();
     let mut text_deltas = String::new();
     let mut delta_bytes = 0usize;
+    let completion_required = commands.is_some() && !text_only;
+    let mut completion = Completion::default();
+    let mut completion_terminal = false;
+    let mut continuation_deadline = None::<tokio::time::Instant>;
     let mut last_error = None;
     let mut stop_reason = None;
     let mut last_input_tokens = None;
@@ -358,7 +407,10 @@ pub(super) async fn run(
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
     loop {
-        let line = if ready {
+        let line = if let Some(deadline) = continuation_deadline {
+            tokio::time::timeout_at(deadline, lines.next_line()).await
+                .map_err(|_| "Pi did not become idle for the completion continuation")?
+        } else if ready {
             lines.next_line().await
         } else {
             tokio::time::timeout_at(startup_deadline, lines.next_line()).await
@@ -434,6 +486,52 @@ pub(super) async fn run(
                         )
                         .await?;
                         ready = true;
+                    }
+                    Some("input")
+                        if ready && completion_required && event["title"] == "lyra:finish-task" =>
+                    {
+                        let id = event["id"].as_str().ok_or("Missing Pi completion request ID")?;
+                        let request = event["placeholder"].as_str().ok_or("Missing Pi completion request")?;
+                        let result = match completion.confirm(request) {
+                            Ok(()) => json!({"ok": true}),
+                            Err(error) => json!({"ok": false, "message": error}),
+                        };
+                        rpc_send(stdin, json!({
+                            "type": "extension_ui_response", "id": id, "value": result.to_string()
+                        })).await?;
+                    }
+                    Some("input")
+                        if ready && completion_required && event["title"] == "lyra:completion-check" =>
+                    {
+                        let id = event["id"].as_str().ok_or("Missing Pi completion check ID")?;
+                        // Only ordinary stops are eligible for continuation. Never
+                        // restart errors, exhausted context/output, or user cancellation.
+                        let retry = last_error.is_none()
+                            && stop_reason.as_deref() == Some("stop")
+                            && !text_clipped
+                            && !matches!(&completion.confirmation, Some(Confirmation::Blocked(_)))
+                            && !completion.confirmed(&answer, text_clipped)
+                            && completion.retry();
+                        if retry {
+                            log(Kind::Pi, "Completion check", &format!("Continuing unfinished task ({}/{COMPLETION_RETRIES})", completion.retries), Some("running"));
+                        } else {
+                            completion_terminal = true;
+                        }
+                        rpc_send(stdin, json!({
+                            "type": "extension_ui_response", "id": id,
+                            "value": if retry { "continue" } else { "stop" }
+                        })).await?;
+                    }
+                    Some("notify") if completion_required && event["message"] == "lyra:completion-continue" => {
+                        // Do not prompt inside agent_end: Pi may still be streaming.
+                        // Wait for its RPC idle state, keeping this process/session and locks.
+                        continuation_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(15));
+                        rpc_send(stdin, json!({"id": "completion-idle", "type": "get_state"})).await?;
+                    }
+                    Some("notify") if completion_required && event["message"] == "lyra:completion-terminal" => {
+                        if legacy_rpc {
+                            rpc_send(stdin, json!({"type": "get_state"})).await?;
+                        }
                     }
                     Some("input")
                         if ready && !text_only && event["title"] == "lyra:load-skill" =>
@@ -574,13 +672,38 @@ pub(super) async fn run(
                     _ => {}
                 }
             }
-            Some("response") if event["id"] == "task" && event["success"] == false => {
+            Some("response") if event["id"] == "completion-idle" => {
+                if event["success"] != true {
+                    return Err("Pi rejected completion idle-state check".into());
+                }
+                if event["data"]["isStreaming"] == false && event["data"]["isCompacting"] != true {
+                    continuation_deadline = None;
+                    completion_terminal = false;
+                    // Discard the preceding promise/partial answer as the current result.
+                    answer.clear();
+                    text_clipped = false;
+                    stop_reason = None;
+                    last_error = None;
+                    last_input_tokens = None;
+                    rpc_send(stdin.as_mut().expect("Pi RPC input"), json!({
+                        "id": "completion-prompt", "type": "prompt",
+                        "message": COMPLETION_REMINDER
+                    })).await?;
+                } else {
+                    if continuation_deadline.is_none_or(|deadline| tokio::time::Instant::now() >= deadline) {
+                        return Err("Pi did not become idle for the completion continuation".into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    rpc_send(stdin.as_mut().expect("Pi RPC input"), json!({"id": "completion-idle", "type": "get_state"})).await?;
+                }
+            }
+            Some("response") if matches!(event["id"].as_str(), Some("task" | "completion-prompt")) && event["success"] == false => {
                 return Err(format!(
                     "Pi rejected the task: {}",
                     event["error"].as_str().unwrap_or("unknown error")
                 ));
             }
-            Some("agent_end") if legacy_rpc => {
+            Some("agent_end") if legacy_rpc && (!completion_required || completion_terminal) => {
                 // Pi 0.x checks extension shutdown requests after handling an RPC command.
                 rpc_send(
                     stdin.as_mut().expect("Pi RPC input"),
@@ -626,6 +749,8 @@ pub(super) async fn run(
             }
             Some("tool_execution_start") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
+                // Any further tool work invalidates an earlier confirmation.
+                completion.invalidate();
                 if commands.is_some() && name == "run_command" {
                     continue;
                 }
@@ -743,6 +868,27 @@ pub(super) async fn run(
         stop_reason = Some("file_conflict".into());
         last_error = Some(format!("{conflicts}\n\nWorker's final answer:\n{answer}"));
         log(Kind::Pi, "File conflict", &conflicts, Some("error"));
+    }
+    if last_error.is_none() && completion_required {
+        match &completion.confirmation {
+            Some(Confirmation::Blocked(summary)) => {
+                stop_reason = Some("task_blocked".into());
+                last_error = Some(format!("Task blocked: {summary}\n\nWorker's final answer:\n{answer}"));
+            }
+            Some(Confirmation::Completed(_)) if completion_terminal
+                && stop_reason.as_deref() == Some("stop") && !truncated
+                && !answer.trim().is_empty() => {}
+            _ if stop_reason.as_deref() == Some("length") && answer.trim().is_empty() => {
+                // Preserve the existing context-overflow diagnosis.
+            }
+            _ => {
+                stop_reason = Some("task_incomplete".into());
+                last_error = Some(format!(
+                    "Task incomplete: no valid completion confirmation and final handoff ({} continuation attempts).\n\nWorker's last answer:\n{answer}",
+                    completion.retries
+                ));
+            }
+        }
     }
     if last_error.is_none() {
         if answer.trim().is_empty() {
@@ -981,12 +1127,12 @@ fn spawn_pi(
             command.env("LYRA_PI_TEXT_ONLY", "1").arg("--no-tools");
         } else {
             let tools = if reviewing {
-                "read,grep,find,ls,run_command,load_skill,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
+                "read,grep,find,ls,run_command,load_skill,finish_task,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
             } else if extension.is_some() {
                 // Pi's --tools is an allowlist for extension tools as well as built-ins.
                 // For Work runs the extension overrides read/write/edit with guarded tools
                 // and verifies the overrides before accepting the prompt.
-                "read,grep,find,ls,write,edit,mkdir,load_skill,run_command"
+                "read,grep,find,ls,write,edit,mkdir,load_skill,finish_task,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
             };
@@ -1080,5 +1226,33 @@ mod tests {
             .unwrap();
         assert_eq!(config()["maxTokens"], 4096);
         assert_eq!(config()["contextWindow"], 8192);
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn promises_without_confirmation_do_not_complete() {
+        let mut state = Completion::default();
+        assert!(!state.confirmed("Now I will create the file", false));
+        assert!(state.retry());
+        assert!(state.retry());
+        assert!(!state.retry());
+    }
+
+    #[test]
+    fn confirmation_requires_outcome_and_is_invalidated_by_more_work() {
+        let mut state = Completion::default();
+        assert!(state.confirm(r#"{"status":"completed","summary":" "}"#).is_err());
+        state.confirm(r#"{"status":"completed","summary":"Checked the result"}"#).unwrap();
+        assert!(state.confirmed("final handoff", false));
+        assert!(!state.confirmed("", false));
+        assert!(!state.confirmed("truncated", true));
+        state.invalidate();
+        assert!(!state.confirmed("done", false));
+        state.confirm(r#"{"status":"blocked","summary":"Required tool unavailable"}"#).unwrap();
+        assert!(matches!(state.confirmation, Some(Confirmation::Blocked(_))));
     }
 }
