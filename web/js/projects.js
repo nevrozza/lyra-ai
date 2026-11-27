@@ -1,5 +1,6 @@
 import { element, get } from './ui.js';
 import { createThinkingControl } from './chat-thinking.js';
+import { renderMarkdown } from './markdown.js';
 
 const taskStatuses = {
   queued: 'В очереди', running: 'В работе', completed: 'Готово',
@@ -509,7 +510,8 @@ export function createProjects() {
         details.append(element('summary', 'Размышления модели'), element('p', message.thinking));
         item.append(details);
       }
-      if (message.text) item.append(element('p', message.text));
+      if (message.text) item.append(message.role === 'assistant' || message.role === 'user'
+        ? renderMarkdown(message.text) : element('p', message.text));
       return item;
     }));
     if (atEnd || scrollToEnd) reading.scrollTop = reading.scrollHeight;
