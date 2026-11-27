@@ -222,6 +222,26 @@ impl Project {
 }
 
 impl Job {
+    pub(super) fn prerequisites(&self) -> &[u64] { &self.after }
+
+    pub(super) fn workflow_root(&self) -> Option<u64> {
+        self.workflow.as_ref().map(workflow::Workflow::root_id)
+    }
+
+    pub(super) fn handoff(&self) -> (&'static str, Option<&JobResult>) {
+        let status = match self.status {
+            Status::Queued => "queued",
+            Status::Running => "running",
+            Status::ContextFull => "context_full",
+            Status::Completed => "completed",
+            Status::Failed => "failed",
+            Status::Cancelled => "cancelled",
+            Status::Interrupted => "interrupted",
+            Status::Blocked => "blocked",
+        };
+        (status, self.result.as_ref())
+    }
+
     pub(super) fn pending(&self) -> bool {
         matches!(
             self.status,
