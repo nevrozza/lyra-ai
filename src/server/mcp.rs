@@ -521,6 +521,8 @@ pub(super) struct RunPi {
     context_tokens: Option<NonZeroU32>,
     #[serde(skip)]
     chat_session_id: Option<u64>,
+    #[serde(skip)]
+    pub(super) context_selection: Option<AutoChoice>,
     prompt: String,
     skills: Option<Vec<String>>,
     #[serde(rename = "allow_commands")]
@@ -773,7 +775,7 @@ async fn run_model(
         let auto = if requested.is_none() && tokens.is_none() {
             metrics.as_ref().and_then(|metrics| {
                 let estimate = context::estimate_auto(&source)?;
-                auto_context_estimate(metrics, &source, &estimate, 1, 1, true)
+                auto_context_estimate(metrics, &source, &settings, &estimate, 1, 1, true).tokens
             })
         } else { None };
         let selected = requested.or(auto);
@@ -803,6 +805,9 @@ async fn run_model(
         .is_ok_and(|(_, saved, _)| matches!(saved, Ok(true)));
     finish_delegation(&app, delegation, execution.is_ok(), context_changed).await;
     let (reply, saved, selected_context) = execution?;
+    if selected_context.is_none() {
+        trace.event(Kind::Pi, "Context window", "Auto unavailable or require_loaded: using Ollama's runner/default context (not a measured fit).", None);
+    }
     trace.record_token_usage(
         reply.prompt_eval_count,
         reply.eval_count,
@@ -907,7 +912,7 @@ async fn run_pi(
         return Err("role requires Work mode".into());
     }
     let requested_context = request.context_tokens.map(NonZeroU32::get);
-    let (mut tokens, mut context_window, think) = tokio::task::spawn_blocking(move || {
+    let (mut tokens, think) = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
         if text_only && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
             .is_some_and(|capabilities| !capabilities.iter().any(|item| item == "completion"))
@@ -935,17 +940,7 @@ async fn run_pi(
             context::validate_window(&source, tokens, estimate.as_ref())?;
         }
         let tokens = requested_context.or(record.context_tokens);
-        let context_window = tokens.map(u64::from)
-            .or_else(|| {
-                ollama::running_models()?.into_iter()
-                    .find(|entry| ollama::same_model(&entry.name, &source))?.context_length
-            })
-            .or_else(|| estimate.and_then(|info| info.configured_context_tokens))
-            .or_else(|| record.latest.as_ref().and_then(benchmark::Measurement::auto_context_tokens))
-            .and_then(|tokens| u32::try_from(tokens).ok())
-            .filter(|&tokens| tokens > 0)
-            .unwrap_or(4096);
-        Ok((tokens, context_window, record.think))
+        Ok((tokens, record.think))
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -957,8 +952,14 @@ async fn run_pi(
     } else {
         DelegationScope::Standalone
     };
+    let mut selection = request.context_selection.unwrap_or_else(|| AutoChoice::manual(tokens));
     let delegation = match reserved {
-        Some(id) => id,
+        Some(id) => {
+            if tokens.is_none() {
+                return Err(format!("Auto context unavailable: {}. Run full benchmark or set context_tokens explicitly.", selection.reason));
+            }
+            id
+        }
         None => {
             let _admission = app.context_admission.lock().await;
             if !app.task.borrow().can_begin_delegation(&model, scope) {
@@ -967,9 +968,10 @@ async fn run_pi(
             if tokens.is_none() {
                 let selected = plan_auto_context(&app, &model, 1, 1).await
                     .ok_or("No safe automatic context available while other models are starting or running; wait or specify context_tokens explicitly")?;
-                if let Some(window) = selected {
-                    tokens = Some(window);
-                    context_window = window;
+                selection = selected;
+                tokens = selected.tokens;
+                if tokens.is_none() {
+                    return Err(format!("Auto context unavailable: {}. Run full benchmark or set context_tokens explicitly.", selected.reason));
                 }
             }
             let id = begin_delegation(&app, &model, scope)?;
@@ -977,7 +979,9 @@ async fn run_pi(
             id
         }
     };
-    trace.event(Kind::Pi, "Context window", &format!("{context_window} tokens"), None);
+    let context_window = tokens.expect("Pi context selected before delegation");
+    let context_description = format!("{context_window} tokens; {}: {}", selection.source, selection.reason);
+    trace.event(Kind::Pi, "Context window", &context_description, None);
     let skill_store = app.clone();
     let selected = if text_only { Some(Vec::new()) } else { request.skills };
     let role = request.role;
@@ -1018,6 +1022,7 @@ async fn run_pi(
             model: &model,
             delegation,
             context_window: Some(context_window),
+            context_description: &context_description,
             think: think.as_ref(),
             role: request.role,
             role_skill_enabled,
@@ -1034,15 +1039,11 @@ async fn run_pi(
             } => {
                 if cancelled { None } else { Some(Err("Lyra stopped".into())) }
             },
-            result = tokio::time::timeout(
-                Duration::from_secs(900),
-                AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, Some(task)))
-                    .catch_unwind(),
-            ) => Some(match result {
-                Ok(Ok(reply)) => reply,
-                Ok(Err(_)) => Err("Pi failed with an internal Lyra error".into()),
-                Err(_) => Err("Pi timed out".into()),
-            }),
+            result = AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, Some(task)))
+                .catch_unwind() => Some(match result {
+                    Ok(reply) => reply,
+                    Err(_) => Err("Pi failed with an internal Lyra error".into()),
+                }),
         }
     };
     let Some(result) = result else {
@@ -1144,6 +1145,7 @@ pub(super) fn queued_request(
         skills: input.skills,
         context_tokens: input.context_tokens,
         chat_session_id,
+        context_selection: None,
         workspace: None,
         project_id: Some(key.project_id),
         project_session_id: Some(key.project_session_id),
@@ -1389,6 +1391,8 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
             resident,
             requested_tokens,
         );
+        let solo = auto_context_estimate(&metrics, &model, &record, &estimate, 1, 1, !app.task.borrow().busy());
+        let parallel = auto_context_estimate(&metrics, &model, &record, &estimate, AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models, !app.task.borrow().busy());
         let thinking_supported = if !estimate.thinking_options.is_empty() {
             Some(true)
         } else if estimate.thinking["values"].is_array() || estimate.capabilities.is_some() {
@@ -1406,8 +1410,12 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                 "memory_estimate": memory,
                 "max_context_tokens": estimate.max_context_tokens,
                 "auto_context": {
-                    "solo_tokens": auto_context_estimate(&metrics, &model, &estimate, 1, 1, !app.task.borrow().busy()),
-                    "parallel_tokens": auto_context_estimate(&metrics, &model, &estimate, AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models, !app.task.borrow().busy()),
+                    "solo_tokens": solo.tokens,
+                    "solo_source": solo.source,
+                    "solo_reason": solo.reason,
+                    "parallel_tokens": parallel.tokens,
+                    "parallel_source": parallel.source,
+                    "parallel_reason": parallel.reason,
                     "estimated_kv_bytes_per_token": estimate.auto_kv_bytes_per_token,
                     "estimated_fixed_cache_bytes": estimate.auto_fixed_cache_bytes,
                     "policy": "Omit context_tokens to use saved manual setting or VRAM-aware Auto at dispatch. Solo uses available VRAM; parallel shares the budget. Estimates are not guaranteed."
@@ -1535,15 +1543,39 @@ fn memory_pair(memory: Option<&telemetry::Memory>) -> String {
 
 // A context recommendation is a conservative memory estimate, not a promise
 // from the Ollama scheduler. We never reclaim pinned or active runners.
+#[derive(Clone, Copy)]
+pub(super) struct AutoChoice {
+    pub(super) tokens: Option<u32>,
+    pub(super) source: &'static str,
+    pub(super) reason: &'static str,
+}
+
+impl AutoChoice {
+    pub(super) fn manual(tokens: Option<u32>) -> Self {
+        Self { tokens, source: "manual", reason: "explicit or saved context setting" }
+    }
+
+    pub(super) fn unavailable(reason: &'static str) -> Self {
+        Self { tokens: None, source: "unavailable", reason }
+    }
+
+    fn chosen(tokens: u32, source: &'static str, reason: &'static str) -> Self {
+        Self { tokens: Some(tokens), source, reason }
+    }
+}
+
 pub(super) fn auto_context_estimate(
     metrics: &telemetry::Metrics,
     model: &str,
+    record: &benchmark::Record,
     estimate: &context::Estimate,
     slots: usize,
     model_slots: usize,
     reclaim_idle: bool,
-) -> Option<u32> {
-    let maximum = estimate.max_context_tokens?;
+) -> AutoChoice {
+    let Some(maximum) = estimate.max_context_tokens else {
+        return AutoChoice::unavailable("model context ceiling unknown");
+    };
     let matches = |entry: &&ollama::Model| ollama::same_model(&entry.name, model);
     let loaded = metrics.models.as_deref().unwrap_or_default();
     if let Some(window) = loaded.iter().filter(matches)
@@ -1552,29 +1584,47 @@ pub(super) fn auto_context_estimate(
         .filter(|&window| window > 0 && window <= maximum)
         .max().and_then(|window| u32::try_from(window).ok())
     {
-        // An already pinned matching profile can be reused without growth.
-        return Some(window);
+        return AutoChoice::chosen(window, "pinned", "reuse pinned context profile");
     }
-    let weights = metrics.model_sizes.as_ref()?.get(model).copied()?;
-    let per_token = estimate.auto_kv_bytes_per_token.or(estimate.bytes_per_token_f16)?;
-    let fixed_cache = estimate.auto_fixed_cache_bytes.unwrap_or(0);
+    let Some(weights) = metrics.model_sizes.as_ref().and_then(|sizes| sizes.get(model)).copied() else {
+        return AutoChoice::unavailable("model weights unavailable in catalog");
+    };
     let mut gpus = metrics.gpus.iter().filter_map(|gpu| gpu.vram.as_ref()).peekable();
-    let first = gpus.next()?;
+    let Some(first) = gpus.next() else {
+        return AutoChoice::unavailable("GPU memory telemetry unavailable");
+    };
     let available = if gpus.peek().is_none() {
         let reclaimable = if reclaim_idle {
-            loaded.iter().filter(matches).filter(|entry| !entry.is_pinned())
-                .filter_map(|entry| entry.size_vram).max()
+            // Ollama may evict unpinned idle runners when a new runner loads.
+            // Never count active/pinned runners or more than total used VRAM.
+            Some(loaded.iter().filter(|entry| !entry.is_pinned())
+                .filter_map(|entry| entry.size_vram).fold(0u64, u64::saturating_add))
         } else { None };
         room(first, reclaimable)
     } else {
-        // Ollama only reports aggregate model VRAM; don't attribute an
-        // existing runner to a particular GPU when there is more than one.
-        std::iter::once(first).chain(gpus).map(|gpu| room(gpu, None)).max()?
+        std::iter::once(first).chain(gpus).map(|gpu| room(gpu, None)).max().unwrap_or(0)
     };
     let daemon_slots = std::env::var("OLLAMA_NUM_PARALLEL").ok()
         .and_then(|value| value.parse::<usize>().ok()).unwrap_or(1).max(1);
-    context::fit_window(available, weights, per_token, fixed_cache, maximum,
-        slots.max(daemon_slots), model_slots)
+    if let Some(profile) = record.memory_profile.as_ref().filter(|p| p.matches(metrics, model))
+        && slots <= daemon_slots
+    {
+        if let Some(tokens) = profile.fit(available / model_slots.max(1) as u64, weights, maximum) {
+            return AutoChoice::chosen(tokens, "measured", "largest verified cold full-GPU profile fitting current budget");
+        }
+        // A valid profile may establish that a larger context spills to CPU.
+        // Do not extrapolate beyond or override its actual observations.
+        return AutoChoice::unavailable("no verified measured context fits; free GPU memory or choose a manual window");
+    }
+    let Some(per_token) = estimate.auto_kv_bytes_per_token.or(estimate.bytes_per_token_f16) else {
+        return AutoChoice::unavailable("no compatible measured profile and KV-cache metadata unknown");
+    };
+    let fixed_cache = estimate.auto_fixed_cache_bytes.unwrap_or(0);
+    match context::fit_window(available, weights, per_token, fixed_cache, maximum,
+        slots.max(daemon_slots), model_slots) {
+        Some(tokens) => AutoChoice::chosen(tokens, "estimated", "no applicable measured profile; weights + cache + workspace reserve"),
+        None => AutoChoice::unavailable("estimated weights and cache do not fit available VRAM"),
+    }
 }
 
 pub(super) async fn fresh_metrics(app: &App) -> telemetry::Metrics {
@@ -1584,18 +1634,19 @@ pub(super) async fn fresh_metrics(app: &App) -> telemetry::Metrics {
 }
 
 // The caller serializes plan + reservation through context_admission.
-// Outer None = defer new automatic runner while other work is active.
-// Inner None = retain Ollama/default behavior if the estimate is unknown.
+// None = defer new automatic runner while other work is active.
+// An unavailable choice carries an explicit diagnostic; Pi never silently uses 4K.
 pub(super) async fn plan_auto_context(
     app: &App, model: &str, slots: usize, model_slots: usize,
-) -> Option<Option<u32>> {
+) -> Option<AutoChoice> {
     let (active, existing) = {
         let state = app.task.borrow();
         (state.active_context_profiles(), state.active_context_for_model(model))
     };
     if let Some(existing) = existing {
         // A shared active runner must keep exactly the same context profile.
-        return Some(existing);
+        return Some(existing.map_or_else(|| AutoChoice::unavailable("active runner context unknown"),
+            |tokens| AutoChoice::chosen(tokens, "active", "reuse existing active runner context")));
     }
     let metrics = fresh_metrics(app).await;
     if !active.is_empty() {
@@ -1610,18 +1661,19 @@ pub(super) async fn plan_auto_context(
         }
     }
     let source = model.to_owned();
+    let store = app.benchmarks.get(model).unwrap_or_default();
     let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
         .await.ok().flatten().unwrap_or_default();
-    let selected = auto_context_estimate(&metrics, model, &estimate, slots, model_slots, active.is_empty());
-    if selected.is_none() && !active.is_empty() { None } else { Some(selected) }
+    let selected = auto_context_estimate(&metrics, model, &store, &estimate, slots, model_slots, active.is_empty());
+    if selected.tokens.is_none() && !active.is_empty() { None } else { Some(selected) }
 }
 
 pub(super) async fn plan_queued_context(
     app: &App, model: &str, requested: Option<u32>, parallel: bool,
-) -> Result<Option<Option<u32>>, String> {
-    if requested.is_some() { return Ok(Some(requested)); }
+) -> Result<Option<AutoChoice>, String> {
+    if requested.is_some() { return Ok(Some(AutoChoice::manual(requested))); }
     let saved = model_settings(app, model)?.context_tokens;
-    if saved.is_some() { return Ok(Some(saved)); }
+    if saved.is_some() { return Ok(Some(AutoChoice::manual(saved))); }
     let (slots, models) = if parallel {
         (AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models)
     } else { (1, 1) };
