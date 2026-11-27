@@ -92,7 +92,7 @@ export function createProjects() {
     const owner = chat.job ? chat : project.sessions.find(candidate => candidate.job?.chat_session_id === chat.id);
     const status = owner?.job?.status;
     if (activeChats.has(chat.id) || status === 'running' || status === 'queued') return 'busy';
-    if (errorStatuses.has(status)) return 'error';
+    if (errorStatuses.has(status) || (!owner && run?.chat_errors?.includes(chat.id))) return 'error';
     return '';
   }
   function stateIcon() {
