@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     App, ChatGroup, Message, MessageOrigin, Project, Result, Session, SessionKey, Store, checked_name, choose_group,
-    invalid, missing, work, write_scope,
+    invalid, missing, work,
 };
 use crate::{
     context, ollama,
@@ -38,8 +38,6 @@ pub(in crate::server) enum Status {
 pub(in crate::server) struct Job {
     model: String,
     parallel: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    write_paths: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     role: Option<pi::Role>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,7 +110,6 @@ struct NewJob {
     skills: Option<Vec<String>>,
     #[serde(default)]
     parallel: bool,
-    write_paths: Option<Vec<PathBuf>>,
     role: Option<pi::Role>,
     follow_up: Option<workflow::Config>,
     key: Option<String>,
@@ -385,7 +382,6 @@ pub(in crate::server) async fn enqueue(
                     || task.max_output_tokens.is_some()
                     || task.context_tokens.is_some()
                     || task.parallel
-                    || task.write_paths.is_some()
                     || task.role.is_some()
                 {
                     return Err(invalid("Внешний шаг выполняется Кодексом или его инструментом. Настройки Pi к нему неприменимы."));
@@ -395,13 +391,10 @@ pub(in crate::server) async fn enqueue(
                 }
                 continue;
             }
-            if task.parallel && task.write_paths.is_none() {
-                return Err(invalid("Для параллельной задачи укажите write_paths."));
-            }
             if matches!(task.role, Some(pi::Role::Review))
-                && (task.write_paths.is_some() || task.follow_up.is_some())
+                && task.follow_up.is_some()
             {
-                return Err(invalid("Отдельный шаг проверки выполняется без write_paths и follow_up."));
+                return Err(invalid("Отдельный шаг проверки выполняется без follow_up."));
             }
             let model = crate::model_name(&task.model).map_err(invalid)?;
             task.model = mcp::resolve_model(&installed, &model).map_err(invalid)?;
@@ -549,34 +542,11 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
         app.task.send_modify(Snapshot::projects_changed);
     }
     let ready = work(app.clone(), |app| app.projects.ready_tasks()).await?;
-    for (task, writes) in ready {
-        let writes = match writes {
-            Ok(writes) => writes,
-            Err(error) => {
-                let key = task.key();
-                work(app.clone(), move |app| {
-                    app.projects.set_job(
-                        &key,
-                        &[Status::Queued],
-                        Status::Failed,
-                        Some(JobResult {
-                            text: format!("Не удалось зарезервировать файлы: {error}"),
-                            stop_reason: None,
-                            truncated: false,
-                            context: None,
-                        }),
-                    )
-                })
-                .await?;
-                app.task.send_modify(Snapshot::projects_changed);
-                continue;
-            }
-        };
-        let parallel = task.job.parallel && !writes.is_empty();
+    for task in ready {
+        let parallel = task.job.parallel;
         let scope = DelegationScope::Queued {
             session_id: task.project_session_id,
             parallel,
-            writes: &writes,
             context_tokens: task
                 .job
                 .input
@@ -610,12 +580,12 @@ async fn start_next(app: &Arc<App>) -> Result<()> {
             continue;
         }
         app.task.send_modify(Snapshot::projects_changed);
-        tokio::spawn(run_task(app.clone(), task, delegation, writes));
+        tokio::spawn(run_task(app.clone(), task, delegation));
     }
     Ok(())
 }
 
-async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Vec<PathBuf>) {
+async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64) {
     let key = task.key();
     let mut candidates = Vec::new();
     let (status, result) = if let Some(mut input) = task.job.input.take() {
@@ -715,7 +685,6 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
                     .map_or(Some(task.job.role.unwrap_or(pi::Role::Implement)), |flow| {
                         flow.role(task.job.role.unwrap_or(pi::Role::Implement))
                     }),
-                writes,
                 task.job.chat_session_id,
             );
             mcp::run_queued(app.clone(), request, task.job.origin, delegation).await
@@ -1133,13 +1102,6 @@ impl Store {
                 {
                     return Err(invalid(format!("Ключ задачи {key} повторяется в пакете.")));
                 }
-                let write_paths = if let Some(paths) = new.write_paths {
-                    write_scope::resolve_paths(&folder, &paths)
-                        .map_err(|error| invalid(error.to_string()))?;
-                    paths
-                } else {
-                    Vec::new()
-                };
                 let workflow = new
                     .follow_up
                     .map(|config| workflow::Workflow::new(catalog.next_id, config));
@@ -1153,7 +1115,6 @@ impl Store {
                     job: Some(Job {
                         model: new.model,
                         parallel: new.parallel,
-                        write_paths,
                         role: new.role,
                         chat_session_id: None,
                         origin,
@@ -1229,12 +1190,12 @@ impl Store {
         Ok(tasks)
     }
 
-    fn ready_tasks(&self) -> Result<Vec<(TaskView, std::io::Result<Vec<PathBuf>>)>> {
+    fn ready_tasks(&self) -> Result<Vec<TaskView>> {
         let catalog = self.list()?;
         let mut tasks = Vec::new();
         for project in &catalog.projects {
             for session in &project.sessions {
-                let Some(job) = session.job.as_ref().filter(|job| {
+                let Some(_job) = session.job.as_ref().filter(|job| {
                     job.status == Status::Queued
                         && !job.external
                         && job
@@ -1244,18 +1205,10 @@ impl Store {
                 }) else {
                     continue;
                 };
-                let writes = if job.write_paths.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    write_scope::resolve_paths(&session.folder, &job.write_paths)
-                };
-                tasks.push((
-                    TaskView::from_session(project.id, session).expect("queued job"),
-                    writes,
-                ));
+                tasks.push(TaskView::from_session(project.id, session).expect("queued job"));
             }
         }
-        tasks.sort_by_key(|(task, _)| task.project_session_id);
+        tasks.sort_by_key(|task| task.project_session_id);
         Ok(tasks)
     }
 
@@ -1441,7 +1394,7 @@ mod tests {
             "project_id": id,
             "tasks": [
                 {"key": "edit", "name": "Edit", "model": "local", "prompt": "Edit",
-                    "parallel": true, "write_paths": ["src/test.rs"], "context_tokens": 4096},
+                    "parallel": true, "context_tokens": 4096},
                 {"name": "Check", "model": "local", "prompt": "Check", "after": ["edit"]}
             ]
         })).unwrap(), MessageOrigin::Lyra).unwrap();
@@ -1487,8 +1440,8 @@ mod tests {
         assert!(!store.session_file(new_chat).exists());
         let ready = store.ready_tasks().unwrap();
         assert_eq!(ready.len(), 1);
-        let job = &ready[0].0.job;
-        assert_eq!(job.write_paths, [PathBuf::from("src/test.rs")]);
+        let job = &ready[0].job;
+        assert!(job.parallel);
         assert_eq!(
             job.input.as_ref().unwrap().context_tokens,
             NonZeroU32::new(4096)
@@ -1505,7 +1458,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            store.ready_tasks().unwrap()[0].0.project_session_id,
+            store.ready_tasks().unwrap()[0].project_session_id,
             tasks[1].project_session_id
         );
     }
@@ -1564,7 +1517,6 @@ mod tests {
                 .ready_tasks()
                 .unwrap()
                 .into_iter()
-                .map(|(task, _)| task)
                 .collect::<Vec<_>>()
         };
         finish(&root, "implemented", &[]);
@@ -1574,9 +1526,9 @@ mod tests {
             &review,
             r#"local
 {"status":"fixes","findings":[
-    {"location":"a","issue":"first","check":"check a","model":"local","write_paths":["a"]},
-    {"location":"b","issue":"second","check":"check b","model":"local","write_paths":["b"]},
-    {"location":"a again","issue":"third","check":"check a again","model":"local","write_paths":["a"],"after":[2]}
+    {"location":"a","issue":"first","check":"check a","model":"local"},
+    {"location":"b","issue":"second","check":"check b","model":"local"},
+    {"location":"a again","issue":"third","check":"check a again","model":"local","after":[1,2]}
 ]}"#,
             &[candidate],
         );
