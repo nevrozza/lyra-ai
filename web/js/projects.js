@@ -65,6 +65,8 @@ export function createProjects() {
   let history = [];
   let thinkingDelegation;
   let historyPolling = false;
+  let renderedChatId;
+  const expandedTools = new Set();
 
   const selectedProject = () => catalog?.projects.find(project => project.id === projectId);
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
@@ -310,10 +312,35 @@ export function createProjects() {
     const reading = messages.parentElement;
     const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
     messages.hidden = !entries.length;
+    if (renderedChatId !== chatId) {
+      expandedTools.clear();
+      renderedChatId = chatId;
+    }
     messages.replaceChildren(...entries.map(message => {
       const item = element('li', '');
       item.dataset.role = message.role;
       item.dataset.origin = message.origin ?? '';
+      if (message.tool) {
+        const tool = message.tool;
+        const details = element('details', '');
+        details.className = 'project-tool';
+        details.open = expandedTools.has(tool.id);
+        details.addEventListener('toggle', () => {
+          if (!details.isConnected) return;
+          if (details.open) expandedTools.add(tool.id);
+          else expandedTools.delete(tool.id);
+        });
+        const summary = element('summary', '');
+        const status = { pending: 'Ожидает результата', ok: 'Готово', error: 'Ошибка' }[tool.status] ?? '';
+        summary.append(element('span', tool.name), element('small', status));
+        details.dataset.status = tool.status;
+        details.append(summary, element('h4', 'Аргументы'), element('pre', tool.arguments || '{}'));
+        if (tool.result != null) {
+          details.append(element('h4', 'Результат'), element('pre', tool.result || '(пусто)'));
+        }
+        item.append(details);
+        return item;
+      }
       const label = message.role === 'assistant' ? (message.model || 'Lyra')
         : { orchestrator: 'Оркестратор', lyra: 'Lyra · Следующий шаг' }[message.origin] ?? '';
       if (label) item.append(element('strong', label));
