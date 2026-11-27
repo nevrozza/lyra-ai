@@ -296,6 +296,17 @@ impl Snapshot {
         true
     }
 
+    pub fn clear_chat_thinking(&mut self, id: u64) -> bool {
+        let Some(active) = self.delegations.get_mut(&id) else {
+            return false;
+        };
+        if active.thinking.is_empty() {
+            return false;
+        }
+        active.thinking.clear();
+        true
+    }
+
     pub fn append_chat_thinking(&mut self, id: u64, delta: &str, new_message: bool) -> bool {
         let Some(active) = self
             .delegations
