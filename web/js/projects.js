@@ -64,6 +64,7 @@ export function createProjects() {
   let preferredSelection;
   let history = [];
   let thinkingDelegation;
+  let historyPolling = false;
 
   const selectedProject = () => catalog?.projects.find(project => project.id === projectId);
   const selectedChat = () => selectedProject()?.sessions.find(chat => chat.id === chatId);
@@ -349,8 +350,10 @@ export function createProjects() {
     try {
       const next = await request(`/projects/${projectId}/sessions/${chatId}`);
       if (requestId === historyRequest) {
-        history = next;
-        renderHistory();
+        if (JSON.stringify(history) !== JSON.stringify(next)) {
+          history = next;
+          renderHistory();
+        }
       }
       return next;
     } catch (error) {
@@ -689,6 +692,18 @@ export function createProjects() {
       updateControls();
     }
   };
+
+  // Pi saves tool results to the session as they arrive. Refresh only the
+  // currently active chat so skill notices appear before the final answer.
+  setInterval(async () => {
+    if (historyPolling || !online || !chatRun(chatId)) return;
+    historyPolling = true;
+    try {
+      await refreshHistory();
+    } finally {
+      historyPolling = false;
+    }
+  }, 1500);
 
   return {
     refresh,
