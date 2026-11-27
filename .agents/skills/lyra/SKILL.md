@@ -10,7 +10,7 @@ Use this skill when the user asks to delegate through Lyra, use a local Ollama m
 | Need | Use |
 | --- | --- |
 | A standalone answer, summary, or transformation of supplied text | `run_model` |
-| One scoped Work step or a step in a named existing chat | `run_pi` with the appropriate role and file scope |
+| One Work step or a step in a named existing chat | `run_pi` with the appropriate role and intended task |
 | A list of tasks, parallel edits, dependency ordering, or automatic review and fixes | `enqueue_project_tasks` and `get_project_tasks` |
 | A queued step in `context_full` | `retry_project_task` on the original task ID |
 
@@ -57,7 +57,7 @@ Local context often fills during ordinary coding. Tool output, diffs, checks, an
 ## Honor user cancellation
 
 - A `run_pi` response with `stop_reason: cancelled_by_user`, a saved user-stop notice, or a queued task cancelled by the user is an intentional stop, not a failed worker. Stop scheduling that task and its dependent review/fix steps. Do not retry, create a replacement chat, change models, or silently complete the stopped work yourself. Resume only after a new explicit user request. Independent already-running work is not automatically stopped.
-- If a worker cannot find `write` or `edit`, check the chat's Work mode and whether its role is review. Review and Chat intentionally lack write tools. A tool configuration mismatch in Work is a runtime issue, not a reason to bypass write reservations with shell commands.
+- If a worker cannot find `write` or `edit`, check the chat's Work mode and whether its role is review. Review and Chat intentionally lack write tools. A tool configuration mismatch in Work is a runtime issue, not a reason to bypass file locks or version checks with shell commands.
 
 ## Recover context
 
@@ -65,6 +65,8 @@ Read `structuredContent.context` for a direct Pi run and `result.context` for a 
 
 1. Keep the chat when its history still helps. Inspect the same model at a larger window, then retry with explicit `context_tokens` and a short continuation.
 2. Start a fresh chat when the useful state is small or a larger window is a poor fit. Carry over the goal, constraints, existing changes, remaining work, and checks. Have the worker inspect current files before repeating edits.
-3. For queued work, use `retry_project_task` for either path. Its original task ID still owns the dependencies and write scope. A fresh retry returns the new transcript's `chat_session_id`.
+3. For queued work, use `retry_project_task` for either path. Its original task ID still owns the dependencies. A fresh retry returns the new transcript's `chat_session_id`.
 
 Read [the recovery procedure](references/models-and-context.md#recover-an-overflow) for the exact calls and how to distinguish a full window from an exhausted output budget.
+
+If a task ends with `stop_reason: file_conflict`, its guarded mutation was refused and not resolved. Inspect the current files and schedule only remaining necessary work after the conflicting task has ended. Do not blindly retry, mark blocked work as done, or bypass the tools.
