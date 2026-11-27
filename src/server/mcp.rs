@@ -453,6 +453,7 @@ fn tools() -> Value {
                         "confirmation_summary": {"type": "string"},
                         "handoff_complete": {"type": "boolean"},
                         "continuation_attempts": {"type": "integer"},
+                        "diagnostics": {"type": "object", "description": "Context selection, last provider hook limits, input/output usage, observed Ollama context and elapsed agent time. Hook diagnostics are not a network capture."},
                         "confirmed_mutation_count": {"type": "integer"},
                         "recent_mutations": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string"}, "path": {"type": "string"}}, "required": ["tool", "path"]}}
                     }, "required": ["generation_stop_reason", "confirmation_status", "handoff_complete", "continuation_attempts", "confirmed_mutation_count", "recent_mutations"]},
@@ -1614,7 +1615,11 @@ pub(super) fn auto_context_estimate(
         }
         // A valid profile may establish that a larger context spills to CPU.
         // Do not extrapolate beyond or override its actual observations.
-        return AutoChoice::unavailable("no verified measured context fits; free GPU memory or choose a manual window");
+        return AutoChoice::unavailable(if profile.has_verified_points(weights) {
+            "no verified measured context fits; free GPU memory or choose a manual window"
+        } else {
+            "full benchmark has no trustworthy GPU-fit measurements; rerun it on an idle GPU or choose a manual window"
+        });
     }
     let Some(per_token) = estimate.auto_kv_bytes_per_token.or(estimate.bytes_per_token_f16) else {
         return AutoChoice::unavailable("no compatible measured profile and KV-cache metadata unknown");
@@ -1622,7 +1627,9 @@ pub(super) fn auto_context_estimate(
     let fixed_cache = estimate.auto_fixed_cache_bytes.unwrap_or(0);
     match context::fit_window(available, weights, per_token, fixed_cache, maximum,
         slots.max(daemon_slots), model_slots) {
-        Some(tokens) => AutoChoice::chosen(tokens, "estimated", "no applicable measured profile; weights + cache + workspace reserve"),
+        Some(tokens) => AutoChoice::chosen(tokens, "estimated", if record.memory_profile.is_some() {
+            "profile identity/settings or parallel slots differ; weights + cache + workspace reserve"
+        } else { "no measured profile; weights + cache + workspace reserve" }),
         None => AutoChoice::unavailable("estimated weights and cache do not fit available VRAM"),
     }
 }
