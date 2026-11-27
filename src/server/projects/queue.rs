@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     num::NonZeroU32,
     path::{Component, PathBuf},
     sync::Arc,
@@ -159,6 +159,103 @@ pub(in crate::server) struct Query {
     task_ids: Option<Vec<u64>>,
     #[serde(default)]
     wait_seconds: u64,
+}
+
+pub(in crate::server) const MAX_AWAIT_SECONDS: u64 = 3300;
+
+fn default_await_seconds() -> u64 { MAX_AWAIT_SECONDS }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct AwaitTasks {
+    project_id: u64,
+    group_id: Option<u64>,
+    task_ids: Option<Vec<u64>>,
+    #[serde(default = "default_await_seconds")]
+    timeout_seconds: u64,
+    #[serde(default)]
+    known_completed_ids: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::server) struct EnqueueAndWait {
+    batch: Enqueue,
+    #[serde(default = "default_await_seconds")]
+    timeout_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AwaitReason {
+    Completed,
+    AttentionRequired,
+    Timeout,
+    Stopped,
+}
+
+#[derive(Serialize)]
+struct AwaitAttention {
+    project_session_id: u64,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
+struct AwaitTask {
+    project_session_id: u64,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_session_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_root_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<pi::Role>,
+    status: Status,
+    #[serde(skip_serializing_if = "is_false")]
+    external: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    after: Vec<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    external_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<JobResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    artifacts: Vec<PathBuf>,
+}
+
+#[derive(Serialize)]
+pub(in crate::server) struct AwaitOutcome {
+    project_id: u64,
+    task_ids: Vec<u64>,
+    reason: AwaitReason,
+    attention: Vec<AwaitAttention>,
+    tasks: Vec<AwaitTask>,
+}
+
+struct AwaitSnapshot {
+    outcome: AwaitOutcome,
+    reason: Option<AwaitReason>,
+}
+
+impl AwaitTasks {
+    fn validate(&self) -> Result<()> {
+        validate_await_seconds(self.timeout_seconds)?;
+        if self.task_ids.as_ref().is_some_and(Vec::is_empty)
+            || (self.task_ids.is_none() && self.group_id.is_none())
+        {
+            return Err(invalid("Provide nonempty task_ids or a group_id."));
+        }
+        Ok(())
+    }
+}
+
+fn validate_await_seconds(seconds: u64) -> Result<()> {
+    if !(1..=MAX_AWAIT_SECONDS).contains(&seconds) {
+        return Err(invalid(format!("timeout_seconds must be between 1 and {MAX_AWAIT_SECONDS}.")));
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -463,6 +560,62 @@ pub(in crate::server) async fn query(app: Arc<App>, input: Query) -> Result<Vec<
             }
             return Ok(tasks);
         }
+    }
+}
+
+// Awaiting is read-only after enqueue. A timeout/disconnect never cancels jobs.
+pub(in crate::server) async fn enqueue_and_wait(
+    app: Arc<App>,
+    input: EnqueueAndWait,
+    origin: MessageOrigin,
+) -> Result<AwaitOutcome> {
+    validate_await_seconds(input.timeout_seconds)?;
+    // Recover the same IDs after a lost response without a duplicate batch.
+    if input.batch.batch_id.as_deref().is_none_or(|id| !mcp::is_session_id(id)) {
+        return Err(invalid("enqueue_and_wait requires a valid, stable batch_id."));
+    }
+    let project_id = input.batch.project_id;
+    let tasks = enqueue(app.clone(), input.batch, origin).await?;
+    await_tasks(app, AwaitTasks {
+        project_id,
+        group_id: None,
+        task_ids: Some(tasks.iter().map(|task| task.project_session_id).collect()),
+        timeout_seconds: input.timeout_seconds,
+        known_completed_ids: Vec::new(),
+    }).await
+}
+
+pub(in crate::server) async fn await_tasks(
+    app: Arc<App>,
+    input: AwaitTasks,
+) -> Result<AwaitOutcome> {
+    input.validate()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(input.timeout_seconds);
+    let input = Arc::new(input);
+    let mut state = app.task.subscribe();
+    loop {
+        // Capture the revision before reading the persisted queue. A change
+        // during the read remains observable; no wakeup can be lost.
+        let revision = state.borrow_and_update().projects_revision();
+        let query = input.clone();
+        let mut snapshot = work(app.clone(), move |app| app.projects.await_snapshot(&query)).await?;
+        if let Some(reason) = snapshot.reason {
+            snapshot.outcome.reason = reason;
+            return Ok(snapshot.outcome);
+        }
+        if state.borrow().closed() {
+            snapshot.outcome.reason = AwaitReason::Stopped;
+            return Ok(snapshot.outcome);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            snapshot.outcome.reason = AwaitReason::Timeout;
+            return Ok(snapshot.outcome);
+        }
+        // Ignore token streaming, telemetry and unrelated watch updates.
+        // Read the queue again even on timeout.
+        let _ = tokio::time::timeout_at(deadline, state.wait_for(|snapshot| {
+            snapshot.closed() || snapshot.projects_revision() != revision
+        })).await;
     }
 }
 
@@ -1201,6 +1354,116 @@ impl Store {
         Ok(tasks)
     }
 
+    fn await_snapshot(&self, input: &AwaitTasks) -> Result<AwaitSnapshot> {
+        let catalog = self.list()?;
+        let project = catalog.projects.iter().find(|project| project.id == input.project_id)
+            .ok_or_else(|| missing("Project"))?;
+        if let Some(group_id) = input.group_id
+            && !project.sessions.iter().any(|session| session.group.as_ref().is_some_and(|group| group.id == group_id))
+        {
+            return Err(missing("Group"));
+        }
+        let roots: Vec<u64> = project.sessions.iter()
+            .filter(|session| session.job.is_some())
+            .filter(|session| input.group_id.is_none_or(|id| session.group.as_ref().is_some_and(|group| group.id == id)))
+            .filter(|session| input.task_ids.as_ref().is_none_or(|ids| ids.contains(&session.id)))
+            .map(|session| session.id).collect();
+        if roots.is_empty() || input.task_ids.as_ref().is_some_and(|ids| ids.iter().any(|id| !roots.contains(id))) {
+            return Err(missing("Task"));
+        }
+
+        // The root's automatic review/fix children are committed together
+        // with the previous result. Include all rounds, not just the root.
+        let mut selected: HashSet<u64> = roots.iter().copied().collect();
+        for session in &project.sessions {
+            if session.job.as_ref().and_then(Job::workflow_root).is_some_and(|id| roots.contains(&id)) {
+                selected.insert(session.id);
+            }
+        }
+        let mut relevant = selected.clone();
+        // Follow unresolved prerequisites outside the selection so a paused
+        // ancestor or ready external step is surfaced instead of waiting forever.
+        loop {
+            let mut dependencies = HashSet::new();
+            for session in &project.sessions {
+                if !relevant.contains(&session.id) { continue; }
+                let Some(job) = &session.job else { continue };
+                if job.status != Status::Queued { continue; }
+                for id in &job.after {
+                    if project.dependency_state(*id) != Dependency::Ready {
+                        dependencies.insert(*id);
+                    }
+                }
+            }
+            let before = relevant.len();
+            relevant.extend(dependencies.iter().copied());
+            for session in &project.sessions {
+                if session.job.as_ref().and_then(Job::workflow_root).is_some_and(|id| dependencies.contains(&id)) {
+                    relevant.insert(session.id);
+                }
+            }
+            if relevant.len() == before { break; }
+        }
+
+        let mut attention = Vec::new();
+        let mut tasks = Vec::new();
+        let mut all_completed = true;
+        for session in &project.sessions {
+            if !relevant.contains(&session.id) { continue; }
+            let Some(job) = &session.job else { continue };
+            let external_ready = job.external && job.status == Status::Queued
+                && job.after.iter().all(|id| project.dependency_state(*id) == Dependency::Ready);
+            let action = match job.status {
+                Status::ContextFull => Some("context_full"),
+                Status::OutputLimit => Some("output_limit"),
+                Status::Failed => Some("failed"),
+                Status::Blocked => Some("blocked"),
+                Status::Cancelled => Some("cancelled"),
+                Status::Interrupted => Some("interrupted"),
+                Status::Queued if external_ready => Some("external_ready"),
+                _ => None,
+            };
+            if selected.contains(&session.id) && job.status != Status::Completed {
+                all_completed = false;
+            }
+            if let Some(reason) = action {
+                attention.push(AwaitAttention { project_session_id: session.id, reason });
+            }
+            let include_result = job.status != Status::Completed
+                || (selected.contains(&session.id) && !input.known_completed_ids.contains(&session.id));
+            tasks.push(AwaitTask {
+                project_session_id: session.id,
+                name: session.name.clone(),
+                group_id: session.group.as_ref().map(|group| group.id),
+                chat_session_id: job.chat_session_id,
+                workflow_root_id: job.workflow_root(),
+                role: job.workflow.as_ref().map_or(job.role, |flow| flow.role(job.role.unwrap_or(pi::Role::Implement))),
+                status: job.status,
+                external: job.external,
+                after: job.after.clone(),
+                external_prompt: if external_ready { job.input.as_ref().map(|input| input.prompt.clone()) } else { None },
+                result: if include_result { job.result.clone() } else { None },
+                artifacts: job.artifacts.clone(),
+            });
+        }
+        tasks.sort_by_key(|task| task.project_session_id);
+        let reason = if !attention.is_empty() {
+            Some(AwaitReason::AttentionRequired)
+        } else if all_completed {
+            Some(AwaitReason::Completed)
+        } else { None };
+        Ok(AwaitSnapshot {
+            reason,
+            outcome: AwaitOutcome {
+                project_id: input.project_id,
+                task_ids: roots,
+                reason: reason.unwrap_or(AwaitReason::Timeout),
+                attention,
+                tasks,
+            },
+        })
+    }
+
     fn ready_tasks(&self) -> Result<Vec<TaskView>> {
         let catalog = self.list()?;
         let mut tasks = Vec::new();
@@ -1326,6 +1589,90 @@ impl Project {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn await_snapshot_waits_for_automatic_review_and_omits_known_successes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": project.id,
+            "tasks": [{"name":"Implement","model":"local","prompt":"Implement",
+                "follow_up":{"review":{"model":"local","prompt":"Review"}}}]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        let root = tasks[0].key();
+        let mut query = AwaitTasks { project_id: project.id, group_id: None,
+            task_ids: Some(vec![root.project_session_id]), timeout_seconds: 1,
+            known_completed_ids: Vec::new() };
+        let result = |text: &str| JobResult { text: text.into(), stop_reason: Some("stop".into()),
+            truncated: false, context: None, work_progress: None };
+        assert!(store.await_snapshot(&query).unwrap().reason.is_none());
+        assert!(store.set_job(&root, &[Status::Queued], Status::Running, None).unwrap());
+        store.complete_job(&root, Status::Completed, result("implemented"), &[]).unwrap();
+        let snapshot = store.await_snapshot(&query).unwrap();
+        assert!(snapshot.reason.is_none());
+        assert_eq!(snapshot.outcome.tasks.len(), 2);
+        let review = store.ready_tasks().unwrap().pop().unwrap().key();
+        assert!(store.set_job(&review, &[Status::Queued], Status::Running, None).unwrap());
+        store.complete_job(&review, Status::Completed,
+            result(r#"local
+{"status":"pass","summary":"verified"}"#), &[]).unwrap();
+        query.known_completed_ids.push(root.project_session_id);
+        let snapshot = store.await_snapshot(&query).unwrap();
+        assert_eq!(snapshot.reason, Some(AwaitReason::Completed));
+        assert!(snapshot.outcome.tasks[0].result.is_none());
+        assert!(snapshot.outcome.tasks[1].result.is_some());
+    }
+
+    #[test]
+    fn await_snapshot_surfaces_external_and_paused_ancestors_outside_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": project.id,
+            "tasks": [
+                {"name":"Generate","key":"external","external":true,"prompt":"Generate asset"},
+                {"name":"Implement","key":"impl","model":"local","prompt":"Implement","after":["external"]},
+                {"name":"Consume","model":"local","prompt":"Consume","after":["impl"]}
+            ]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        let query = AwaitTasks { project_id: project.id, group_id: None,
+            task_ids: Some(vec![tasks[2].project_session_id]), timeout_seconds: 1,
+            known_completed_ids: Vec::new() };
+        let snapshot = store.await_snapshot(&query).unwrap();
+        assert_eq!(snapshot.reason, Some(AwaitReason::AttentionRequired));
+        assert_eq!(snapshot.outcome.attention[0].reason, "external_ready");
+        assert_eq!(snapshot.outcome.tasks[0].external_prompt.as_deref(), Some("Generate asset"));
+        assert!(store.set_job(&tasks[0].key(), &[Status::Queued], Status::Completed, None).unwrap());
+        let impl_key = tasks[1].key();
+        assert!(store.set_job(&impl_key, &[Status::Queued], Status::Running, None).unwrap());
+        assert!(store.set_job(&impl_key, &[Status::Running], Status::OutputLimit, None).unwrap());
+        let snapshot = store.await_snapshot(&query).unwrap();
+        assert_eq!(snapshot.reason, Some(AwaitReason::AttentionRequired));
+        assert_eq!(snapshot.outcome.attention[0].project_session_id, impl_key.project_session_id);
+        assert_eq!(snapshot.outcome.attention[0].reason, "output_limit");
+        assert!(store.set_job(&impl_key, &[Status::OutputLimit], Status::Cancelled, None).unwrap());
+        let snapshot = store.await_snapshot(&query).unwrap();
+        assert_eq!(snapshot.outcome.attention[0].reason, "cancelled");
+    }
+
+    #[test]
+    fn await_rejects_missing_scope_or_invalid_timeout() {
+        let mut query = AwaitTasks { project_id: 1, group_id: None, task_ids: None,
+            timeout_seconds: 1, known_completed_ids: Vec::new() };
+        assert!(query.validate().is_err());
+        query.task_ids = Some(vec![]);
+        assert!(query.validate().is_err());
+        query.task_ids = Some(vec![1]);
+        assert!(query.validate().is_ok());
+        query.timeout_seconds = MAX_AWAIT_SECONDS + 1;
+        assert!(query.validate().is_err());
+    }
 
     #[test]
     fn output_limit_pauses_dependents_and_can_resume_same_task_without_larger_context() {
