@@ -59,6 +59,8 @@ Read the current `parallel_project_tasks` and `parallel_project_models` values f
 
 ### Calibrated task briefs
 
+Estimate the expected generated work and verification against the selected model's usable generation capacity, as well as its input window. If uncertain, use a smaller saved milestone and inspect the handoff before assigning the next one. Split along coherent artifacts or sequential checkpoints even within one file; keep independent steps parallel only when contracts are settled. Do not prescribe a universal number of files, tokens or steps. Reserve a short final handoff and schedule substantial integration checks separately when they would overload the implementation worker.
+
 A good brief reduces the decisions a small worker must make without specifying the entire solution. For a nontrivial Medium step, use a handful of ordered actions, usually 4–7; this is a guide, not a quota. For a simple change use fewer, for complex work split by coherent outcomes and explicit dependencies. Do not expand a brief with repeated global constraints or generic best practices.
 
 Illustrative greenfield website (not a claim about an existing project):

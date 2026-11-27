@@ -209,11 +209,11 @@ fn tools() -> Value {
     queue_task["properties"]["role"]["default"] = json!("implement");
     let retry_task = json!({
         "name": "retry_project_task",
-        "description": "Resume a task paused on context_full while preserving its task ID and dependencies.",
+        "description": "Resume a task paused on context_full or output_limit while preserving its task ID and dependencies. Inspect saved tool evidence and continue only remaining work; do not retry user cancellation.",
         "inputSchema": {"type": "object", "properties": {
             "project_id": {"type": "integer", "minimum": 1},
             "project_session_id": {"type": "integer", "minimum": 1, "description": "Original queued task ID."},
-            "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context for the retry. Required and strictly larger for a retry in the same chat. For a fresh chat, omit to keep the last window."},
+            "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context for the retry. For context_full, a same-chat retry requires a strictly larger window. For output_limit or a fresh chat, omit to keep the last window."},
             "fresh_chat": {"type": "boolean", "default": false, "description": "Start a new saved chat with the same task workspace and no previous messages."},
             "prompt": {"type": "string", "minLength": 1, "maxLength": 32000, "description": "Continuation prompt for the retry."}
         }, "required": ["project_id", "project_session_id", "prompt"], "additionalProperties": false}
@@ -378,7 +378,7 @@ fn tools() -> Value {
         },
         {
             "name": "read_project_session",
-            "description": "Read recent saved chat messages, including intentional user-stop notices. Never automatically resume a user-stopped task.",
+            "description": "Read recent saved chat messages and compact tool calls/results, including confirmed operations and intentional user-stop notices. Pending or missing tool results are not proof of success. Never automatically resume a user-stopped task.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1}
@@ -421,6 +421,15 @@ fn tools() -> Value {
                 "properties": {
                     "stop_reason": {"type": ["string", "null"]},
                     "truncated": {"type": "boolean"},
+                    "work_progress": {"type": "object", "description": "Work execution evidence, worker confirmation and final handoff status; not proof of task acceptance.", "properties": {
+                        "generation_stop_reason": {"type": ["string", "null"]},
+                        "confirmation_status": {"enum": ["unconfirmed", "completed", "blocked"]},
+                        "confirmation_summary": {"type": "string"},
+                        "handoff_complete": {"type": "boolean"},
+                        "continuation_attempts": {"type": "integer"},
+                        "confirmed_mutation_count": {"type": "integer"},
+                        "recent_mutations": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string"}, "path": {"type": "string"}}, "required": ["tool", "path"]}}
+                    }, "required": ["generation_stop_reason", "confirmation_status", "handoff_complete", "continuation_attempts", "confirmed_mutation_count", "recent_mutations"]},
                     "max_output_tokens": {"type": "integer"},
                     "context": {"type": "object", "properties": {
                         "context_tokens": {"type": "integer"},
@@ -519,6 +528,8 @@ struct GenerationInfo {
     text_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<PiContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work_progress: Option<pi::WorkProgress>,
 }
 
 struct ToolOutput {
@@ -799,6 +810,7 @@ async fn run_model(
         max_output_tokens: Some(limit),
         text_only: None,
         context: None,
+        work_progress: None,
     });
     if let Some(thinking) = reply.thinking() {
         trace.event(Kind::Thinking, "Ollama", thinking, None);
@@ -1035,9 +1047,11 @@ async fn run_pi(
         return Ok(user_cancelled_output(trace, context_window, limit));
     }
     if context_full {
+        let work_progress = result.as_ref().ok().and_then(|reply| reply.work_progress.clone());
+        let evidence = work_progress.as_ref().map(pi::WorkProgress::recovery_note).unwrap_or_default();
         return Ok(ToolOutput {
             text: format!(
-                "Контекст модели заполнен. Окно Pi: {context_window} токенов. Увеличьте окно или начните новый чат с кратким состоянием задачи."
+                "Контекст модели заполнен. Окно Pi: {context_window} токенов. Увеличьте окно или начните новый чат с кратким состоянием задачи.{evidence}"
             ),
             is_error: true,
             generation: Some(GenerationInfo {
@@ -1046,6 +1060,7 @@ async fn run_pi(
                 max_output_tokens: limit,
                 text_only: text_only.then_some(true),
                 context,
+                work_progress,
             }),
         });
     }
@@ -1076,9 +1091,11 @@ async fn run_pi(
     } else {
         ""
     };
+    let evidence = reply.work_progress.as_ref().map(pi::WorkProgress::recovery_note).unwrap_or_default();
     Ok(ToolOutput {
         text: reply
             .error
+            .map(|error| format!("{error}{evidence}"))
             .unwrap_or_else(|| format!("{model}{status}\n{}", reply.text)),
         is_error,
         generation: Some(GenerationInfo {
@@ -1087,6 +1104,7 @@ async fn run_pi(
             max_output_tokens: limit,
             text_only: text_only.then_some(true),
             context,
+            work_progress: reply.work_progress,
         }),
     })
 }
@@ -1136,13 +1154,14 @@ pub(super) async fn run_queued(
     }
     match result {
         Ok(reply) => {
-            let (stop_reason, truncated, context) =
-                reply.generation.map_or((None, false, None), |details| {
-                    (details.stop_reason, details.truncated, details.context)
+            let (stop_reason, truncated, context, work_progress) =
+                reply.generation.map_or((None, false, None, None), |details| {
+                    (details.stop_reason, details.truncated, details.context, details.work_progress)
                 });
             let status = match stop_reason.as_deref() {
                 Some(projects::USER_STOP_REASON) => Status::Cancelled,
                 Some("context_full") => Status::ContextFull,
+                Some("length") => Status::OutputLimit,
                 Some("file_conflict" | "task_blocked" | "task_incomplete") => Status::Blocked,
                 _ if reply.is_error => Status::Failed,
                 _ if truncated || stop_reason.as_deref() != Some("stop") => Status::Blocked,
@@ -1155,6 +1174,7 @@ pub(super) async fn run_queued(
                     stop_reason,
                     truncated,
                     context,
+                    work_progress,
                 },
             )
         }
@@ -1169,6 +1189,7 @@ pub(super) async fn run_queued(
                 stop_reason: (pending == Some(true)).then(|| projects::USER_STOP_REASON.into()),
                 truncated: false,
                 context: None,
+                work_progress: None,
             },
         ),
     }
@@ -1261,6 +1282,7 @@ fn user_cancelled_output(trace: &Call, context_window: u32, limit: Option<u32>) 
             max_output_tokens: limit,
             text_only: None,
             context: Some(PiContext { context_tokens: context_window, notice: None }),
+            work_progress: None,
         }),
     }
 }

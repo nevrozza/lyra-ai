@@ -87,7 +87,7 @@ For a review, give the full original acceptance criteria, assembled scope, known
 
 ## Plan separate chats before work starts
 
-Local context often fills during ordinary coding. Tool output, diffs, checks, and prior turns all take space, and compaction costs time. Split work proactively into focused chats whenever a handoff through files, a stable interface, or a short summary can avoid carrying unrelated history. Do this even when the original chat still looks viable. Each queue step gets a fresh chat. Give review its own chat by default, and use the user's named chat for the stage they explicitly assigned there. Keep tightly coupled edits together only while their working context remains manageable.
+Plan for both the model's input window and generation capacity. Break large outputs into independently checkable, saved milestones; use model capability, measured prior behavior and expected generated size, not a fixed number of files or a domain-specific rule. Leave room for tool calls and a short final handoff; do not assign a whole large deliverable and its full verification to a worker unlikely to fit it in one step. Local context often fills during ordinary coding. Tool output, diffs, checks, and prior turns all take space, and compaction costs time. Split work proactively into focused chats whenever a handoff through files, a stable interface, or a short summary can avoid carrying unrelated history. Do this even when the original chat still looks viable. Each queue step gets a fresh chat. Give review its own chat by default, and use the user's named chat for the stage they explicitly assigned there. Keep tightly coupled edits together only while their working context remains manageable.
 
 ## Honor user cancellation
 
@@ -102,6 +102,6 @@ Read `structuredContent.context` for a direct Pi run and `result.context` for a 
 2. Start a fresh chat when the useful state is small or a larger window is a poor fit. Carry over the goal, constraints, existing changes, remaining work, and checks. Have the worker inspect current files before repeating edits.
 3. For queued work, use `retry_project_task` for either path. Its original task ID still owns the dependencies. A fresh retry returns the new transcript's `chat_session_id`.
 
-Read [the recovery procedure](references/models-and-context.md#recover-an-overflow) for the exact calls and how to distinguish a full window from an exhausted output budget.
+Read [the recovery procedure](references/models-and-context.md#recover-an-overflow) for the exact calls and how to distinguish a full window from an exhausted output budget. A queued `output_limit` is paused, not failed or complete; inspect `result.work_progress` and `read_project_session` before retrying the original task ID with only the remaining work. A successful mutation or completed worker confirmation is not acceptance of the whole task.
 
 If a task ends with `stop_reason: file_conflict`, its guarded mutation was refused and not resolved. Inspect the current files and schedule only remaining necessary work after the conflicting task has ended. Do not blindly retry, mark blocked work as done, or bypass the tools.

@@ -4,7 +4,7 @@ import { renderMarkdown } from './markdown.js';
 
 const taskStatuses = {
   queued: 'В очереди', running: 'В работе', completed: 'Готово',
-  context_full: 'Ждёт восстановления контекста', failed: 'Ошибка', cancelled: 'Отменена', interrupted: 'Прервана', blocked: 'Заблокирована',
+  context_full: 'Ждёт восстановления контекста', output_limit: 'Ждёт продолжения после лимита генерации', failed: 'Ошибка', cancelled: 'Отменена', interrupted: 'Прервана', blocked: 'Заблокирована',
 };
 
 function taskStatus(job) {
@@ -81,13 +81,13 @@ export function createProjects() {
       task.project_session_id === id || (owner != null && task.project_session_id === owner));
   };
   const visibleChats = project => project.sessions.filter(chat => project.archived || chat.archived === archiveView);
-  const pendingTask = chat => ['queued', 'running', 'context_full'].includes(chat?.job?.status);
+  const pendingTask = chat => ['queued', 'running', 'context_full', 'output_limit'].includes(chat?.job?.status);
   const collapsedGroups = new Set();
   const groupMembers = (project, id) => project.sessions.filter(chat => chat.group?.id === id).sort((a, b) => a.id - b.id);
   const chatLabel = (chat, project = selectedProject()) => chat.group && project
     ? `${groupMembers(project, chat.group.id).findIndex(member => member.id === chat.id) + 1}. ${chat.name}`
     : chat.name;
-  const errorStatuses = new Set(['failed', 'blocked', 'interrupted', 'context_full']);
+  const errorStatuses = new Set(['failed', 'blocked', 'interrupted', 'context_full', 'output_limit']);
   function chatState(chat, project, activeChats) {
     const owner = chat.job ? chat : project.sessions.find(candidate => candidate.job?.chat_session_id === chat.id);
     const status = owner?.job?.status;
@@ -137,6 +137,8 @@ export function createProjects() {
     const owner = taskChat(chat);
     const queued = owner?.job?.status === 'queued';
     const contextPaused = owner?.job?.status === 'context_full';
+    const outputPaused = owner?.job?.status === 'output_limit';
+    const recoveryPaused = contextPaused || outputPaused;
     const taskPending = pendingTask(owner);
     const active = chat && (sending.has(chat.id) || delegation || taskPending);
     const stopping = delegation && (delegation[1].stopping || stopRequests.has(delegation[0]));
@@ -179,7 +181,7 @@ export function createProjects() {
     }
     get('project-progress').hidden = !active;
     const progressText = stopping ? 'Останавливаем…' : contextNotice === 'compacting'
-      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : contextPaused ? 'Задача ждёт восстановления контекста…' : queued ? (owner.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
+      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : contextPaused ? 'Задача ждёт восстановления контекста…' : outputPaused ? 'Задача ждёт продолжения после лимита генерации…' : queued ? (owner.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
     const progress = get('project-progress-text');
     if (progress.textContent !== progressText) progress.textContent = progressText;
     get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));
@@ -222,8 +224,8 @@ export function createProjects() {
     thinking.update(online && run && !composer.hidden ? model : undefined, run);
     sendButton.disabled = !online || saving || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
     sendButton.hidden = Boolean(active);
-    stopButton.disabled = (!delegation && !queued && !contextPaused) || Boolean(stopping) || !online || saving;
-    stopButton.textContent = stopping ? 'Останавливаем…' : (queued || contextPaused) && !delegation ? 'Отменить задачу' : 'Остановить';
+    stopButton.disabled = (!delegation && !queued && !recoveryPaused) || Boolean(stopping) || !online || saving;
+    stopButton.textContent = stopping ? 'Останавливаем…' : (queued || recoveryPaused) && !delegation ? 'Отменить задачу' : 'Остановить';
   }
 
   function refreshModels() {
@@ -872,7 +874,7 @@ export function createProjects() {
     if (stopButton.disabled) return;
     const chat = taskChat(selectedChat());
     const delegation = chatRun(chatId);
-    if (!delegation && ['queued', 'context_full'].includes(chat?.job?.status)) {
+    if (!delegation && ['queued', 'context_full', 'output_limit'].includes(chat?.job?.status)) {
       await save('/projects/tasks/cancel', {
         project_id: selectedProject().id,
         project_session_id: chat.id,

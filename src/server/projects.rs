@@ -715,7 +715,7 @@ impl Store {
         let mut stops = catalog.user_stops.get(&key.project_session_id)
             .into_iter().flatten().copied().peekable();
         let status_message = session.job.as_ref().and_then(|job| {
-            if dashboard || job.user_cancelled() { job.status_message() } else { None }
+            job.status_message()
         });
         // Running cancellations have an independently persisted timestamped notice.
         let status_message = status_message.filter(|message| {
@@ -792,8 +792,8 @@ impl Store {
                     request_id: None,
                 });
             }
-            if dashboard && message["role"] == "toolResult" {
-                finish_tool(&mut messages, message, entry_timestamp(&entry));
+            if message["role"] == "toolResult" {
+                finish_tool(&mut messages, message, entry_timestamp(&entry), dashboard);
             }
             let role = match message["role"].as_str() {
                 Some("user") => "user",
@@ -879,8 +879,8 @@ impl Store {
                     request_id: metadata.and_then(|metadata| metadata.request_id),
                 });
             }
-            if dashboard && role == "assistant" {
-                append_tool_calls(&mut messages, content, entry_timestamp(&entry));
+            if role == "assistant" {
+                append_tool_calls(&mut messages, content, entry_timestamp(&entry), dashboard);
             }
         }
         if !saw_queued_prompt
@@ -966,9 +966,30 @@ fn skill_read_name(part: &Value) -> Option<&str> {
     parts.next().filter(|name| !name.is_empty() && *name != "." && *name != "..")
 }
 
-fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestamp: Option<u64>) {
+const MCP_TOOL_PREVIEW_LIMIT: usize = 600;
+
+fn compact_tool_preview(mut text: String) -> String {
+    if text.len() > MCP_TOOL_PREVIEW_LIMIT {
+        text.truncate(text.floor_char_boundary(MCP_TOOL_PREVIEW_LIMIT));
+        text.push_str("…");
+    }
+    text
+}
+
+fn compact_tool_arguments(arguments: &Value) -> String {
+    // Keep useful identifiers and status, never repeat entire file bodies or edit payloads.
+    let mut compact = serde_json::Map::new();
+    for key in ["path", "name", "status", "summary", "command", "offset", "limit"] {
+        if let Some(value) = arguments.get(key).filter(|value| value.is_string() || value.is_number()) {
+            compact.insert(key.to_owned(), value.clone());
+        }
+    }
+    compact_tool_preview(serde_json::to_string(&compact).unwrap_or_default())
+}
+
+fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestamp: Option<u64>, dashboard: bool) {
     for part in content.as_array().into_iter().flatten() {
-        if part["type"] != "toolCall" || (part["name"] == "read" && skill_read_name(part).is_some()) {
+        if part["type"] != "toolCall" || (dashboard && part["name"] == "read" && skill_read_name(part).is_some()) {
             continue;
         }
         let (Some(id), Some(name)) = (part["id"].as_str(), part["name"].as_str()) else {
@@ -983,7 +1004,9 @@ fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestam
             tool: Some(ToolTrace {
                 id: id.to_owned(),
                 name: name.to_owned(),
-                arguments: tool_preview(serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default()),
+                arguments: if dashboard {
+                    tool_preview(serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default())
+                } else { compact_tool_arguments(&part["arguments"]) },
                 status: "pending",
                 finished_at: None,
                 result: None,
@@ -997,7 +1020,7 @@ fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestam
     }
 }
 
-fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Option<u64>) {
+fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Option<u64>, dashboard: bool) {
     let (Some(id), Some(name)) = (message["toolCallId"].as_str(), message["toolName"].as_str()) else {
         return;
     };
@@ -1005,7 +1028,9 @@ fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Opt
         .find(|tool| tool.id == id && tool.name == name && tool.status == "pending") else {
         return;
     };
-    tool.status = if message["isError"] == true { "error" } else { "ok" };
+    tool.status = if message["isError"] == true { "error" }
+        else if !dashboard && message["isError"] != false { "unknown" }
+        else { "ok" };
     let content = &message["content"];
     let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
         content.as_array().into_iter().flatten().map(|part| {
@@ -1016,7 +1041,10 @@ fn finish_tool(messages: &mut VecDeque<Message>, message: &Value, timestamp: Opt
             }
         }).collect::<Vec<_>>().join("\n")
     });
-    tool.result = Some(tool_preview(text));
+    tool.result = Some(if dashboard { tool_preview(text) }
+        else if tool.status == "ok" && matches!(name, "read" | "load_skill") {
+            "Tool succeeded; full contents omitted from compact history.".into()
+        } else { compact_tool_preview(text) });
     tool.finished_at = timestamp;
 }
 
@@ -1306,10 +1334,10 @@ mod tests {
         append_tool_calls(&mut messages, &serde_json::json!([
             {"type":"toolCall","id":"a","name":"read","arguments":{}},
             {"type":"toolCall","id":"b","name":"write","arguments":{}}
-        ]), Some(1000));
+        ]), Some(1000), true);
         finish_tool(&mut messages, &serde_json::json!({
             "toolCallId":"a","toolName":"read","content":"ok"
-        }), Some(2000));
+        }), Some(2000), true);
         push_user_stop(&mut messages, 3000);
         assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
         assert_eq!(messages[1].tool.as_ref().unwrap().status, "cancelled");
@@ -1331,23 +1359,63 @@ mod tests {
             {"type":"toolCall","id":"b","name":"run_command","arguments":{"command":"cargo test"}},
             {"type":"toolCall","id":"c","name":"read","arguments":{"path":"skills/review/SKILL.md"}}
         ]);
-        append_tool_calls(&mut messages, &calls, Some(1000));
+        append_tool_calls(&mut messages, &calls, Some(1000), true);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].tool.as_ref().unwrap().status, "pending");
         assert_eq!(messages[0].timestamp, Some(1000));
         finish_tool(&mut messages, &serde_json::json!({
             "toolCallId":"b","toolName":"run_command","isError":true,
             "content":[{"type":"text","text":"failed"}]
-        }), Some(2000));
+        }), Some(2000), true);
         assert_eq!(messages[1].tool.as_ref().unwrap().status, "error");
         assert_eq!(messages[1].tool.as_ref().unwrap().result.as_deref(), Some("failed"));
         finish_tool(&mut messages, &serde_json::json!({
             "toolCallId":"a","toolName":"read","isError":false,
             "content":[{"type":"text","text":"code"}]
-        }), Some(2000));
+        }), Some(2000), true);
         assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
         assert_eq!(messages[0].tool.as_ref().unwrap().finished_at, Some(2000));
         assert_eq!(messages[0].tool.as_ref().unwrap().result.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn saved_mcp_history_exposes_compact_tool_results_without_file_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().join("data");
+        let store = Store::new(directory.clone());
+        let project = store.save(SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Chat"
+        })).unwrap()).unwrap();
+        let path = store.session_file(chat.id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let entries = [
+            serde_json::json!({"type":"message","message":{"role":"assistant","timestamp":1000,"content":[
+                {"type":"toolCall","id":"a","name":"load_skill","arguments":{"name":"canvas-design"}},
+                {"type":"toolCall","id":"b","name":"write","arguments":{"path":"index.html","content":"large file body"}},
+                {"type":"toolCall","id":"c","name":"edit","arguments":{"path":"index.html","edits":[{"oldText":"a","newText":"b"}]}},
+                {"type":"toolCall","id":"d","name":"finish_task","arguments":{"status":"completed","summary":"written"}}
+            ]}}),
+            serde_json::json!({"type":"message","message":{"role":"toolResult","timestamp":2000,"toolCallId":"a","toolName":"load_skill","isError":false,"content":"skill instructions"}}),
+            serde_json::json!({"type":"message","message":{"role":"toolResult","timestamp":2001,"toolCallId":"b","toolName":"write","isError":false,"content":"Updated index.html"}}),
+            serde_json::json!({"type":"message","message":{"role":"toolResult","timestamp":2002,"toolCallId":"c","toolName":"edit","isError":true,"content":"FILE_LOCKED"}})
+        ];
+        fs::write(path, entries.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let store = Store::new(directory);
+        let messages = store.history(SessionKey { project_id: project.id, project_session_id: chat.id },
+            &benchmark::Store::new(None), false).unwrap();
+        let tools = messages.iter().filter_map(|message| message.tool.as_ref()).collect::<Vec<_>>();
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[0].name, "load_skill");
+        assert_eq!(tools[0].status, "ok");
+        assert_eq!(tools[1].status, "ok");
+        assert!(tools[1].arguments.contains("index.html"));
+        assert!(!tools[1].arguments.contains("large file body"));
+        assert_eq!(tools[2].status, "error");
+        assert_eq!(tools[2].result.as_deref(), Some("FILE_LOCKED"));
+        assert_eq!(tools[3].status, "pending");
     }
 
     #[test]
