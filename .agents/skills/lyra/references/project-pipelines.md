@@ -57,6 +57,20 @@ Use `after` for prerequisite results and stable ordering on shared files. A prer
 
 Read the current `parallel_project_tasks` and `parallel_project_models` values from `inspect`. The first limits active parallel steps. The second limits active model and context combinations. Parallel implementation steps may share a worker model. Keep the reviewer independent. Lyra controls task dispatch and acquires file locks at mutation time. Ollama independently controls residency and the number of requests it can generate for at once.
 
+### Calibrated task briefs
+
+A good brief reduces the decisions a small worker must make without specifying the entire solution. For a nontrivial Medium step, use a handful of ordered actions, usually 4–7; this is a guide, not a quota. For a simple change use fewer, for complex work split by coherent outcomes and explicit dependencies. Do not expand a brief with repeated global constraints or generic best practices.
+
+Illustrative greenfield website (not a claim about an existing project):
+
+**Shared brief:** Russian exhibition landing page, locally opened index.html, no dependencies/network/deploy; preserve the user's accessibility and responsive criteria.
+
+**Design step, read-only.** Goal: produce a buildable visual contract. 1. Verify the registered workspace and skill availability; report which design skill was actually loaded. 2. Choose a coherent visual principle, palette, type hierarchy and composition; define a desktop grid and a single-column mobile interpretation. 3. Decide the hero, program, visit section and CTA hierarchy, including how content remains readable on small screens. 4. Hand off palette hex values, typography, layout rules, relevant contrast calculations if actually performed, and any unresolved decisions. Do not edit files or claim a rendered page was checked.
+
+**Implementation step, after design.** Goal: implement the agreed composition using index.html and styles.css. 1. Read the design handoff and any omitted relevant CONTEXT.md ranges; verify the workspace and existing files. 2. Build semantic header/main/sections/footer, a skip link targeting main, and a primary CTA targeting the visit section; use matching local fragment IDs. 3. Put the agreed palette and typography into CSS tokens, then implement the hero composition and program/visit layouts using the design contract. Choose the exact CSS technique within those constraints; use local system fonts if no local font resource is available. 4. Adapt the layout to 360 px with no fixed-width overflow; preserve visible keyboard focus, meaningful contrast and reduced-motion behavior. Use no JavaScript unless required. 5. Inspect the saved files, resolve relative resources and fragment targets; if a browser is available, render at 360 and 1440 px, compare scrollWidth to viewport width, tab through controls and check the CTA. Otherwise distinguish static inspection from unverified runtime behavior. Return changed files, actual check results, design deviations and blockers.
+
+The example intentionally gives the structure, decisions and checks, not full HTML/CSS or a new visual design overriding the predecessor. In a real batch use the actual user requirements and verified project facts. Do not turn this example into a mandatory template for unrelated tasks.
+
 ### Example batch
 
 Replace model placeholders with exact inspected catalog tags and choose the project's actual ID and file paths.
