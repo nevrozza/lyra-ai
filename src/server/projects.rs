@@ -1116,6 +1116,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_chats_inherit_current_project_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(SaveProject {
+            id: None, name: "Project".into(), folders: vec![first.clone(), second.clone()],
+        }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id":project.id, "name":"Chat"
+        })).unwrap()).unwrap();
+        let second = canonical_folder(&second).unwrap();
+        let first = canonical_folder(&first).unwrap();
+        let task = store.task(project.id, Some(chat.id), Some(&second)).unwrap();
+        assert_eq!(task.workspace, second);
+        assert_eq!(task.folders, vec![second.clone(), first.clone()]);
+        store.save(SaveProject {
+            id: Some(project.id), name: project.name, folders: vec![second.clone()],
+        }).unwrap();
+        let task = store.task(project.id, Some(chat.id), None).unwrap();
+        assert_eq!(task.workspace, second);
+        assert_eq!(task.folders, vec![second]);
+        assert!(store.task(project.id, Some(chat.id), Some(&first)).is_err());
+    }
+
+    #[test]
     fn group_settings_and_archive_apply_to_all_members_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));
