@@ -5,7 +5,7 @@ use std::fmt::Write;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Catalog, Project, Result, Session, Store, invalid, missing};
+use super::{Catalog, ChatGroup, Project, Result, Store, invalid, missing};
 
 const BRIEF_LIMIT: usize = 8_000;
 const RESULT_LIMIT: usize = 8_000;
@@ -95,22 +95,27 @@ impl Snapshot {
             entries.sort_by_key(|entry| (!entry.required, std::cmp::Reverse(entry.id)));
             let mut omitted = 0;
             let mut remaining = entries.len();
+            let mut required_remaining = entries.iter().filter(|entry| entry.required).count();
             for entry in entries {
                 let heading = entry.heading();
-                let available = budget.saturating_sub(text.len() + heading.len() + 100);
-                if available < 100 {
+                let available = budget.saturating_sub(text.len() + heading.len() + 160);
+                let share = if entry.required {
+                    available / required_remaining.max(1)
+                } else { available / remaining.max(1) };
+                if share < 80 {
                     omitted += 1;
                 } else {
-                    // Prioritize dependency results; divide room among remaining entries.
-                    let share = if entry.required { available } else { available / remaining.max(1) };
-                    let body = clip(&entry.text, share.max(100).min(available));
+                    let mut body = String::new();
+                    quote(&mut body, &clip(&entry.text, share));
                     text.push_str(&heading);
-                    quote(&mut text, &body);
+                    text.push_str(&clip(&body, share));
+                    text.push('\n');
                 }
+                if entry.required { required_remaining -= 1; }
                 remaining -= 1;
             }
             if omitted != 0 || self.entries.iter().any(|entry| entry.text.is_empty()) {
-                text.push_str("\n_Некоторые шаги не включены в выдержку. Полный CONTEXT.md содержит все сохранённые результаты и состояния._\n");
+                text.push_str("\n_Полный CONTEXT.md содержит все сохранённые результаты и состояния._\n");
             }
             if text.len() > budget {
                 text = clip(&text, budget);
@@ -207,6 +212,22 @@ fn document(catalog: &Catalog, key: &GroupKey) -> Result<Document> {
             session.group.as_ref().is_some_and(|group| group.id == key.group_id)),
         markdown: snapshot.markdown(),
     })
+}
+
+pub(super) fn initialize_brief(
+    memory: &mut std::collections::HashMap<u64, GroupMemory>,
+    group: Option<&ChatGroup>, existing_group: Option<u64>, brief: Option<String>,
+) -> Result<()> {
+    let Some(brief) = brief else { return Ok(()); };
+    if existing_group.is_some() {
+        return Err(invalid("Use set_group_context to edit an existing group's brief."));
+    }
+    let group = group.ok_or_else(|| invalid("group_brief requires a new group"))?;
+    if brief.len() > BRIEF_LIMIT {
+        return Err(invalid("Общий контекст должен быть не длиннее 8000 байт."));
+    }
+    memory.insert(group.id, GroupMemory { brief, brief_revision: 1, ..GroupMemory::default() });
+    Ok(())
 }
 
 impl Store {
