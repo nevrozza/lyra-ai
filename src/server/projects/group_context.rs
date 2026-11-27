@@ -69,80 +69,143 @@ pub(in crate::server) struct Snapshot {
     entries: Vec<Entry>,
 }
 
+struct Section {
+    heading: String,
+    body: String,
+    start_line: usize,
+    end_line: usize,
+    required: bool,
+    has_result: bool,
+}
+
 impl Snapshot {
+    fn sections(&self) -> (String, Vec<Section>) {
+        let mut full = format!("# {}\n", one_line(&self.name));
+        let mut next_line = full.lines().count() + 1;
+        let mut sections = Vec::new();
+        let mut append = |heading: String, body: String, required: bool, has_result: bool| {
+            let start_line = next_line;
+            let block = format!("{heading}{body}\n");
+            next_line += block.lines().count();
+            full.push_str(&block);
+            sections.push(Section {
+                heading, body, start_line, end_line: next_line - 1, required, has_result,
+            });
+        };
+        append(
+            "\n## Общая цель и ограничения\n\n".into(),
+            if self.brief.trim().is_empty() { "_Пока не задана._".into() } else { self.brief.clone() },
+            true, !self.brief.trim().is_empty(),
+        );
+        append("\n## Результаты и состояния чатов\n".into(), String::new(), false, false);
+        for entry in &self.entries {
+            let mut body = String::new();
+            if entry.text.is_empty() {
+                body.push_str("_Нет сохранённого результата._");
+            } else {
+                quote(&mut body, &entry.text);
+            }
+            append(entry.heading(), body, entry.required, !entry.text.is_empty());
+        }
+        (full, sections)
+    }
+
     pub(in crate::server) fn markdown(&self) -> String {
-        self.render(None)
+        self.sections().0
     }
 
-    // This is deliberately a byte budget, not a claimed tokenizer estimate.
-    // The full Markdown is available to Work agents through the normal read tool.
+    // The budget is bytes, not a tokenizer estimate. Every displayed fragment
+    // identifies its source range in the exact Markdown snapshot.
     pub(in crate::server) fn excerpt(&self, context_tokens: u32) -> String {
-        self.render(Some((context_tokens as usize / 2).clamp(512, 12_000)))
-    }
+        let budget = (context_tokens as usize / 2).clamp(512, 12_000);
+        let (_, mut sections) = self.sections();
+        let brief = sections.remove(0);
+        sections.remove(0); // structural heading, not a separate handoff
+        // Dependencies first; then completed answers, then status-only entries.
+        // Keep newer non-prerequisite answers ahead of older ones.
+        sections.reverse();
+        sections.sort_by_key(|section| (!section.required, !section.has_result));
+        let mut text = format!("# {}\nExcerpt from CONTEXT.md; not an AI summary.\n", clip(&one_line(&self.name), 120));
+        const FOOTER_RESERVE: usize = 160;
+        let mut omitted = 0;
+        let mut shortened = 0;
+        let mut skipped_ranges = Vec::new();
 
-    fn render(&self, budget: Option<usize>) -> String {
-        let mut text = format!("# {}\n", one_line(&self.name));
-        if let Some(budget) = budget {
-            let brief_limit = if self.entries.iter().any(|entry| !entry.text.is_empty()) {
-                budget / 3
-            } else { budget.saturating_sub(text.len() + 100) };
-            if !self.brief.trim().is_empty() {
-                text.push_str("\n## Общая цель и ограничения\n");
-                text.push_str(&clip(&self.brief, brief_limit));
+        // Do not let a long brief consume all of the dependency budget.
+        let brief_budget = if sections.is_empty() {
+            budget.saturating_sub(text.len() + FOOTER_RESERVE)
+        } else {
+            budget / 3
+        };
+        if !append_excerpt(&mut text, &brief, brief_budget, &mut shortened) {
+            omitted += 1;
+            skipped_ranges.push((brief.start_line, brief.end_line));
+        }
+        let mut remaining = sections.len();
+        let mut required_remaining = sections.iter().filter(|section| section.required).count();
+        for section in sections {
+            let available = budget.saturating_sub(text.len() + FOOTER_RESERVE);
+            let share = if section.required {
+                available / required_remaining.max(1)
+            } else {
+                available / remaining.max(1)
+            };
+            // Small shares may omit an entire result. Never silently cut off its
+            // heading or provenance marker to make the budget fit.
+            if !append_excerpt(&mut text, &section, share, &mut shortened) {
+                omitted += 1;
+                skipped_ranges.push((section.start_line, section.end_line));
+            }
+            if section.required { required_remaining -= 1; }
+            remaining -= 1;
+        }
+
+        // Give the agent exact locations for omitted sections when room permits.
+        // A count remains visible even if there are too many ranges to list.
+        let footer = format!("\nEXCERPT COVERAGE: {shortened} shortened, {omitted} omitted sections. Read CONTEXT.md for missing details if needed.\n");
+        if !skipped_ranges.is_empty() {
+            let mut index = String::from("\nOmitted source lines:");
+            for (start, end) in skipped_ranges {
+                let range = format!(" {start}-{end};");
+                if text.len() + index.len() + range.len() + footer.len() + 1 > budget { break; }
+                index.push_str(&range);
+            }
+            if index != "\nOmitted source lines:" {
+                text.push_str(&index);
                 text.push('\n');
             }
-            let mut entries = self.entries.iter().filter(|entry| !entry.text.is_empty()).collect::<Vec<_>>();
-            entries.sort_by_key(|entry| (!entry.required, std::cmp::Reverse(entry.id)));
-            let mut omitted = 0;
-            let mut remaining = entries.len();
-            let mut required_remaining = entries.iter().filter(|entry| entry.required).count();
-            for entry in entries {
-                let heading = entry.heading();
-                let available = budget.saturating_sub(text.len() + heading.len() + 160);
-                let share = if entry.required {
-                    available / required_remaining.max(1)
-                } else { available / remaining.max(1) };
-                if share < 80 {
-                    omitted += 1;
-                } else {
-                    let mut body = String::new();
-                    quote(&mut body, &clip(&entry.text, share));
-                    text.push_str(&heading);
-                    text.push_str(&clip(&body, share));
-                    text.push('\n');
-                }
-                if entry.required { required_remaining -= 1; }
-                remaining -= 1;
-            }
-            if omitted != 0 || self.entries.iter().any(|entry| entry.text.is_empty()) {
-                text.push_str("\n_Полный CONTEXT.md содержит все сохранённые результаты и состояния._\n");
-            }
-            if text.len() > budget {
-                text = clip(&text, budget);
-            }
-        } else {
-            text.push_str("\n## Общая цель и ограничения\n\n");
-            text.push_str(if self.brief.trim().is_empty() { "_Пока не задана._" } else { &self.brief });
-            text.push_str("\n\n## Результаты и состояния чатов\n");
-            if self.entries.is_empty() { text.push_str("\n_Пока нет результатов._\n"); }
-            for entry in &self.entries {
-                text.push_str(&entry.heading());
-                if entry.text.is_empty() {
-                    text.push_str("\n_Нет сохранённого результата._\n");
-                } else {
-                    quote(&mut text, &entry.text);
-                }
-            }
         }
+        text.push_str(&footer);
+        debug_assert!(text.len() <= budget);
         text
     }
+}
+
+fn append_excerpt(out: &mut String, section: &Section, budget: usize, shortened: &mut usize) -> bool {
+    let source = format!("Source: CONTEXT.md lines {}-{}.\n", section.start_line, section.end_line);
+    let overhead = section.heading.len() + source.len() + 1;
+    if overhead + section.body.len() <= budget {
+        out.push_str(&section.heading);
+        out.push_str(&source);
+        out.push_str(&section.body);
+        out.push('\n');
+        return true;
+    }
+    const MORE: &str = "\n[EXCERPT SHORTENED: more text in the source range above.]\n";
+    if budget < overhead + MORE.len() + 16 { return false; }
+    out.push_str(&section.heading);
+    out.push_str(&source);
+    out.push_str(&clip(&section.body, budget - overhead - MORE.len()));
+    out.push_str(MORE);
+    *shortened += 1;
+    true
 }
 
 impl Entry {
     fn heading(&self) -> String {
         format!("\n### #{} — {} [{}{}{}]\n\n", self.id, one_line(&self.name), self.status,
             if self.required { "; prerequisite" } else { "" },
-            if self.truncated { "; partial" } else { "" })
+            if self.truncated { "; saved result incomplete" } else { "" })
     }
 }
 
@@ -187,7 +250,7 @@ fn collect(project: &Project, group_id: Option<u64>, memory: Option<&GroupMemory
         let (status, mut text, mut truncated) = if let Some(job) = &session.job {
             let (status, result) = job.handoff();
             (status, result.map(|result| clip(&result.text, RESULT_LIMIT)).unwrap_or_default(),
-                result.is_some_and(|result| result.truncated))
+                result.is_some_and(|result| result.truncated || result.text.len() > RESULT_LIMIT))
         } else { ("chat", String::new(), false) };
         let status = if let Some(result) = direct {
             if !text.is_empty() { text.push_str("\n\nLatest direct chat answer:\n"); }
@@ -289,7 +352,7 @@ impl Store {
             let Some(group) = &project.session(session_id)?.group else { return Ok(false); };
             let direct = &mut catalog.group_memory.entry(group.id).or_default().direct;
             if direct.get(&session_id).is_some_and(|result| result.timestamp > timestamp) { return Ok(false); }
-            direct.insert(session_id, DirectResult { text: clip(text, RESULT_LIMIT), truncated, timestamp });
+            direct.insert(session_id, DirectResult { text: clip(text, RESULT_LIMIT), truncated: truncated || text.len() > RESULT_LIMIT, timestamp });
             Ok(true)
         })
     }
