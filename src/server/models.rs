@@ -163,7 +163,7 @@ async fn context_estimate(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let model = model_name(&request.model).map_err(|_| StatusCode::BAD_REQUEST)?;
     let source = model.clone();
-    let estimate = tokio::task::spawn_blocking(move || context::estimate(&source))
+    let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
         .await.ok().flatten().unwrap_or_default();
     let metrics = app.metrics.lock().await.sample().await;
     let auto = mcp::auto_context_estimate(&metrics, &model, &estimate, 1, 1, !app.task.borrow().busy());
@@ -412,7 +412,7 @@ pub(super) fn execute_model_action(
         let result = tokio::task::spawn_blocking(move || {
             let tokens = if action.uses_context() {
                 model_context(&store, &model)?.or_else(|| {
-                    let estimate = context::estimate(&model)?;
+                    let estimate = context::estimate_auto(&model)?;
                     mcp::auto_context_estimate(metrics.as_ref()?, &model, &estimate, 1, 1, true)
                 })
             } else {
