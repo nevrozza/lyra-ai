@@ -10,7 +10,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    App, Message, MessageOrigin, Project, Result, Session, SessionKey, Store, checked_name,
+    App, ChatGroup, Message, MessageOrigin, Project, Result, Session, SessionKey, Store, checked_name, choose_group,
     invalid, missing, work, write_scope,
 };
 use crate::{
@@ -92,6 +92,8 @@ pub(in crate::server) struct JobResult {
 #[serde(deny_unknown_fields)]
 pub(in crate::server) struct Enqueue {
     project_id: u64,
+    group_id: Option<u64>,
+    group_name: Option<String>,
     batch_id: Option<String>,
     tasks: Vec<NewJob>,
 }
@@ -152,6 +154,7 @@ pub(in crate::server) struct Retry {
 #[serde(deny_unknown_fields)]
 pub(in crate::server) struct Query {
     project_id: u64,
+    group_id: Option<u64>,
     task_ids: Option<Vec<u64>>,
     #[serde(default)]
     wait_seconds: u64,
@@ -163,9 +166,59 @@ pub(in crate::server) struct TaskView {
     project_session_id: u64,
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<ChatGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context_notice: Option<ContextNotice>,
     #[serde(flatten)]
     job: Job,
+}
+
+impl Project {
+    pub(super) fn restore_legacy_groups(&mut self) {
+        let mut batches: HashMap<(String, String), (usize, ChatGroup)> = HashMap::new();
+        for session in &self.sessions {
+            if let Some(job) = &session.job
+                && let Some(batch) = &job.batch_id
+                && session.group.is_none()
+            {
+                let entry = batches.entry((job.origin.as_str().into(), batch.clone()))
+                    .or_insert_with(|| (0, ChatGroup { id: session.id, name: session.name.clone() }));
+                entry.0 += 1;
+            }
+        }
+        for session in &mut self.sessions {
+            if session.group.is_some() { continue; }
+            let Some(job) = &session.job else { continue; };
+            let root = job.workflow.as_ref().map(|flow| flow.root_id());
+            let batch = job.batch_id.as_ref().and_then(|id| batches.get(&(job.origin.as_str().to_owned(), id.clone())));
+            if let Some((count, group)) = batch
+                && (*count > 1 || root.is_some())
+            {
+                session.group = Some(group.clone());
+            } else if root == Some(session.id) {
+                session.group = Some(ChatGroup { id: session.id, name: session.name.clone() });
+            }
+        }
+        let groups: HashMap<_, _> = self.sessions.iter().filter_map(|session| {
+            Some((session.id, session.group.clone()?))
+        }).collect();
+        let mut continuations = HashMap::new();
+        for session in &mut self.sessions {
+            if let Some(job) = &session.job {
+                if session.group.is_none() {
+                    session.group = job.workflow.as_ref().and_then(|flow| groups.get(&flow.root_id())).cloned();
+                }
+                if let (Some(id), Some(group)) = (job.chat_session_id, &session.group) {
+                    continuations.insert(id, group.clone());
+                }
+            }
+        }
+        for session in &mut self.sessions {
+            if session.group.is_none() {
+                session.group = continuations.remove(&session.id);
+            }
+        }
+    }
 }
 
 impl Job {
@@ -238,6 +291,7 @@ impl TaskView {
             project_id,
             project_session_id: session.id,
             name: session.name.clone(),
+            group: session.group.clone(),
             context_notice: None,
             job: session.job.clone()?,
         })
@@ -720,7 +774,8 @@ impl Store {
                 job.chat_session_id = Some(catalog.next_id);
                 Session {
                     id: catalog.next_id,
-                    name: format!("Продолжение задачи #{}", session.id),
+                    group: session.group.clone(),
+                    name: format!("Продолжение: {}", session.name),
                     folder: session.folder.clone(),
                     folders: session.folders.clone(),
                     archived: false,
@@ -952,6 +1007,7 @@ impl Store {
             job.result = Some(result);
             let folder = session.folder.clone();
             let folders = session.folders.clone();
+            let group = session.group.clone();
             let mut ids = Vec::with_capacity(next.len());
             for mut step in next {
                 catalog.next_id += 1;
@@ -960,6 +1016,7 @@ impl Store {
                 project.sessions.push(Session {
                     id: catalog.next_id,
                     name: step.name,
+                    group: group.clone(),
                     folder: folder.clone(),
                     folders: folders.clone(),
                     archived: false,
@@ -999,6 +1056,15 @@ impl Store {
                     return Ok(existing);
                 }
             }
+            // A multi-step batch or automatic workflow is one group by default.
+            let group_name = if input.group_id.is_none() && input.group_name.is_none()
+                && (input.tasks.len() > 1 || input.tasks.iter().any(|task| task.follow_up.is_some()))
+            {
+                input.tasks.first().map(|task| task.name.clone())
+            } else {
+                input.group_name
+            };
+            let group = choose_group(project, &mut catalog.next_id, input.group_id, group_name)?;
             let mut tasks = Vec::with_capacity(input.tasks.len());
             let mut keys = HashMap::new();
             for new in input.tasks {
@@ -1050,6 +1116,7 @@ impl Store {
                     .map(|config| workflow::Workflow::new(catalog.next_id, config));
                 let session = Session {
                     id: catalog.next_id,
+                    group: group.clone(),
                     name,
                     folder: folders[0].clone(),
                     folders,
@@ -1096,9 +1163,15 @@ impl Store {
             .iter()
             .find(|project| project.id == query.project_id)
             .ok_or_else(|| missing("Project"))?;
+        if let Some(id) = query.group_id
+            && !project.sessions.iter().any(|session| session.group.as_ref().is_some_and(|group| group.id == id))
+        {
+            return Err(missing("Group"));
+        }
         let mut tasks = project
             .sessions
             .iter()
+            .filter(|session| query.group_id.is_none_or(|id| session.group.as_ref().is_some_and(|group| group.id == id)))
             .filter(|session| {
                 query.task_ids.as_ref().is_none_or(|ids| {
                     ids.contains(&session.id)
@@ -1261,6 +1334,32 @@ impl Project {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn groups_can_span_batches_and_are_project_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(),
+            folders: vec![dir.path().to_path_buf()], search_skill: None,
+        }).unwrap();
+        let input = |group: serde_json::Value| {
+            let mut value = json!({
+                "project_id": project.id,
+                "tasks": [{"name":"Step","model":"local","prompt":"Do it"}]
+            });
+            value.as_object_mut().unwrap().extend(group.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        let first = store.enqueue(input(json!({"group_name":"Feature"})), MessageOrigin::Lyra).unwrap();
+        let id = first[0].group.as_ref().unwrap().id;
+        let second = store.enqueue(input(json!({"group_id":id})), MessageOrigin::Lyra).unwrap();
+        assert_eq!(second[0].group.as_ref().unwrap().id, id);
+        assert_eq!(second[0].group.as_ref().unwrap().name, "Feature");
+        assert!(store.enqueue(input(json!({"group_id":99999})), MessageOrigin::Lyra).is_err());
+        let query = serde_json::from_value(json!({"project_id":project.id,"group_id":id})).unwrap();
+        assert_eq!(store.query_tasks(&query).unwrap().len(), 2);
+    }
 
     #[test]
     fn fresh_retry_keeps_the_task_identity_scope_and_waiting_dependents() {
