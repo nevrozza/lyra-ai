@@ -34,6 +34,10 @@ const BUILT_IN_SKILLS: &[(&str, &str)] = &[
     ("lyra-review", REVIEW),
 ];
 
+fn is_builtin(name: &str) -> bool {
+    BUILT_IN_SKILLS.iter().any(|(builtin, _)| *builtin == name)
+}
+
 pub(super) fn is_role_skill(name: &str) -> bool {
     matches!(name, "lyra-implement" | "lyra-fix" | "lyra-review")
 }
@@ -52,6 +56,8 @@ pub(super) struct Skill {
     enabled: bool,
     #[serde(default)]
     role_template: bool,
+    #[serde(default)]
+    builtin: bool,
 }
 
 fn enabled_by_default() -> bool { true }
@@ -177,9 +183,13 @@ impl Store {
     pub(super) fn install_defaults(&self) -> io::Result<()> {
         let _guard = self.lock.lock().expect("skill store lock");
         fs::create_dir_all(&self.directory)?;
-        let state = self.state()?;
+        let mut state = self.state()?;
+        // Restore built-ins removed by an earlier version, but respect the user's
+        // intent not to use them by restoring them in the disabled state.
+        let removed = std::mem::take(&mut state.removed);
+        let migrated = !removed.is_empty();
+        state.disabled.extend(removed.into_iter().filter(|name| is_builtin(name)));
         for &(name, manifest) in BUILT_IN_SKILLS {
-            if state.removed.contains(name) { continue; }
             let directory = self.directory.join(name);
             match fs::create_dir(&directory) {
                 Ok(()) => {}
@@ -198,6 +208,7 @@ impl Store {
             io::Write::write_all(&mut file, manifest.as_bytes())?;
             file.persist(directory.join(MANIFEST))?;
         }
+        if migrated { self.save_state(&state)?; }
         Ok(())
     }
 
@@ -294,6 +305,7 @@ impl Store {
         }
         skill.enabled = true;
         skill.role_template = is_role_skill(&skill.name);
+        skill.builtin = is_builtin(&skill.name);
         Ok(skill)
     }
 
@@ -344,17 +356,17 @@ impl Store {
         if changed { self.save_state(&state).map_err(storage_error)?; }
         skill.enabled = enabled;
         skill.role_template = is_role_skill(name);
+        skill.builtin = is_builtin(name);
         Ok(skill)
     }
 
     fn remove(&self, name: &str) -> Result<(), HttpError> {
         let _guard = self.lock.lock().expect("skill store lock");
+        if is_builtin(name) {
+            return Err((StatusCode::FORBIDDEN, "Встроенный скилл нельзя удалить. Его можно отключить.".into()));
+        }
         let (target, _) = self.installed_skill(name)?;
         let mut state = self.state().map_err(storage_error)?;
-        // Keep a tombstone for bundled skills, otherwise startup reinstalls them.
-        if BUILT_IN_SKILLS.iter().any(|(builtin, _)| *builtin == name) {
-            state.removed.insert(name.into());
-        }
         state.disabled.remove(name);
         let trash = staging(&self.directory)?;
         let package = trash.path().join("package");
@@ -402,6 +414,7 @@ impl Store {
             }
             skill.enabled = !state.disabled.contains(name);
             skill.role_template = is_role_skill(name);
+            skill.builtin = is_builtin(name);
             skills.push(skill);
         }
         skills.sort_unstable_by(|left, right| left.name.cmp(&right.name));
@@ -516,6 +529,7 @@ fn manifest(directory: &Path) -> io::Result<Skill> {
     // Catalog metadata comes from the store, never from imported frontmatter.
     skill.enabled = true;
     skill.role_template = is_role_skill(&skill.name);
+    skill.builtin = is_builtin(&skill.name);
     Ok(skill)
 }
 
@@ -681,37 +695,66 @@ mod tests {
     }
 
     #[test]
-    fn enablement_and_removal_survive_default_installation_and_restart() {
+    fn builtins_are_protected_but_can_be_disabled_and_reenabled() {
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("installed");
         let store = Store::new(directory.clone());
         store.install_defaults().unwrap();
-        store.set_enabled("ast-index", false).unwrap();
-        assert!(store.paths(Some(&["ast-index".into()])).unwrap_err().contains("disabled"));
-        assert!(store.paths(None).unwrap().iter().all(|path| !path.ends_with("ast-index/SKILL.md")));
+        for &(name, _) in BUILT_IN_SKILLS {
+            assert!(store.list().unwrap().iter().any(|skill| skill.name == name && skill.builtin));
+            assert!(matches!(store.remove(name), Err((StatusCode::FORBIDDEN, _))));
+            assert!(directory.join(name).join(MANIFEST).is_file());
+            store.set_enabled(name, false).unwrap();
+            assert!(!store.enabled(name).unwrap());
+            assert!(store.paths(Some(&[name.into()])).unwrap_err().contains("disabled"));
+        }
         let store = Store::new(directory.clone());
         store.install_defaults().unwrap();
-        assert!(!store.list().unwrap().iter().find(|skill| skill.name == "ast-index").unwrap().enabled);
-        store.set_enabled("ast-index", true).unwrap();
-        assert_eq!(store.paths(Some(&["ast-index".into()])).unwrap().len(), 1);
-        store.remove("ast-index").unwrap();
-        assert!(!directory.join("ast-index").exists());
+        assert!(store.paths(None).unwrap().is_empty());
+        for &(name, _) in BUILT_IN_SKILLS {
+            assert!(!store.enabled(name).unwrap());
+            store.set_enabled(name, true).unwrap();
+            assert_eq!(store.paths(Some(&[name.into()])).unwrap().len(), 1);
+        }
+        assert!(store.remove("../outside").is_err());
+    }
+
+    #[test]
+    fn imported_skills_can_be_removed_and_reinstalled() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("installed");
+        let store = Store::new(directory.clone());
+        store.install_defaults().unwrap();
+        let upload = || vec![UploadedFile {
+            path: MANIFEST.into(),
+            data: STANDARD.encode("---\nname: custom\ndescription: Test\n---\n"),
+        }];
+        let skill = store.upload(upload()).unwrap();
+        assert!(!skill.builtin);
+        store.set_enabled("custom", false).unwrap();
+        store.remove("custom").unwrap();
+        assert!(!directory.join("custom").exists());
         let store = Store::new(directory);
         store.install_defaults().unwrap();
-        assert!(!store.list().unwrap().iter().any(|skill| skill.name == "ast-index"));
-        assert!(store.paths(Some(&["ast-index".into()])).is_err());
-        assert!(store.remove("../outside").is_err());
-        store.set_enabled("lyra-review", false).unwrap();
-        assert!(!store.enabled("lyra-review").unwrap());
-        store.remove("lyra-review").unwrap();
-        assert!(!store.enabled("lyra-review").unwrap());
-        let restored = store.upload(vec![UploadedFile {
-            path: MANIFEST.into(), data: STANDARD.encode(BUILT_IN_SKILLS[0].1),
-        }]).unwrap();
-        assert!(restored.enabled);
+        assert!(!store.list().unwrap().iter().any(|skill| skill.name == "custom"));
+        assert!(store.upload(upload()).unwrap().enabled);
+    }
+
+    #[test]
+    fn previously_removed_builtins_are_restored_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("installed");
+        let store = Store::new(directory.clone());
         store.install_defaults().unwrap();
-        assert_eq!(store.paths(Some(&["ast-index".into()])).unwrap().len(), 1);
-        store.remove("ast-index").unwrap();
+        fs::remove_dir_all(directory.join("ast-index")).unwrap();
+        store.save_state(&SkillState {
+            removed: BTreeSet::from(["ast-index".into()]),
+            ..SkillState::default()
+        }).unwrap();
+        store.install_defaults().unwrap();
+        assert!(directory.join("ast-index").join(MANIFEST).is_file());
+        assert!(!store.enabled("ast-index").unwrap());
+        assert!(store.state().unwrap().removed.is_empty());
     }
 
     #[test]
