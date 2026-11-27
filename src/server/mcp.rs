@@ -201,7 +201,7 @@ fn tools() -> Value {
         "write_paths": write_paths,
         "role": worker_role,
         "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder."},
-        "skills": {"type": "array", "items": {"type": "string"}},
+        "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional enabled skill names. Omit for enabled non-role skills; disabled or removed names are rejected."},
         "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
         "follow_up": follow_up,
         "max_output_tokens": pi_output_limit
@@ -375,7 +375,7 @@ fn tools() -> Value {
                 "mode": {"enum": ["chat", "work"], "description": "Expected saved mode for an existing chat. For runs without a saved chat, selects the mode and defaults to Work."},
                 "prompt": {"type": "string", "minLength": 1, "description": "Task prompt."},
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
-                "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to the given installed Lyra skill names. Omit to make all installed Lyra skills available, or pass [] to run without skills."},
+                "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to enabled Lyra skill names. Omit for enabled non-role skills, or pass [] to run without optional skills. Disabled or removed names are rejected."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
                 "role": worker_role,
                 "write_paths": write_paths,
@@ -917,15 +917,6 @@ async fn run_pi(
     })
     .await
     .map_err(|error| error.to_string())??;
-    let skill_store = app.clone();
-    let selected = if text_only {
-        Some(Vec::new())
-    } else {
-        request.skills
-    };
-    let skills = tokio::task::spawn_blocking(move || skill_store.skills.paths(selected.as_deref()))
-        .await
-        .map_err(|_| "Could not read installed Pi skills")??;
     let scope = if project.is_some() {
         DelegationScope::Project {
             session_id,
@@ -937,6 +928,20 @@ async fn run_pi(
     let delegation = match reserved {
         Some(id) => id,
         None => begin_delegation(&app, &model, scope)?,
+    };
+    let skill_store = app.clone();
+    let selected = if text_only { Some(Vec::new()) } else { request.skills };
+    let skills = match tokio::task::spawn_blocking(move || skill_store.skills.paths(selected.as_deref())).await {
+        Ok(Ok(skills)) => skills,
+        result => {
+            if reserved.is_none() {
+                finish_delegation(&app, delegation, false, false).await;
+            }
+            return Err(match result {
+                Ok(Err(error)) => error,
+                _ => "Could not read installed Pi skills".into(),
+            });
+        }
     };
     let config = app
         .pi_agent_dir
@@ -1226,10 +1231,15 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
     let metrics = app.metrics.lock().await.sample().await;
     let mut output = format!("busy={}", app.task.borrow().busy());
     if request.model.is_none() {
+        let store = app.clone();
+        let skills = tokio::task::spawn_blocking(move || store.skills.list()).await
+            .map_err(|_| "Could not read skills")?
+            .map_err(|error| error.to_string())?;
         write!(
             output,
             "\n{}",
             json!({
+                "skills": skills,
                 "model_intelligence": app.project_models.get().await,
                 "model_selection_policy": "Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability.",
                 "parallel_project_tasks": AI_SETTINGS.parallel_project_tasks,
