@@ -149,10 +149,19 @@ Use `external: true` when a user-authorized external tool must perform a step, s
 
 ## Follow the queue
 
-Call `get_project_tasks` with the returned task IDs and a bounded `wait_seconds`. It includes automatic follow-ups attached to those task IDs. Continue through actual completion and inspect outcomes. Use separate short checks while an external step needs action. Read the specific blocked or failed step and follow its dependency chain before reporting an issue.
+Prefer `enqueue_and_wait` with `batch` containing the normal enqueue payload and a stable `batch_id`. Use `enqueue_project_tasks` only when independent useful work can overlap or you must submit without waiting; then call `await_project_tasks` with the returned task IDs. Do not use `get_project_tasks` in a polling loop.
+
+The server waits asynchronously for queue changes, follows automatic review/fix rounds and unresolved prerequisites, and returns `reason`, `task_ids`, compact `tasks`, and any `attention` entries. Use the returned IDs as the task scope. On subsequent awaits, pass `known_completed_ids` for completed handoffs you have already read; failures and pauses are never suppressed. The default server wait is 3300 seconds; configure Codex's MCP timeout to 3600 seconds (see the repository README). Do not shorten waits merely to watch progress; the dashboard shows it.
+
+- `completed`: all requested tasks and automatic follow-ups completed; inspect the results and approve the next decision yourself.
+- `attention_required`: handle the listed paused, failed, cancelled or interrupted task, or run the ready external step with its returned prompt and complete it using `complete_project_step`. Do not await the unchanged blocked scope repeatedly. Independent tasks may continue; await their IDs separately if needed.
+- `timeout`: work may still be running; await the same IDs again, omitting already-read completed results. If the MCP transport lost the combined response before IDs arrived, repeat exactly the same batch ID and payload, or recover IDs with a one-off inspection. Never create a second batch as a timeout recovery.
+- `stopped`: the Lyra service is stopping; do not assume success or restart tasks automatically.
+
+User command approvals still happen in the dashboard. Keep acceptance checkpoints between batches: an implementation must not be submitted before Codex approves its unsettled design. Read a specific blocked or failed step and its evidence before deciding recovery.
 
 - `queued` or `running` means the task is pending. Respect tool and shell approvals.
-- `context_full` means the step can be recovered and dependent work is waiting. Use the [context recovery procedure](models-and-context.md#recover-an-overflow).
+- `context_full` or `output_limit` means the step can be recovered and dependent work is waiting. Use the [context recovery procedure](models-and-context.md#recover-an-overflow).
 - Use `cancel_project_task` for an authorized cancellation of a queued or context-paused task. A running task can be stopped from its dashboard chat.
 - Validate completed results against the goal. Record verification, changed files, and any remaining blockers in the user's language.
 
@@ -177,7 +186,7 @@ Use the existing queue, group context and brief revision APIs; do not invent an 
 
 For an unsettled design/architecture or other consequential decision:
 1. Create the group and its shared user requirements. Enqueue only the discovery/design step(s). Require a concrete, inspectable text proposal and evidence, not an implementation.
-2. Wait for the returned task IDs. Read the actual saved handoff via get_group_context/get_project_tasks or read_project_session when necessary. A finish_task call/Completed status means the worker claims to have finished; it does not approve the proposal.
+2. Use enqueue_and_wait or await_project_tasks on the returned IDs. Inspect the returned handoff; use get_group_context or read_project_session only when necessary for missing context/evidence. A finish_task call/Completed status means the worker claims to have finished; it does not approve the proposal.
 3. Personally evaluate whether it meets the original goal, has a coherent idea and is feasible. Accept it, make minor textual corrections yourself, or delegate a substantial revision with targeted feedback. Stay within the user's permission; do not edit implementation code when workers are meant to execute it. No extra model run for a small decision you can settle yourself.
 4. Persist the approved contract in the shared group brief using its current revision, preserving requirements and stating which earlier candidate it supersedes. Only after that create the consuming implementation tasks, with the approved contract and precise execution plans; use after for the actual prerequisite IDs. If a prior text proposal is inadequate, do not schedule its implementation.
 5. Read implementation handoffs and independently verify the assembled result. Use the local review/fix loop for technical checks and settled corrections, or manually coordinate fixes when their proposed approach needs your approval. Personally assess the final result against the user's goal, not merely the review JSON.
