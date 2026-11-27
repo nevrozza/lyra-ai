@@ -12,6 +12,12 @@ function taskStatus(job) {
   return taskStatuses[job.status] ?? '';
 }
 
+// Sort top-level entries by creation ID, but preserve the numbered order of
+// steps inside each group. A new step does not move its entire group.
+export function compareTreeChats(a, b) {
+  return (b.group?.id ?? b.id) - (a.group?.id ?? a.id) || a.id - b.id;
+}
+
 export function createProjects({ onSelection = () => {} } = {}) {
   const tree = get('project-tree');
   const projectDialog = get('project-dialog');
@@ -80,9 +86,12 @@ export function createProjects({ onSelection = () => {} } = {}) {
     return Object.entries(run?.delegations ?? {}).find(([, task]) =>
       task.project_session_id === id || (owner != null && task.project_session_id === owner));
   };
-  const visibleChats = project => project.sessions.filter(chat => project.archived || chat.archived === archiveView);
+  const visibleChats = project => project.sessions
+    .filter(chat => project.archived || chat.archived === archiveView)
+    .sort(compareTreeChats);
   const pendingTask = chat => ['queued', 'running', 'context_full', 'output_limit'].includes(chat?.job?.status);
   const collapsedGroups = new Set();
+  const collapsedProjects = new Set();
   const groupMembers = (project, id) => project.sessions.filter(chat => chat.group?.id === id).sort((a, b) => a.id - b.id);
   const chatLabel = (chat, project = selectedProject()) => chat.group && project
     ? `${groupMembers(project, chat.group.id).findIndex(member => member.id === chat.id) + 1}. ${chat.name}`
@@ -161,10 +170,13 @@ export function createProjects({ onSelection = () => {} } = {}) {
         if (child != null) activeChats.add(child);
       }
     }
-    for (const icon of tree.querySelectorAll('[data-chat-progress], [data-group-progress]')) {
+    for (const icon of tree.querySelectorAll('[data-chat-progress], [data-group-progress], [data-project-progress]')) {
       const p = catalog?.projects.find(candidate => candidate.id === Number(icon.dataset.projectId));
       if (!p) continue;
-      if (icon.dataset.groupProgress != null) {
+      if (icon.dataset.projectProgress != null) {
+        const busy = visibleChats(p).some(chat => chatState(chat, p, activeChats) === 'busy');
+        setTreeState(icon, collapsedProjects.has(p.id) && busy ? 'busy' : '');
+      } else if (icon.dataset.groupProgress != null) {
         const members = groupMembers(p, Number(icon.dataset.groupProgress));
         const states = members.map(chat => chatState(chat, p, activeChats));
         const closed = collapsedGroups.has(`${p.id}/group/${icon.dataset.groupProgress}`);
@@ -252,9 +264,38 @@ export function createProjects({ onSelection = () => {} } = {}) {
       const item = element('li', '');
       const heading = treeButton(project.name, project.id, undefined);
       heading.classList.add('project-tree-heading');
-      item.append(entryRow(heading, project));
-      const chats = visibleChats(project).sort((a, b) => a.id - b.id);
+      const icon = stateIcon();
+      icon.dataset.projectProgress = project.id;
+      icon.dataset.projectId = project.id;
+      heading.append(icon);
+      const row = entryRow(heading, project);
+      item.append(row);
+      const chats = visibleChats(project);
       const list = element('ul', '');
+      const toggle = element('button', '');
+      toggle.type = 'button';
+      toggle.className = 'project-collapse-toggle';
+      toggle.dataset.projectEntry = `${project.id}/collapse`;
+      const chevron = element('span', '');
+      chevron.setAttribute('aria-hidden', 'true');
+      toggle.append(chevron);
+      const applyProjectCollapsed = () => {
+        const closed = collapsedProjects.has(project.id);
+        list.hidden = closed;
+        toggle.hidden = !chats.length;
+        toggle.setAttribute('aria-expanded', String(!closed));
+        toggle.setAttribute('aria-label', `${closed ? 'Развернуть' : 'Свернуть'} проект: ${project.name}`);
+        toggle.title = toggle.getAttribute('aria-label');
+        chevron.textContent = closed ? '▸' : '▾';
+      };
+      toggle.onclick = () => {
+        if (collapsedProjects.has(project.id)) collapsedProjects.delete(project.id);
+        else collapsedProjects.add(project.id);
+        applyProjectCollapsed();
+        updateControls();
+      };
+      row.insertBefore(toggle, row.querySelector('.project-entry-more'));
+      applyProjectCollapsed();
       const rendered = new Set();
       for (const chat of chats) {
         if (!chat.group) {
@@ -531,6 +572,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     }
     button.onclick = () => {
       report();
+      if (session == null) collapsedProjects.delete(id);
       select({ project: id, chat: session });
     };
     return button;
@@ -538,7 +580,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
 
   function select(preferred) {
     const projects = (catalog?.projects ?? []).filter(project =>
-      archiveView ? project.archived || visibleChats(project).length : !project.archived);
+      archiveView ? project.archived || visibleChats(project).length : !project.archived)
+      .sort((a, b) => b.id - a.id);
     const previousChat = chatId;
     const project = projects.find(project => project.id === (preferred?.project ?? projectId)) ?? projects[0];
     const chats = project ? visibleChats(project) : [];
@@ -547,6 +590,10 @@ export function createProjects({ onSelection = () => {} } = {}) {
     chatId = chats.find(chat => chat.id === requested)?.id;
     onSelection({ projectId, chatId });
     const chat = selectedChat();
+    if (chat && preferred?.chat === chat.id) {
+      collapsedProjects.delete(projectId);
+      if (chat.group) collapsedGroups.delete(`${projectId}/group/${chat.group.id}`);
+    }
     if (chatId !== previousChat) {
       closeEntryMenu();
       history = [];
