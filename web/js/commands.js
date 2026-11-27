@@ -11,14 +11,14 @@ export function createCommands({ openChat }) {
   const panel = get('command-panel');
   const title = get('command-title');
   const error = get('command-error');
-  const mode = get('command-mode');
+  const modeButtons = [...get('command-mode').querySelectorAll('button')];
   const settingsError = get('command-settings-error');
   const buttons = [...get('command-actions').querySelectorAll('button')];
   const notifications = createNotifications();
   const chatHost = get('command-chat-host');
   const externalHost = get('command-external-host');
   const pendingLink = get('command-pending-link');
-  const settingsDialog = get('command-settings-dialog');
+  const settingsPopover = get('command-settings-popover');
   const terminalButton = get('command-settings-global');
   const modeLabel = get('command-mode-label');
   let selection;
@@ -60,12 +60,14 @@ export function createCommands({ openChat }) {
   }
 
   function updateMode() {
-    mode.disabled = !online || !fresh || !savedMode || saving;
-    if (!saving && savedMode) mode.value = savedMode;
     const known = online && fresh && savedMode;
+    for (const button of modeButtons) {
+      button.disabled = !known || saving;
+      button.setAttribute('aria-pressed', String(Boolean(known && button.dataset.mode === savedMode)));
+    }
     terminalButton.dataset.mode = known ? savedMode : '';
-    modeLabel.textContent = !known ? 'Терминал · нет данных' :
-      savedMode === 'allow_all' ? 'Команды разрешены' : 'Подтверждать команды';
+    modeLabel.textContent = !known ? 'Нет данных' :
+      savedMode === 'allow_all' ? 'Разрешать всегда' : 'Спрашивать всегда';
     terminalButton.title = 'Терминал — глобальные разрешения Lyra';
     terminalButton.setAttribute('aria-label', `Терминал: ${modeLabel.textContent}. Глобальные разрешения Lyra`);
   }
@@ -97,8 +99,12 @@ export function createCommands({ openChat }) {
     }
   }
 
-  mode.addEventListener('change', async () => {
-    if (!online || !fresh || saving || mode.value === savedMode) return;
+  async function changeMode(next) {
+    if (!online || !fresh || saving) return;
+    if (next === savedMode) {
+      settingsPopover.hidePopover();
+      return;
+    }
     saving = true;
     settingsError.hidden = true;
     updateMode();
@@ -106,11 +112,12 @@ export function createCommands({ openChat }) {
       const response = await fetch('/commands/mode', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mode.value),
+        body: JSON.stringify(next),
       });
       if (!response.ok) throw new Error();
-      savedMode = mode.value;
+      savedMode = next;
       await refresh();
+      if (fresh && settingsPopover.matches(':popover-open')) settingsPopover.hidePopover();
     } catch {
       settingsError.textContent = 'Не удалось сохранить режим команд.';
       settingsError.hidden = false;
@@ -118,7 +125,10 @@ export function createCommands({ openChat }) {
       saving = false;
       updateMode();
     }
-  });
+  }
+  for (const button of modeButtons) {
+    button.addEventListener('click', () => void changeMode(button.dataset.mode));
+  }
 
   for (const button of buttons) {
     button.addEventListener('click', async () => {
@@ -153,10 +163,30 @@ export function createCommands({ openChat }) {
   }
 
   pendingLink.addEventListener('click', () => void reveal());
+  function positionSettings() {
+    if (!settingsPopover.matches(':popover-open')) return;
+    const rect = terminalButton.getBoundingClientRect();
+    const width = settingsPopover.offsetWidth;
+    const height = settingsPopover.offsetHeight;
+    const top = rect.top >= height + 12 ? rect.top - height - 4 : rect.bottom + 4;
+    settingsPopover.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
+    settingsPopover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
+  }
   terminalButton.addEventListener('click', () => {
-    if (!settingsDialog.open) settingsDialog.showModal();
+    if (settingsPopover.matches(':popover-open')) {
+      settingsPopover.hidePopover();
+      return;
+    }
+    settingsPopover.showPopover({ source: terminalButton });
+    positionSettings();
+    (modeButtons.find(button => button.getAttribute('aria-pressed') === 'true' && !button.disabled)
+      ?? modeButtons.find(button => !button.disabled))?.focus({ preventScroll: true });
   });
-  get('close-command-settings').addEventListener('click', () => settingsDialog.close());
+  settingsPopover.addEventListener('toggle', () => {
+    terminalButton.setAttribute('aria-expanded', String(settingsPopover.matches(':popover-open')));
+  });
+  window.addEventListener('resize', positionSettings);
+  window.addEventListener('scroll', positionSettings, true);
   navigator.serviceWorker?.addEventListener('message', async event => {
     if (event.data !== 'show-command') return;
     await refresh();

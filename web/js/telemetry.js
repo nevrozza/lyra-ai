@@ -2,6 +2,15 @@ import { residentRamBytes } from './memory-budget.js';
 import { element, get, memoryAmount, memoryLabel, memoryPercent, whole } from './ui.js';
 
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const FRESH_FOR_MS = 30_000;
+
+export function metricsFreshness({ closed, failed, sampledAt, now }) {
+  if (closed) return ['stopped', 'Остановлено'];
+  if (failed) return ['offline', 'Нет связи'];
+  if (sampledAt == null) return ['waiting', 'Ожидаем данные'];
+  if (now - sampledAt >= FRESH_FOR_MS) return ['stale', 'Данные устарели'];
+  return ['fresh', 'Актуально'];
+}
 
 function meter(node, value) {
   node.hidden = value == null;
@@ -14,6 +23,9 @@ export function createTelemetry(session, { beginSample, onSample }) {
   const ollamaMemoryWarning = get('ollama-memory-warning');
   let polling = false;
   let metricsTimer;
+  let freshnessTimer;
+  let sampledAt;
+  let metricsFailed = false;
   let metricsRefreshPending = false;
   let ramTimer;
   let readingRam = false;
@@ -48,8 +60,23 @@ export function createTelemetry(session, { beginSample, onSample }) {
     return node;
   }
 
+  function renderFreshness() {
+    clearTimeout(freshnessTimer);
+    const now = Date.now();
+    const [state, label] = metricsFreshness({ closed: session.closed, failed: metricsFailed, sampledAt, now });
+    const node = get('sampled');
+    node.dataset.state = state;
+    if (node.textContent !== label) node.textContent = label;
+    node.title = sampledAt == null ? label : `Последнее обновление: ${clock.format(new Date(sampledAt))}`;
+    if (state === 'fresh' && !document.hidden) {
+      freshnessTimer = setTimeout(renderFreshness, Math.max(1, FRESH_FOR_MS - (now - sampledAt)));
+    }
+  }
+
   function renderMetrics(next) {
-    get('sampled').textContent = clock.format(new Date());
+    sampledAt = Date.now();
+    metricsFailed = false;
+    renderFreshness();
     get('cpu-value').textContent = next.cpu_percent == null ? '—' : `${whole.format(next.cpu_percent)}%`;
     renderRamTotal((ramDialog.open && detailedRam) || next.ram);
     get('gpus').replaceChildren(...next.gpus.map(gpuCard));
@@ -105,7 +132,8 @@ export function createTelemetry(session, { beginSample, onSample }) {
       }
     } catch {
       if (!session.closed && session.run?.metrics_revision === revision) {
-        get('sampled').textContent = 'Нет связи';
+        metricsFailed = true;
+        renderFreshness();
         renderOllamaMemory(null);
       }
     } finally {
@@ -174,6 +202,7 @@ export function createTelemetry(session, { beginSample, onSample }) {
   });
 
   function pause() {
+    clearTimeout(freshnessTimer);
     clearTimeout(metricsTimer);
     clearTimeout(ramTimer);
   }
@@ -182,6 +211,7 @@ export function createTelemetry(session, { beginSample, onSample }) {
     scheduleMetrics,
     pause,
     resume() {
+      renderFreshness();
       scheduleMetrics(0);
       scheduleRam(0);
     },
@@ -189,7 +219,9 @@ export function createTelemetry(session, { beginSample, onSample }) {
       if (ramDialog.open) ramDialog.close();
       pause();
       renderOllamaMemory(null);
-      get('sampled').textContent = 'Остановлено';
+      sampledAt = undefined;
+      metricsFailed = false;
+      renderFreshness();
     },
     updateControls() { ramExpand.disabled = session.closed; },
   };
