@@ -353,7 +353,8 @@ pub(crate) fn fit_window(
         base.saturating_add(compute) <= available
     };
     let maximum = maximum.min(u64::from(u32::MAX));
-    let minimum = maximum.min(1024);
+    // Avoid auto-selecting a tiny window that cannot hold an agent's system prompt.
+    let minimum = maximum.min(4096);
     if !fits(minimum) { return None; }
     // Monotone binary search, then align down to avoid creating a profile
     // for every tiny telemetry fluctuation.
@@ -442,7 +443,8 @@ mod tests {
         assert!(single > parallel);
         assert!(single > 32_768);
         assert!(fit(10*gib, 1, 1).unwrap() < single);
-        assert!(fit(12*gib, 1, 2).is_none());
+        assert!(fit(12*gib, 1, 2).is_none_or(|window| window < parallel));
+        assert!(fit(10*gib, 1, 2).is_none());
         assert_eq!(fit_window(12*gib, 5*gib, 65_536, 0, 8192, 1, 1), Some(8192));
         assert_eq!(fit_window(4*gib, 5*gib, 65_536, 0, 262_144, 1, 1), None);
     }
