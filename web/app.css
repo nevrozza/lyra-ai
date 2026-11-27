@@ -264,7 +264,8 @@ h2 { font-size: .96rem; font-weight: 650; }
 .memory-warning { grid-column: 1 / -1; padding: 8px 10px; border: 1px solid #725d38; border-radius: 6px; color: #f0cd91; background: #2a2319; font-size: .8rem; line-height: 1.45; }
 .model-benchmark { container: benchmark / inline-size; }
 .benchmark-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-#benchmark-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.benchmark-model-name { min-width: 0; font-size: clamp(1.25rem, 7cqi, 1.75rem); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
+.model-actions.benchmark-actions { border-top: 0; padding-top: 0; margin-top: 12px; }
 #model-description-form { display: grid; justify-items: start; gap: 6px; margin-top: 8px; }
 #model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
 #benchmark-summary { margin-top: 8px; }
@@ -424,7 +425,6 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
   .model-benchmark { padding: 0 19px 20px; border-top: 0; border-radius: 0 0 12px 12px; }
   .benchmark-heading { padding: 13px 0 10px; border-top: 1px solid var(--line); }
   .benchmark-heading h2 { font-size: .9rem; }
-  #benchmark-model { display: none; }
 }
 
 @media (max-width: 720px) {

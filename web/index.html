@@ -250,10 +250,10 @@
           <div id="benchmark-resizer" class="column-resizer" role="separator" aria-orientation="vertical" aria-labelledby="benchmark-title" aria-controls="benchmark-panel" title="Потяните, чтобы изменить ширину" tabindex="0"></div>
           <header class="benchmark-heading">
             <h2 id="benchmark-title">Бенчмарк</h2>
-            <span id="benchmark-model" class="service"></span>
           </header>
           <div class="benchmark-body">
-            <div class="model-actions">
+            <p id="benchmark-model" class="benchmark-model-name"></p>
+            <div class="model-actions benchmark-actions">
               <button id="benchmark-profile-run" class="unload" type="button" disabled>Полный бенчмарк</button>
               <button id="benchmark-stop" class="unload" type="button" title="Завершить текущий замер и сохранить результаты" hidden disabled>Остановить</button>
             </div>
@@ -270,9 +270,9 @@
                   <thead><tr>
                     <th scope="col">Контекст</th>
                     <th scope="col" title="Подтверждённая VRAM для Auto">VRAM</th>
-                    <th scope="col" title="Обработка входных токенов / генерация выходных токенов">Скорость, ток/с</th>
+                    <th scope="col" title="Обработка входных токенов / генерация выходных токенов">ток/с</th>
                     <th scope="col" title="Время холодной загрузки модели">Запуск</th>
-                    <th scope="col"><span class="visually-hidden">Результат</span><span aria-hidden="true">✓</span></th>
+                    <th scope="col"><span class="visually-hidden">Результат</span></th>
                   </tr></thead>
                   <tbody id="benchmark-profile-results"></tbody>
                 </table>
