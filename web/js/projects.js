@@ -64,7 +64,6 @@ export function createProjects() {
   let preferredSelection;
   let history = [];
   let thinkingDelegation;
-  let historyPolling = false;
   let renderedChatId;
   const expandedTools = new Set();
 
@@ -720,25 +719,21 @@ export function createProjects() {
     }
   };
 
-  // Pi saves tool results to the session as they arrive. Refresh only the
-  // currently active chat so skill notices appear before the final answer.
-  setInterval(async () => {
-    if (historyPolling || !online || !chatRun(chatId)) return;
-    historyPolling = true;
-    try {
-      await refreshHistory();
-    } finally {
-      historyPolling = false;
-    }
-  }, 1500);
-
   return {
     refresh,
     update(connected, state, models) {
+      const previous = chatRun(chatId);
       online = connected;
       run = state;
       installedModels = models ?? [];
       updateControls();
+      const current = chatRun(chatId);
+      if (current && (
+        current[0] !== previous?.[0] ||
+        current[1].history_revision !== previous?.[1].history_revision
+      )) {
+        void refreshHistory();
+      }
     },
   };
 }
