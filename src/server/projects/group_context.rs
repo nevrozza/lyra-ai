@@ -407,6 +407,49 @@ mod tests {
     }
 
     #[test]
+    fn excerpt_marks_shortened_sections_and_points_to_exact_source_lines() {
+        let snapshot = Snapshot {
+            name: "Feature".into(), brief: "A brief".into(),
+            entries: vec![
+                Entry { id: 1, name: "Design".into(), status: "completed", required: true,
+                    text: format!("Contract start\n{}\nContract end", "interface ".repeat(500)), truncated: false },
+                Entry { id: 2, name: "Other".into(), status: "completed", required: false,
+                    text: "Other result".into(), truncated: false },
+            ],
+        };
+        let (full, sections) = snapshot.sections();
+        let lines = full.lines().collect::<Vec<_>>();
+        let design = &sections[2];
+        let source = lines[design.start_line - 1..design.end_line].join("\n");
+        assert!(source.contains("### #1"));
+        assert!(source.contains("Contract start"));
+        assert!(source.contains("Contract end"));
+        assert!(!source.contains("Other result"));
+        let excerpt = snapshot.excerpt(4096);
+        assert!(excerpt.len() <= 2048);
+        assert!(excerpt.contains(&format!("Source: CONTEXT.md lines {}-{}.", design.start_line, design.end_line)));
+        assert!(excerpt.contains("EXCERPT SHORTENED"));
+        assert!(excerpt.contains("EXCERPT COVERAGE:"));
+        assert!(!excerpt.contains("Contract end"));
+    }
+
+    #[test]
+    fn excerpt_never_silently_drops_sections_at_small_budgets() {
+        let snapshot = Snapshot {
+            name: "я".repeat(120), brief: "я".repeat(4000),
+            entries: (1..=30).map(|id| Entry {
+                id, name: "Design".into(), status: "completed", required: true,
+                text: "Result ".repeat(100), truncated: false,
+            }).collect(),
+        };
+        let excerpt = snapshot.excerpt(1024);
+        assert!(excerpt.len() <= 512);
+        assert!(excerpt.contains("EXCERPT COVERAGE:"));
+        assert!(excerpt.contains("omitted sections"));
+        assert!(excerpt.contains("Read CONTEXT.md"));
+    }
+
+    #[test]
     fn excerpt_is_bounded_and_prioritizes_dependencies() {
         let snapshot = Snapshot {
             name: "Feature".into(), brief: "Goal".into(),
