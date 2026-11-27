@@ -1,19 +1,11 @@
 use std::{
+    collections::HashMap,
     fs, io,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
-
-pub(super) const MAX_PATHS: usize = 32;
-
-pub(in crate::server) fn resolve_paths(root: &Path, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
-    if paths.is_empty() || paths.len() > MAX_PATHS {
-        return Err(invalid("Укажите от 1 до 32 файлов в write_paths."));
-    }
-    paths.iter().map(|path| resolve(root, path)).collect()
-}
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -113,30 +105,174 @@ impl Mutation {
     }
 }
 
-pub(in crate::server) fn mutate(root: &Path, allowed: &[PathBuf], request: &str) -> io::Result<()> {
-    let change: Mutation = serde_json::from_str(request)?;
-    let canonical_root = root.canonicalize()?;
-    let path = change.path();
-    // Pi may return an absolute path from its read tool. Accept it only
-    // when it is lexically under the project root, then validate every component.
-    let relative = if path.is_absolute() {
-        path.strip_prefix(root)
-            .or_else(|_| path.strip_prefix(&canonical_root))
-            .map_err(|_| invalid("Absolute path is outside the project root."))?
-    } else {
-        path
-    };
-    let target = resolve(root, relative)?;
-    if !allowed.iter().any(|path| crate::run::path_key(path) == crate::run::path_key(&target)) {
-        return Err(invalid(format!(
-            "Этот файл не зарезервирован для задачи: {}",
-            change.path().display()
-        )));
+const FILE_LIMIT: usize = 4 * 1024 * 1024;
+const READ_LIMIT: usize = 48 * 1024;
+const VERSION_BUDGET: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+pub(in crate::server) struct FileVersions {
+    // Compare the actual bytes, not mtimes or a potentially colliding hash.
+    seen: HashMap<PathBuf, Version>,
+    bytes: usize,
+}
+
+struct Version {
+    bytes: Vec<u8>,
+    full: bool,
+}
+
+#[derive(Deserialize)]
+struct ReadRequest {
+    path: PathBuf,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+impl FileVersions {
+    fn remember(&mut self, path: &Path, bytes: Vec<u8>, full: bool) {
+        let key = crate::run::path_key(path);
+        if let Some(old) = self.seen.remove(&key) {
+            self.bytes -= old.bytes.len();
+        }
+        if self.bytes + bytes.len() > VERSION_BUDGET || self.seen.len() >= 4096 {
+            // Forgotten versions fail closed: another read is needed before writing.
+            self.seen.clear();
+            self.bytes = 0;
+        }
+        self.bytes += bytes.len();
+        self.seen.insert(key, Version { bytes, full });
     }
-    let content = match change {
-        Mutation::Write { content, .. } => content,
-        Mutation::Edit { edits, .. } => edited_content(&fs::read_to_string(&target)?, edits)?,
-    };
+
+    pub(in crate::server) fn read(&mut self, root: &Path, request: &str) -> io::Result<serde_json::Value> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let input: ReadRequest = serde_json::from_str(request)?;
+        let path = if input.path.is_absolute() { input.path } else { root.join(input.path) };
+        let target = path.canonicalize()?;
+        let bytes = read_bytes(&target)?;
+        let key = crate::run::path_key(&target);
+        let old_full = self.seen.get(&key).is_some_and(|old| old.full && old.bytes == bytes);
+        // Keep ordinary image reads available; file edits themselves remain text-only.
+        let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("image/png") }
+            else if bytes.starts_with(&[0xff, 0xd8, 0xff]) { Some("image/jpeg") }
+            else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("image/gif") }
+            else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") { Some("image/webp") }
+            else { None };
+        if let Some(mime) = mime {
+            return Ok(serde_json::json!({"image": STANDARD.encode(&bytes), "mime": mime}));
+        }
+        let source = std::str::from_utf8(&bytes).map_err(|_| invalid("File is not UTF-8 text or a supported image"))?;
+        let start = input.offset.unwrap_or(1).max(1) - 1;
+        let max_lines = input.limit.unwrap_or(2000).clamp(1, 2000);
+        let mut output = String::new();
+        let mut lines = source.split_inclusive('\n');
+        for _ in 0..start {
+            if lines.next().is_none() { return Err(invalid("Read offset is beyond end of file")); }
+        }
+        let mut count = 0;
+        let mut partial_line = false;
+        for line in lines.by_ref().take(max_lines) {
+            if output.len() + line.len() > READ_LIMIT {
+                if count == 0 {
+                    output.push_str(&line[..line.floor_char_boundary(READ_LIMIT)]);
+                    partial_line = true;
+                }
+                // The unreturned line must be included on the next read.
+                break;
+            }
+            output.push_str(line);
+            count += 1;
+        }
+        let full = start == 0 && output.len() == source.len();
+        // Compare by byte count to account for a consumed-but-not-returned line.
+        let prefix_bytes: usize = source.split_inclusive('\n').take(start).map(str::len).sum();
+        let more = prefix_bytes + output.len() < source.len();
+        if partial_line {
+            output.push_str("\n[Read clipped within a long line. Use targeted search/edit; full replacement requires a complete read.]");
+        } else if more {
+            output.push_str(&format!("\n[More text available: read with offset={}.]", start + count + 1));
+        }
+        self.remember(&target, bytes, full || old_full);
+        Ok(serde_json::json!({"text": output}))
+    }
+
+    fn validate(&self, target: &Path, current: Option<&[u8]>, replacing: bool) -> io::Result<()> {
+        let seen = self.seen.get(&crate::run::path_key(target));
+        match (seen, current) {
+            (Some(old), Some(now)) if old.bytes.as_slice() != now =>
+                Err(invalid("FILE_CHANGED: file changed since your last read. Read it again, reconcile all changes, then retry.")),
+            (Some(_), None) => Err(invalid("FILE_CHANGED: file disappeared since your last read. Inspect the current state and report if needed.")),
+            (None, Some(_)) => Err(invalid("READ_REQUIRED: read the existing file before changing it; do not overwrite unseen content.")),
+            (Some(old), Some(_)) if replacing && !old.full =>
+                Err(invalid("READ_REQUIRED: full replacement needs a complete read of the existing file. Use targeted edit after reading the relevant lines instead.")),
+            (None, None) if !replacing => Err(invalid("File does not exist. Use write to create it.")),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::metadata(path)?.is_file() {
+        return Err(invalid("Only regular files can be read"));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take((FILE_LIMIT + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > FILE_LIMIT {
+        return Err(invalid("File exceeds the 4 MiB guarded file limit. Report the limitation instead of bypassing it with shell writes."));
+    }
+    Ok(bytes)
+}
+
+fn target_path(roots: &[PathBuf], root: &Path, path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return resolve(root, path);
+    }
+    for folder in std::iter::once(root).chain(roots.iter().map(PathBuf::as_path)) {
+        let canonical = folder.canonicalize()?;
+        if let Ok(relative) = path.strip_prefix(folder).or_else(|_| path.strip_prefix(&canonical)) {
+            return resolve(folder, relative);
+        }
+    }
+    Err(invalid("Absolute path is outside the registered project folders."))
+}
+
+pub(in crate::server) fn mutate(
+    root: &Path,
+    roots: &[PathBuf],
+    versions: &mut FileVersions,
+    request: &str,
+    claim: impl FnOnce(&Path) -> io::Result<bool>,
+    release: impl FnOnce(&Path),
+) -> io::Result<()> {
+    let change: Mutation = serde_json::from_str(request)?;
+    let target = target_path(roots, root, change.path())?;
+    // All cooperating Lyra writers acquire this lock before the version check.
+    let newly_claimed = claim(&target)?;
+    let result = (|| {
+        let current = match read_bytes(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let replacing = matches!(&change, Mutation::Write { .. });
+        versions.validate(&target, current.as_deref(), replacing)?;
+        let full = replacing || versions.seen.get(&crate::run::path_key(&target)).is_some_and(|old| old.full);
+        let content = match change {
+            Mutation::Write { content, .. } => content,
+            Mutation::Edit { edits, .. } => edited_content(
+                std::str::from_utf8(current.as_deref().ok_or_else(|| invalid("File does not exist"))?)
+                    .map_err(|_| invalid("Only UTF-8 text can be edited"))?, edits)?,
+        };
+        if content.len() > FILE_LIMIT { return Err(invalid("File exceeds the 4 MiB guarded file limit")); }
+        replace_file(&target, &content)?;
+        versions.remember(&target, content.into_bytes(), full);
+        Ok(())
+    })();
+    // A failed first mutation did not earn ownership. Existing locks remain.
+    if result.is_err() && newly_claimed { release(&target); }
+    result
+}
+
+fn replace_file(target: &Path, content: &str) -> io::Result<()> {
     let parent = target.parent().expect("file parent");
     fs::create_dir_all(parent)?;
     let permissions = match fs::metadata(&target) {
@@ -207,96 +343,95 @@ fn edited_content(source: &str, edits: Vec<Replacement>) -> io::Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_changes_reserved_files_and_applies_edits_together() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let allowed = resolve_paths(root, &["src/new.txt".into()]).unwrap();
-        assert!(
-            mutate(
-                root,
-                &allowed,
-                r#"{"tool":"write","path":"other.txt","content":"no"}"#
-            )
-            .is_err()
-        );
-        assert!(
-            mutate(
-                root,
-                &allowed,
-                r#"{"tool":"write","path":"../new.txt","content":"no"}"#
-            )
-            .is_err()
-        );
-        assert!(!root.join("other.txt").exists());
-        mutate(
-            root,
-            &allowed,
-            r#"{"tool":"write","path":"src/new.txt","content":"first\r\nsecond\r\nthird\r\n"}"#,
-        )
-        .unwrap();
-        let path = root.join("src/new.txt");
-        mutate(root, &allowed, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"first\nsecond","newText":"one\ntwo"},{"oldText":"third","newText":"three"}]}"#).unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "one\r\ntwo\r\nthree\r\n"
-        );
-        assert!(mutate(root, &allowed, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"one","newText":"changed"},{"oldText":"absent","newText":"bad"}]}"#).is_err());
-        assert_eq!(fs::read_to_string(path).unwrap(), "one\r\ntwo\r\nthree\r\n");
+    fn change(root: &Path, versions: &mut FileVersions, request: &str) -> io::Result<()> {
+        mutate(root, &[], versions, request, |_| Ok(true), |_| {})
     }
 
     #[test]
-    fn accepts_absolute_reserved_paths_but_not_other_files() {
+    fn new_files_and_targeted_edits_work_without_a_predeclared_list() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let allowed = resolve_paths(root, &["new.txt".into()]).unwrap();
-        let request = serde_json::json!({"tool":"write","path":root.join("new.txt"),"content":"old"});
-        mutate(root, &allowed, &request.to_string()).unwrap();
-        let request = serde_json::json!({"tool":"edit","path":root.join("new.txt"),"edits":[{"oldText":"old","newText":"new"}]});
-        mutate(root, &allowed, &request.to_string()).unwrap();
-        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "new");
-        let request = serde_json::json!({"tool":"write","path":root.join("other.txt"),"content":"no"});
-        assert!(mutate(root, &allowed, &request.to_string()).is_err());
+        let mut versions = FileVersions::default();
+        change(root, &mut versions, r#"{"tool":"write","path":"src/new.txt","content":"first\r\nsecond\r\nthird\r\n"}"#).unwrap();
+        change(root, &mut versions, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"first\nsecond","newText":"one\ntwo"},{"oldText":"third","newText":"three"}]}"#).unwrap();
+        assert_eq!(fs::read_to_string(root.join("src/new.txt")).unwrap(), "one\r\ntwo\r\nthree\r\n");
+        assert!(change(root, &mut versions, r#"{"tool":"write","path":"../outside","content":"no"}"#).is_err());
     }
 
     #[test]
-    fn replacing_a_reserved_hard_link_does_not_change_its_other_name() {
+    fn stale_reader_cannot_overwrite_a_finished_writer() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("original"), "old").unwrap();
-        fs::hard_link(dir.path().join("original"), dir.path().join("alias")).unwrap();
-        let allowed = resolve_paths(dir.path(), &["alias".into()]).unwrap();
-        mutate(
-            dir.path(),
-            &allowed,
-            r#"{"tool":"write","path":"alias","content":"new"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("original")).unwrap(),
-            "old"
-        );
-        assert_eq!(fs::read_to_string(dir.path().join("alias")).unwrap(), "new");
+        let root = dir.path();
+        fs::write(root.join("shared.txt"), "old").unwrap();
+        let mut a = FileVersions::default();
+        let mut b = FileVersions::default();
+        let read = r#"{"path":"shared.txt"}"#;
+        a.read(root, read).unwrap();
+        b.read(root, read).unwrap();
+        change(root, &mut b, r#"{"tool":"write","path":"shared.txt","content":"new from B"}"#).unwrap();
+        let write = r#"{"tool":"write","path":"shared.txt","content":"A"}"#;
+        assert!(change(root, &mut a, write).unwrap_err().to_string().contains("FILE_CHANGED"));
+        assert!(change(root, &mut a, r#"{"tool":"edit","path":"shared.txt","edits":[{"oldText":"old","newText":"A"}]}"#).unwrap_err().to_string().contains("FILE_CHANGED"));
+        assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "new from B");
+        a.read(root, read).unwrap();
+        change(root, &mut a, r#"{"tool":"edit","path":"shared.txt","edits":[{"oldText":"new from B","newText":"new from B and A"}]}"#).unwrap();
+        assert_eq!(fs::read_to_string(root.join("shared.txt")).unwrap(), "new from B and A");
+    }
+
+    #[test]
+    fn existing_file_requires_read_and_partial_read_cannot_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a"), "first\nsecond\n").unwrap();
+        let mut v = FileVersions::default();
+        let write = r#"{"tool":"write","path":"a","content":"replacement"}"#;
+        assert!(change(root, &mut v, write).unwrap_err().to_string().contains("READ_REQUIRED"));
+        v.read(root, r#"{"path":"a","limit":1}"#).unwrap();
+        assert!(change(root, &mut v, write).unwrap_err().to_string().contains("READ_REQUIRED"));
+        change(root, &mut v, r#"{"tool":"edit","path":"a","edits":[{"oldText":"first","newText":"changed"}]}"#).unwrap();
+        assert_eq!(fs::read_to_string(root.join("a")).unwrap(), "changed\nsecond\n");
+        assert!(change(root, &mut v, write).is_err());
+    }
+
+    #[test]
+    fn conflict_never_changes_file_and_failed_first_claim_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a"), "old").unwrap();
+        let mut v = FileVersions::default();
+        v.read(root, r#"{"path":"a"}"#).unwrap();
+        let request = r#"{"tool":"write","path":"a","content":"new"}"#;
+        let denied = mutate(root, &[], &mut v, request, |_| Err(invalid("FILE_LOCKED")), |_| panic!("no claim"));
+        assert!(denied.unwrap_err().to_string().contains("FILE_LOCKED"));
+        fs::write(root.join("a"), "other").unwrap();
+        let released = std::cell::Cell::new(false);
+        assert!(mutate(root, &[], &mut v, request, |_| Ok(true), |_| released.set(true)).is_err());
+        assert!(released.get());
+        assert_eq!(fs::read_to_string(root.join("a")).unwrap(), "other");
     }
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlinks_even_if_created_after_dispatch() {
+    fn symlink_mutation_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         fs::create_dir(&root).unwrap();
-        let target = dir.path().join("outside");
-        fs::write(&target, "old").unwrap();
-        let allowed = resolve_paths(&root, &["alias".into()]).unwrap();
-        std::os::unix::fs::symlink(&target, root.join("alias")).unwrap();
-        assert!(resolve_paths(&root, &["alias".into()]).is_err());
-        assert!(
-            mutate(
-                &root,
-                &allowed,
-                r#"{"tool":"write","path":"alias","content":"new"}"#
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read_to_string(target).unwrap(), "old");
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "old").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("alias")).unwrap();
+        assert!(change(&root, &mut FileVersions::default(), r#"{"tool":"write","path":"alias","content":"new"}"#).is_err());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "old");
+    }
+
+    #[test]
+    fn replacing_hard_link_does_not_mutate_other_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("original"), "old").unwrap();
+        fs::hard_link(root.join("original"), root.join("alias")).unwrap();
+        let mut v = FileVersions::default();
+        v.read(root, r#"{"path":"alias"}"#).unwrap();
+        change(root, &mut v, r#"{"tool":"write","path":"alias","content":"new"}"#).unwrap();
+        assert_eq!(fs::read_to_string(root.join("original")).unwrap(), "old");
     }
 }
