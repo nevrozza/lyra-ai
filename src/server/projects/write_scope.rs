@@ -11,7 +11,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-fn resolve(root: &Path, path: &Path, directory: bool) -> io::Result<PathBuf> {
+pub(super) fn resolve(root: &Path, path: &Path, directory: bool) -> io::Result<PathBuf> {
     let invalid_path = || invalid(format!("Недопустимый путь для записи: {}", path.display()));
     if path.as_os_str().is_empty()
         || path.components().any(|part| match part {

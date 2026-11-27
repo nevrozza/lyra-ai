@@ -95,7 +95,7 @@ impl ChatMode {
 pub(super) struct SaveProject {
     id: Option<u64>,
     name: String,
-    folders: Vec<PathBuf>,
+    folders: Option<Vec<PathBuf>>,
 }
 
 #[derive(Deserialize)]
@@ -416,16 +416,21 @@ impl Store {
 
     fn save(&self, input: SaveProject) -> Result<Project> {
         let name = checked_name(input.name)?;
-        if input.folders.is_empty() || input.folders.len() > 16 {
-            return Err(invalid("Specify between 1 and 16 project folders"));
-        }
-        let mut folders = Vec::new();
-        for folder in input.folders {
-            let folder = canonical_folder(&folder)?;
-            if !folders.contains(&folder) {
-                folders.push(folder);
+        let folders = if let Some(paths) = input.folders {
+            if paths.len() > 16 {
+                return Err(invalid("Specify at most 16 project folders"));
             }
-        }
+            let mut folders = Vec::new();
+            for path in paths {
+                let folder = canonical_folder(&path)?;
+                if !folders.contains(&folder) {
+                    folders.push(folder);
+                }
+            }
+            Some(folders)
+        } else {
+            None
+        };
 
         self.change(|catalog| {
             if let Some(id) = input.id {
@@ -435,24 +440,49 @@ impl Store {
                     .find(|project| project.id == id)
                     .ok_or_else(|| missing("Project"))?;
                 project.ensure_active()?;
-                if project.sessions.iter().any(|session| session.job.as_ref().is_some_and(queue::Job::pending) && !folders.contains(&session.folder)) {
-                    return Err(invalid("Нельзя убрать рабочую папку незавершённой задачи."));
+                if let Some(folders) = folders {
+                    let keeps_internal_workspace = project.folders.is_empty() && folders.is_empty();
+                    if !keeps_internal_workspace && project.sessions.iter().any(|session|
+                        session.job.as_ref().is_some_and(queue::Job::pending) && !folders.contains(&session.folder))
+                    {
+                        return Err(invalid("Нельзя убрать рабочую папку незавершённой задачи."));
+                    }
+                    project.folders = folders;
                 }
                 project.name = name;
-                project.folders = folders;
                 return Ok(project.clone());
             }
             catalog.next_id += 1;
             let project = Project {
                 id: catalog.next_id,
                 name,
-                folders,
+                folders: folders.unwrap_or_default(),
                 sessions: Vec::new(),
                 archived: false,
             };
             catalog.projects.push(project.clone());
             Ok(project)
         })
+    }
+
+    fn workspace(&self, project: &Project, requested: Option<&Path>) -> Result<PathBuf> {
+        if !project.folders.is_empty() {
+            return project.registered_workspace(requested);
+        }
+
+        // Project names can change and are not filesystem paths. Keep the
+        // fallback stable by ID and separate from project metadata and chats.
+        let relative = Path::new("workspaces").join(project.id.to_string());
+        let workspace = write_scope::resolve(&self.directory, &relative, true).map_err(storage)?;
+        if let Some(requested) = requested {
+            let requested = canonical_folder(requested)?;
+            if canonical_folder(&workspace).ok().as_ref() != Some(&requested) {
+                return Err(invalid("Choose the project's internal workspace or register a folder first"));
+            }
+            return Ok(requested);
+        }
+        fs::create_dir_all(&workspace).map_err(storage)?;
+        canonical_folder(&workspace)
     }
 
     fn create_session(&self, input: NewSession) -> Result<Session> {
@@ -464,7 +494,7 @@ impl Store {
                 .find(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
             project.ensure_active()?;
-            let folder = project.workspace(None)?;
+            let folder = self.workspace(project, None)?;
             let group = choose_group(project, &mut catalog.next_id, input.group_id, input.group_name)?;
             group_context::initialize_brief(&mut catalog.group_memory, group.as_ref(), input.group_id, input.group_brief)?;
             catalog.next_id += 1;
@@ -639,15 +669,15 @@ impl Store {
                 project.sessions.iter().find(|candidate| candidate.job.as_ref().is_some_and(|job| job.chat_session_id == Some(id)))
             };
             let folder = if let Some(owner) = owner.filter(|owner| owner.job.as_ref().is_some_and(queue::Job::pending)) {
-                let folder = project.workspace(Some(&owner.folder))?;
+                let folder = self.workspace(&project, Some(&owner.folder))?;
                 if let Some(requested) = workspace
-                    && project.workspace(Some(requested))? != folder
+                    && self.workspace(&project, Some(requested))? != folder
                 {
                     return Err(invalid("Use the queued task's workspace"));
                 }
                 folder
             } else {
-                project.workspace(workspace)?
+                self.workspace(&project, workspace)?
             };
             (
                 folder.clone(),
@@ -656,9 +686,10 @@ impl Store {
                 Some(session.mode),
             )
         } else {
+            let folder = self.workspace(&project, workspace)?;
             (
-                project.workspace(workspace)?,
-                project.folders.clone(),
+                folder.clone(),
+                project.folders_with_primary(&folder),
                 None,
                 None,
             )
@@ -1119,7 +1150,7 @@ impl Project {
             .collect()
     }
 
-    fn workspace(&self, requested: Option<&Path>) -> Result<PathBuf> {
+    fn registered_workspace(&self, requested: Option<&Path>) -> Result<PathBuf> {
         let folder = requested
             .or_else(|| self.folders.first().map(PathBuf::as_path))
             .ok_or_else(|| invalid("Project has no registered folders"))?;
@@ -1235,6 +1266,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn folderless_project_can_create_a_directory_in_its_first_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let store = Store::new(data.clone());
+        let project = store.save(serde_json::from_str(r#"{"name":"First"}"#).unwrap()).unwrap();
+        let other = store.save(SaveProject {
+            id: None, name: "Second".into(), folders: Some(vec![]),
+        }).unwrap();
+        assert!(project.folders.is_empty());
+        assert!(!data.join("workspaces").exists());
+        assert!(store.task(project.id, None, Some(dir.path())).is_err());
+        assert!(!data.join("workspaces").exists());
+
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "First chat",
+        })).unwrap()).unwrap();
+        let task = store.task(project.id, Some(chat.id), None).unwrap();
+        assert_eq!(task.workspace, chat.folder);
+        assert_eq!(task.folders, [task.workspace.clone()]);
+        let mut versions = write_scope::FileVersions::default();
+        let mkdir = |path: &Path, versions: &mut write_scope::FileVersions| {
+            write_scope::mutate(&task.workspace, &task.folders, versions,
+                &serde_json::json!({"tool": "mkdir", "path": path}).to_string(),
+                |_| Ok(true), |_| {})
+        };
+        mkdir(Path::new("site"), &mut versions).unwrap();
+        let created = task.workspace.join("site");
+        assert!(created.is_dir());
+        let other_root = store.task(other.id, None, None).unwrap().workspace;
+        assert_ne!(task.workspace, other_root);
+        assert!(mkdir(&other_root.join("outside"), &mut versions).is_err());
+
+        store.save(SaveProject { id: Some(project.id), name: project.name, folders: Some(vec![created.clone()]) }).unwrap();
+        let attached = store.task(project.id, Some(chat.id), None).unwrap();
+        assert_eq!(attached.workspace, created);
+        let renamed = store.save(serde_json::from_value(serde_json::json!({
+            "id": project.id, "name": "Renamed",
+        })).unwrap()).unwrap();
+        assert_eq!(renamed.folders, [created]);
+    }
+
+    #[test]
     fn ordinary_chats_inherit_current_project_folders() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first");
@@ -1243,7 +1316,7 @@ mod tests {
         fs::create_dir(&second).unwrap();
         let store = Store::new(dir.path().join("data"));
         let project = store.save(SaveProject {
-            id: None, name: "Project".into(), folders: vec![first.clone(), second.clone()],
+            id: None, name: "Project".into(), folders: Some(vec![first.clone(), second.clone()]),
         }).unwrap();
         let chat = store.create_session(serde_json::from_value(serde_json::json!({
             "project_id":project.id, "name":"Chat"
@@ -1254,7 +1327,7 @@ mod tests {
         assert_eq!(task.workspace, second);
         assert_eq!(task.folders, vec![second.clone(), first.clone()]);
         store.save(SaveProject {
-            id: Some(project.id), name: project.name, folders: vec![second.clone()],
+            id: Some(project.id), name: project.name, folders: Some(vec![second.clone()]),
         }).unwrap();
         let task = store.task(project.id, Some(chat.id), None).unwrap();
         assert_eq!(task.workspace, second);
@@ -1268,7 +1341,7 @@ mod tests {
         let store = Store::new(dir.path().join("data"));
         let project = store.save(SaveProject {
             id: None, name: "Project".into(),
-            folders: vec![dir.path().to_path_buf()],
+            folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let create = |name: &str, group: serde_json::Value| {
             let mut input = serde_json::json!({"project_id": project.id, "name": name});
@@ -1309,7 +1382,7 @@ mod tests {
         let directory = dir.path().join("data");
         let store = Store::new(directory.clone());
         let project = store.save(SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let chat = store.create_session(serde_json::from_value(serde_json::json!({
             "project_id": project.id, "name": "Chat"
@@ -1384,7 +1457,7 @@ mod tests {
         let directory = dir.path().join("data");
         let store = Store::new(directory.clone());
         let project = store.save(SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let chat = store.create_session(serde_json::from_value(serde_json::json!({
             "project_id": project.id, "name": "Chat"
@@ -1461,7 +1534,7 @@ mod tests {
             .save(SaveProject {
                 id: None,
                 name: "Project".into(),
-                folders: vec![dir.path().to_path_buf()],
+                folders: Some(vec![dir.path().to_path_buf()]),
             })
             .unwrap();
         let create = |name: &str| {

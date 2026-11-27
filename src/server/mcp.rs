@@ -201,7 +201,7 @@ fn tools() -> Value {
         "external": {"type": "boolean", "default": false, "description": "Step completed outside Lyra with complete_project_step."},
         "parallel": {"type": "boolean", "default": false, "description": "Allow independent steps to overlap; Lyra locks files on mutation and checks read versions. Declare dependencies via after."},
         "role": worker_role,
-        "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder."},
+        "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder or the project's internal workspace."},
         "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional enabled skill names. Omit for enabled non-role skills; disabled or removed names are rejected."},
         "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional manual context window for this task only. Omit to use saved model setting or VRAM-aware Auto at dispatch. Leave parallel false for a solo agent to use the available VRAM."},
         "follow_up": follow_up
@@ -334,8 +334,8 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default."}
-            }, "required": ["name", "folders"], "additionalProperties": false}
+                "folders": {"type": "array", "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default. Omit on creation or pass [] to use the project's isolated internal workspace. Omitting on update keeps the existing folder list."}
+            }, "required": ["name"], "additionalProperties": false}
         },
         {
             "name": "create_project_session",

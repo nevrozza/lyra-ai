@@ -208,7 +208,7 @@ export function createProjects() {
     get('cancel-project-task-form').disabled = saving;
     taskForm.querySelector('[type="submit"]').disabled = !ready;
     for (const button of folderList.querySelectorAll('button')) button.disabled = !ready;
-    projectForm.querySelector('[type="submit"]').disabled = !ready || !folders.length;
+    projectForm.querySelector('[type="submit"]').disabled = !ready;
     chatForm.querySelector('[type="submit"]').disabled = !ready;
     composer.hidden = !chat || chat.archived || project.archived;
     const working = chatMode() === 'work';
@@ -566,7 +566,8 @@ export function createProjects() {
     const owner = taskChat(chat);
     const primary = pendingTask(owner) ? owner.folder : project?.folders[0];
     const workingFolders = chat ? [primary, ...project.folders.filter(folder => folder !== primary)].filter(Boolean) : [];
-    workspace.textContent = chat ? [primary, ...(workingFolders.length > 1 ? [`+${workingFolders.length - 1}`] : [])].filter(Boolean).join(' · ') : '';
+    workspace.textContent = !chat ? '' : !primary ? 'Внутренняя рабочая папка проекта' :
+      [primary, ...(workingFolders.length > 1 ? [`+${workingFolders.length - 1}`] : [])].join(' · ');
     workspace.title = workingFolders.join('\n');
     const notice = get('project-archive-notice');
     notice.hidden = !project?.archived && !chat?.archived;
@@ -779,7 +780,6 @@ export function createProjects() {
 
   projectForm.onsubmit = event => {
     event.preventDefault();
-    if (!folders.length) return;
     save('/projects', {
       id: editing,
       name: get('project-name').value,

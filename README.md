@@ -93,4 +93,6 @@ Wait responses contain `project_id`, the selected `task_ids`, a compact `tasks` 
 
 The dashboard still shows live progress and handles user command approvals. Waiting for a task does not hold a workspace or model slot; the queue runs independently. Closing the MCP connection does not cancel a submitted task. If the combined submission loses its response before you know the IDs, repeat the exact same batch ID and payload or recover the saved IDs with a one-off inspection. Do not create a new batch just because a wait timed out.
 
+Project folders are optional in the dashboard and when creating a project with MCP `save_project`. The first chat or task gets a project-specific internal workspace under Lyra's data directory, where Work can use `mkdir` with a relative path. To work in a specific location such as Desktop, register that location in project settings. Ordinary chats use the current registered folders as soon as they are added.
+
 Keep important design/architecture acceptance checkpoints separate. Submit a design batch, inspect its result, approve or revise the contract, and only then submit implementation. Automatic waiting does not delegate those decisions to local workers.

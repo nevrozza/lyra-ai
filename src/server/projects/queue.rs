@@ -1253,7 +1253,7 @@ impl Store {
             let mut keys = HashMap::new();
             for new in input.tasks {
                 let name = checked_name(new.name)?;
-                let folder = project.workspace(new.workspace.as_deref())?;
+                let folder = self.workspace(project, new.workspace.as_deref())?;
                 catalog.next_id += 1;
                 let mut after = Vec::new();
                 for dependency in new.after {
@@ -1607,6 +1607,29 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folderless_queue_reserves_the_internal_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Folderless".into(), folders: Some(vec![]),
+        }).unwrap();
+        let jobs = store.enqueue(serde_json::from_value(serde_json::json!({
+            "project_id": project.id,
+            "tasks": [{"name": "First task", "model": "local", "prompt": "Create a folder"}]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        store.save(super::super::SaveProject {
+            id: Some(project.id), name: "Renamed".into(), folders: Some(vec![]),
+        }).unwrap();
+        let job = &jobs[0];
+        let catalog = store.list().unwrap();
+        let saved = catalog.projects[0].session(job.project_session_id).unwrap();
+        let task = store.task(project.id, Some(job.project_session_id), Some(&saved.folder)).unwrap();
+        assert_eq!(task.workspace, saved.folder);
+        assert!(task.workspace.is_dir());
+        assert!(store.task(project.id, Some(job.project_session_id), Some(dir.path())).is_err());
+    }
     use serde_json::json;
 
     #[test]
@@ -1621,7 +1644,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));
         let project = store.save(super::super::SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let tasks = store.enqueue(serde_json::from_value(json!({
             "project_id": project.id,
@@ -1657,7 +1680,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));
         let project = store.save(super::super::SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let tasks = store.enqueue(serde_json::from_value(json!({
             "project_id": project.id,
@@ -1720,7 +1743,7 @@ mod tests {
         let data = dir.path().join("data");
         let store = Store::new(data.clone());
         let project = store.save(super::super::SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let tasks = store.enqueue(serde_json::from_value(json!({
             "project_id": project.id,
@@ -1762,7 +1785,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));
         let project = store.save(super::super::SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let tasks = store.enqueue(serde_json::from_value(json!({
             "project_id": project.id,
@@ -1795,7 +1818,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));
         let project = store.save(super::super::SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let tasks = store.enqueue(serde_json::from_value(json!({
             "project_id": project.id, "group_name": "API",
@@ -1831,7 +1854,7 @@ mod tests {
         let store = Store::new(dir.path().join("data"));
         let project = store.save(super::super::SaveProject {
             id: None, name: "Project".into(),
-            folders: vec![dir.path().to_path_buf()],
+            folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let input = |group: serde_json::Value| {
             let mut value = json!({
@@ -1860,7 +1883,7 @@ mod tests {
             .save(super::super::SaveProject {
                 id: None,
                 name: "Test project".into(),
-                folders: vec![dir.path().to_path_buf()],
+                folders: Some(vec![dir.path().to_path_buf()]),
             })
             .unwrap();
         let id = project.id;
@@ -1945,7 +1968,7 @@ mod tests {
             .save(super::super::SaveProject {
                 id: None,
                 name: "Test project".into(),
-                folders: vec![dir.path().to_path_buf()],
+                folders: Some(vec![dir.path().to_path_buf()]),
             })
             .unwrap();
         let id = project.id;

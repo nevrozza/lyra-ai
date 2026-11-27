@@ -370,7 +370,7 @@ mod tests {
         let root = dir.path().join("data");
         let store = Store::new(root.clone());
         let project = store.save(SaveProject {
-            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+            id: None, name: "Project".into(), folders: Some(vec![dir.path().to_path_buf()]),
         }).unwrap();
         let first = store.create_session(serde_json::from_value(json!({
             "project_id": project.id, "name": "Design", "group_name": "Feature",
