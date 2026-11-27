@@ -362,10 +362,11 @@ export function createProjects({ onSelection = () => {} } = {}) {
         agents().some(agent => agent.project_session_id === member.id || agent.project_session_id === owner?.id);
     });
     const archived = group ? archiveView : chat ? chat.archived : project.archived;
-    const add = (label, handler, disabled = false) => {
+    const add = (label, handler, disabled = false, destructive = false) => {
       const button = element('button', label);
       button.type = 'button';
       button.disabled = disabled;
+      if (destructive) button.classList.add('project-delete-action');
       button.onclick = () => { closeEntryMenu(); handler(); };
       entryMenu.append(button);
     };
@@ -377,6 +378,9 @@ export function createProjects({ onSelection = () => {} } = {}) {
     }
     if (!project.archived || (!chat && !group)) {
       add(archived ? 'Восстановить' : 'Архивировать', () => archive(project, chat, group, !archived), !archived && busy);
+    }
+    if (project.archived || archived) {
+      add('Удалить навсегда', () => deleteArchived(project, chat, group), busy, true);
     }
     if (!entryMenu.childElementCount) add('Сначала восстановите проект', () => {}, true);
     const rect = anchor.getBoundingClientRect();
@@ -750,6 +754,28 @@ export function createProjects({ onSelection = () => {} } = {}) {
       if (!archived) archiveView = false;
       await refresh({ project: project.id, chat: archived ? undefined : chat?.id });
       report(archived ? 'Перемещено в архив.' : 'Восстановлено из архива.');
+    });
+  }
+
+  function deleteArchived(project, chat, group) {
+    closeEntryMenu();
+    const target = chat ? `чат «${chat.name}»` : group ? `группу «${group.name}»` : `проект «${project.name}»`;
+    const scope = !chat && !group ? 'Все его чаты и история будут удалены.' :
+      'История и связанные архивные чаты задач будут удалены.';
+    if (!window.confirm(`Удалить навсегда ${target}?\n\n${scope} Рабочие файлы и папки останутся на диске. Отменить действие нельзя.`)) return;
+    save('/projects/archive/delete', {
+      project_id: project.id,
+      project_session_id: chat?.id,
+      group_id: group?.id,
+    }, async result => {
+      for (const id of result.deleted_session_ids) {
+        drafts.delete(id);
+        chatModels.delete(id);
+      }
+      await refresh();
+      report(result.history_cleanup_failed
+        ? 'Удалено из архива, но часть файлов истории не удалось очистить. Подробности в журнале Lyra.'
+        : 'Удалено навсегда.', Boolean(result.history_cleanup_failed));
     });
   }
 

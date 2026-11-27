@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
@@ -151,6 +151,20 @@ pub(super) struct Archive {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct DeleteArchived {
+    project_id: u64,
+    project_session_id: Option<u64>,
+    group_id: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct DeletedArchive {
+    deleted_session_ids: Vec<u64>,
+    history_cleanup_failed: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GroupSettings {
     project_id: u64,
     group_id: u64,
@@ -219,6 +233,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects/sessions/settings", post(update_session_settings))
         .route("/projects/sessions/mode", post(update_session_mode))
         .route("/projects/archive", post(archive))
+        .route("/projects/archive/delete", post(delete_archived))
         .route("/projects/groups/settings", post(update_group))
         .route("/projects/{project_id}/groups/{group_id}/context", get(read_group_context))
         .route("/projects/groups/context", post(update_group_context))
@@ -297,6 +312,14 @@ async fn update_group(State(app): State<Arc<App>>, Json(input): Json<GroupSettin
 
 async fn archive(State(app): State<Arc<App>>, Json(input): Json<Archive>) -> Result<Json<Project>> {
     work(app, |app| set_archive(app, input)).await.map(Json)
+}
+
+async fn delete_archived(State(app): State<Arc<App>>, Json(input): Json<DeleteArchived>) -> Result<Json<DeletedArchive>> {
+    work(app, move |app| {
+        let deleted = app.projects.delete_archived(input, |id| app.task.borrow().project_chat_active(id))?;
+        app.task.send_modify(crate::run::Snapshot::projects_changed);
+        Ok(Json(deleted))
+    }).await
 }
 
 async fn history(
@@ -645,6 +668,95 @@ impl Store {
             }
             Ok(project.clone())
         })
+    }
+
+    // Only Lyra metadata and session logs are deleted. Never remove registered
+    // folders, internal workspaces, artifacts, or paths supplied by a client.
+    fn delete_archived(&self, input: DeleteArchived, active: impl Fn(u64) -> bool) -> Result<DeletedArchive> {
+        let ids = self.change(|catalog| {
+            if input.project_session_id.is_some() && input.group_id.is_some() {
+                return Err(invalid("Укажите чат или группу, но не оба."));
+            }
+            let index = catalog.projects.iter().position(|project| project.id == input.project_id)
+                .ok_or_else(|| missing("Project"))?;
+            let project = &catalog.projects[index];
+            let whole_project = input.project_session_id.is_none() && input.group_id.is_none();
+            if whole_project && !project.archived {
+                return Err(invalid("Сначала переместите проект в архив."));
+            }
+            let mut ids: HashSet<u64> = project.sessions.iter().filter(|session| {
+                input.project_session_id.is_none_or(|id| session.id == id)
+                    && input.group_id.is_none_or(|id| session.group.as_ref().is_some_and(|group| group.id == id))
+            }).map(|session| session.id).collect();
+            if !whole_project && ids.is_empty() {
+                return Err(missing("Chat or group"));
+            }
+            // Queue owners and their execution chats are one logical record.
+            // Expand the deletion set before validating archival and activity.
+            loop {
+                let before = ids.len();
+                for session in &project.sessions {
+                    if let Some(chat) = session.job.as_ref().and_then(|job| job.chat_session_id) {
+                        if ids.contains(&session.id) || ids.contains(&chat) {
+                            ids.insert(session.id);
+                            ids.insert(chat);
+                        }
+                    }
+                }
+                if ids.len() == before { break; }
+            }
+            for session in &project.sessions {
+                if ids.contains(&session.id) {
+                    if !project.archived && !session.archived {
+                        return Err(invalid("Сначала архивируйте все связанные чаты и задачи."));
+                    }
+                    if active(session.id) || project.has_pending_task(session.id) {
+                        return Err(invalid("Дождитесь завершения связанных задач перед удалением."));
+                    }
+                } else if session.job.as_ref().is_some_and(|job| {
+                    job.prerequisites().iter().any(|id| ids.contains(id))
+                        || job.workflow_root().is_some_and(|id| ids.contains(&id))
+                }) {
+                    return Err(invalid("На этот чат ссылаются другие задачи. Удалите их сначала или удалите всю архивную группу."));
+                }
+            }
+            let groups: HashSet<u64> = project.sessions.iter()
+                .filter(|session| ids.contains(&session.id))
+                .filter_map(|session| session.group.as_ref().map(|group| group.id)).collect();
+            if whole_project {
+                catalog.projects.remove(index);
+            } else {
+                catalog.projects[index].sessions.retain(|session| !ids.contains(&session.id));
+            }
+            catalog.user_stops.retain(|id, _| !ids.contains(id));
+            for group_id in groups {
+                let retained = catalog.projects.iter().flat_map(|project| &project.sessions)
+                    .any(|session| session.group.as_ref().is_some_and(|group| group.id == group_id));
+                if !retained {
+                    catalog.group_memory.remove(&group_id);
+                } else if let Some(memory) = catalog.group_memory.get_mut(&group_id) {
+                    memory.remove_chats(&ids);
+                }
+            }
+            let mut ids: Vec<_> = ids.into_iter().collect();
+            ids.sort_unstable();
+            Ok(ids)
+        })?;
+
+        // Commit the catalog first: on a storage error, never destroy history
+        // for a chat that remains registered. IDs are monotonic, never reused.
+        let mut history_cleanup_failed = 0;
+        for id in &ids {
+            match fs::remove_file(self.session_file(*id)) {
+                Ok(()) => {},
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                Err(error) => {
+                    history_cleanup_failed += 1;
+                    eprintln!("Could not remove deleted chat history {id}: {error}");
+                }
+            }
+        }
+        Ok(DeletedArchive { deleted_session_ids: ids, history_cleanup_failed })
     }
 
     pub(super) fn task(
@@ -1264,6 +1376,42 @@ fn storage(error: impl std::fmt::Display) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_requires_archive_and_preserves_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(serde_json::from_str(r#"{"name":"Project"}"#).unwrap()).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Chat",
+        })).unwrap()).unwrap();
+        let other = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Other",
+        })).unwrap()).unwrap();
+        let file = chat.folder.join("keep.txt");
+        fs::write(&file, "work").unwrap();
+        let history = store.session_file(chat.id);
+        fs::create_dir_all(history.parent().unwrap()).unwrap();
+        fs::write(&history, "history").unwrap();
+        let target = || DeleteArchived { project_id: project.id, project_session_id: Some(chat.id), group_id: None };
+        assert!(store.delete_archived(target(), |_| false).is_err());
+        store.set_archive(Archive { project_id: project.id, project_session_id: Some(chat.id), group_id: None, archived: true }).unwrap();
+        assert!(store.delete_archived(target(), |_| true).is_err());
+        assert!(history.exists());
+        let result = store.delete_archived(target(), |_| false).unwrap();
+        assert_eq!(result.deleted_session_ids, vec![chat.id]);
+        assert_eq!(result.history_cleanup_failed, 0);
+        assert!(!history.exists());
+        assert!(file.exists());
+        let remaining = store.list().unwrap();
+        assert_eq!(remaining.projects[0].sessions[0].id, other.id);
+        let whole = || DeleteArchived { project_id: project.id, project_session_id: None, group_id: None };
+        assert!(store.delete_archived(whole(), |_| false).is_err());
+        store.set_archive(Archive { project_id: project.id, project_session_id: None, group_id: None, archived: true }).unwrap();
+        assert_eq!(store.delete_archived(whole(), |_| false).unwrap().deleted_session_ids, vec![other.id]);
+        assert!(store.list().unwrap().projects.is_empty());
+        assert!(file.exists());
+    }
 
     #[test]
     fn folderless_project_can_create_a_directory_in_its_first_chat() {
