@@ -17,6 +17,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/unload", post(unload_model))
         .route("/model/select", post(select_model))
         .route("/model/benchmark", get(get_benchmark).post(start_benchmark))
+        .route("/model/benchmark/profile", post(start_profile))
         .route("/model/description", post(describe_model))
         .route("/model/benchmark/pi", post(start_pi_benchmark))
         .route("/model/context", post(set_model_context))
@@ -166,9 +167,12 @@ async fn context_estimate(
     let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
         .await.ok().flatten().unwrap_or_default();
     let metrics = app.metrics.lock().await.sample().await;
-    let auto = mcp::auto_context_estimate(&metrics, &model, &estimate, 1, 1, !app.task.borrow().busy());
+    let record = app.benchmarks.get(&model).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let auto = mcp::auto_context_estimate(&metrics, &model, &record, &estimate, 1, 1, !app.task.borrow().busy());
     let mut result = serde_json::to_value(estimate).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    result["auto_context_tokens"] = serde_json::json!(auto);
+    result["auto_context_tokens"] = serde_json::json!(auto.tokens);
+    result["auto_context_source"] = serde_json::json!(auto.source);
+    result["auto_context_reason"] = serde_json::json!(auto.reason);
     Ok(Json(result))
 }
 async fn set_model_context(
@@ -290,6 +294,14 @@ async fn set_model_thinking(
 }
 
 async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    start_benchmark_mode(app, headers, false).await
+}
+
+async fn start_profile(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
+    start_benchmark_mode(app, headers, true).await
+}
+
+async fn start_benchmark_mode(app: Arc<App>, headers: HeaderMap, full: bool) -> StatusCode {
     let model = match control_model(&app, &headers).await {
         Ok(model) => model,
         Err(status) => return status,
@@ -302,6 +314,14 @@ async fn start_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> Sta
     tokio::spawn(async move {
         let store = app.clone();
         let result = tokio::task::spawn_blocking(move || {
+            if full {
+                let profile = benchmark::measure_profile(&model, |stage| {
+                    store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(stage));
+                })?;
+                store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(benchmark::Stage::Saving));
+                return store.benchmarks.save_profile(model, profile)
+                    .map_err(|error| format!("Не удалось сохранить профиль: {error}"));
+            }
             let tokens = model_context(&store, &model)?;
             let measurement = benchmark::measure(&model, tokens, |stage| {
                 store
@@ -411,9 +431,12 @@ pub(super) fn execute_model_action(
         } else { None };
         let result = tokio::task::spawn_blocking(move || {
             let tokens = if action.uses_context() {
-                model_context(&store, &model)?.or_else(|| {
+                let record = model_settings(&store, &model)?;
+                record.context_tokens.or_else(|| {
                     let estimate = context::estimate_auto(&model)?;
-                    mcp::auto_context_estimate(metrics.as_ref()?, &model, &estimate, 1, 1, true)
+                    let selected = mcp::auto_context_estimate(metrics.as_ref()?, &model, &record, &estimate, 1, 1, true);
+                    if selected.tokens.is_none() { eprintln!("Auto context for {model}: {}. Using Ollama default for load/pin.", selected.reason); }
+                    selected.tokens
                 })
             } else {
                 None
