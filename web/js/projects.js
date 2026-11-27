@@ -43,8 +43,7 @@ export function createProjects() {
   const chatFolderSelect = get('project-chat-folder');
   const drafts = new Map();
   const chatModels = new Map();
-  const chatModes = new Map();
-  const chatMode = () => chatModes.get(chatId) ?? (selectedChat()?.job ? 'work' : 'chat');
+  const chatMode = () => selectedChat()?.mode ?? 'work';
   const sending = new Map();
   const stopRequests = new Set();
   let catalog;
@@ -162,14 +161,17 @@ export function createProjects() {
     chatForm.querySelector('[type="submit"]').disabled = !ready;
     composer.hidden = !chat || chat.archived || project.archived;
     const working = chatMode() === 'work';
-    get('project-mode-chat').setAttribute('aria-pressed', String(!working));
-    get('project-mode-work').setAttribute('aria-pressed', String(working));
+    const chatModeButton = get('project-mode-chat');
+    const workModeButton = get('project-mode-work');
+    chatModeButton.setAttribute('aria-pressed', String(!working));
+    workModeButton.setAttribute('aria-pressed', String(working));
+    chatModeButton.disabled = workModeButton.disabled = !ready || composer.hidden || taskPending;
     get('project-command-link').hidden = !working;
     prompt.placeholder = working ? 'Задача для Lyra…' : 'Спроси модель…';
     const model = refreshModels();
     modelSelect.disabled = !online || !model;
     thinking.update(online && run && !composer.hidden ? model : undefined, run);
-    sendButton.disabled = !online || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
+    sendButton.disabled = !online || saving || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
     sendButton.hidden = Boolean(active);
     stopButton.disabled = (!delegation && !queued && !contextPaused) || Boolean(stopping) || !online || saving;
     stopButton.textContent = stopping ? 'Останавливаем…' : (queued || contextPaused) && !delegation ? 'Отменить задачу' : 'Остановить';
@@ -599,8 +601,14 @@ export function createProjects() {
   };
   for (const mode of ['chat', 'work']) {
     get(`project-mode-${mode}`).onclick = () => {
-      chatModes.set(chatId, mode);
-      updateControls();
+      const project = selectedProject();
+      const chat = selectedChat();
+      if (!chat || chatMode() === mode) return;
+      save('/projects/sessions/mode', {
+        project_id: project.id,
+        project_session_id: chat.id,
+        mode,
+      }, () => refresh());
     };
   }
   prompt.oninput = () => {
@@ -666,7 +674,10 @@ export function createProjects() {
       }
     } catch (error) {
       restoreDraft = true;
-      if (chatId === chat.id) report(error.message, true);
+      if (chatId === chat.id) {
+        report(error.message, true);
+        await refresh();
+      }
     } finally {
       const saved = chatId === chat.id ? await refreshHistory() : undefined;
       sending.delete(chat.id);

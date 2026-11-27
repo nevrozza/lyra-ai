@@ -57,8 +57,27 @@ pub(super) struct Session {
     folders: Vec<PathBuf>,
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    mode: ChatMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     job: Option<queue::Job>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ChatMode {
+    Chat,
+    #[default]
+    Work,
+}
+
+impl ChatMode {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Work => "work",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -77,6 +96,8 @@ pub(super) struct NewSession {
     name: String,
     folder: Option<PathBuf>,
     folders: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    mode: ChatMode,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +113,21 @@ pub(super) struct SessionFolders {
 pub(super) struct SessionKey {
     pub(super) project_id: u64,
     pub(super) project_session_id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SetSessionMode {
+    project_id: u64,
+    project_session_id: u64,
+    mode: ChatMode,
+}
+
+#[derive(Serialize)]
+pub(super) struct SessionMode {
+    project_id: u64,
+    project_session_id: u64,
+    mode: ChatMode,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +184,7 @@ pub(super) struct Task {
     pub(super) workspace: PathBuf,
     pub(super) folders: Vec<PathBuf>,
     pub(super) session_file: Option<PathBuf>,
+    pub(super) mode: Option<ChatMode>,
 }
 
 pub(super) fn routes() -> Router<Arc<App>> {
@@ -156,6 +193,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects/pick-folder", post(folder_picker::pick))
         .route("/projects/sessions", post(create_session))
         .route("/projects/sessions/folders", post(update_session_folders))
+        .route("/projects/sessions/mode", post(update_session_mode))
         .route("/projects/archive", post(archive))
         .route("/projects/{project_id}/sessions/{session_id}", get(history))
         .route("/projects/run", post(super::mcp::run_project_chat))
@@ -189,6 +227,15 @@ async fn update_session_folders(
     Json(input): Json<SessionFolders>,
 ) -> Result<Json<Session>> {
     work(app, |app| set_session_folders(app, input))
+        .await
+        .map(Json)
+}
+
+async fn update_session_mode(
+    State(app): State<Arc<App>>,
+    Json(input): Json<SetSessionMode>,
+) -> Result<Json<SessionMode>> {
+    work(app, |app| set_session_mode(app, input))
         .await
         .map(Json)
 }
@@ -245,6 +292,12 @@ pub(super) fn set_session_folders(app: &App, input: SessionFolders) -> Result<Se
     let session = app.projects.set_session_folders(input)?;
     app.task.send_modify(crate::run::Snapshot::projects_changed);
     Ok(session.summary())
+}
+
+pub(super) fn set_session_mode(app: &App, input: SetSessionMode) -> Result<SessionMode> {
+    let mode = app.projects.set_session_mode(input)?;
+    app.task.send_modify(crate::run::Snapshot::projects_changed);
+    Ok(mode)
 }
 
 pub(super) fn set_archive(app: &App, input: Archive) -> Result<Project> {
@@ -353,6 +406,7 @@ impl Store {
                 folder: folders[0].clone(),
                 folders,
                 archived: false,
+                mode: input.mode,
                 job: None,
             };
             project.sessions.push(session.clone());
@@ -385,6 +439,49 @@ impl Store {
             }
             session.folders = folders;
             Ok(session.clone())
+        })
+    }
+
+    pub(super) fn session_mode(&self, key: SessionKey) -> Result<SessionMode> {
+        let catalog = self.list()?;
+        let project = catalog
+            .projects
+            .iter()
+            .find(|project| project.id == key.project_id)
+            .ok_or_else(|| missing("Project"))?;
+        Ok(SessionMode {
+            project_id: key.project_id,
+            project_session_id: key.project_session_id,
+            mode: project.session(key.project_session_id)?.mode,
+        })
+    }
+
+    fn set_session_mode(&self, input: SetSessionMode) -> Result<SessionMode> {
+        self.change(|catalog| {
+            let project = catalog
+                .projects
+                .iter_mut()
+                .find(|project| project.id == input.project_id)
+                .ok_or_else(|| missing("Project"))?;
+            project.ensure_active()?;
+            if input.mode == ChatMode::Chat && project.has_pending_task(input.project_session_id) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Задача в очереди использует Work до завершения или отмены.".into(),
+                ));
+            }
+            let session = project
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == input.project_session_id)
+                .ok_or_else(|| missing("Session"))?;
+            session.ensure_active()?;
+            session.mode = input.mode;
+            Ok(SessionMode {
+                project_id: input.project_id,
+                project_session_id: input.project_session_id,
+                mode: session.mode,
+            })
         })
     }
 
@@ -433,7 +530,7 @@ impl Store {
             .find(|project| project.id == project_id)
             .ok_or_else(|| missing("Project"))?;
         project.ensure_active()?;
-        let (workspace, folders, session_file) = if let Some(id) = session_id {
+        let (workspace, folders, session_file, mode) = if let Some(id) = session_id {
             let session = project.session(id)?;
             session.ensure_active()?;
             let folder = &session.folder;
@@ -450,15 +547,22 @@ impl Store {
                     project.session_folders(&session.folders)?
                 },
                 Some(self.session_file(id)),
+                Some(session.mode),
             )
         } else {
-            (project.workspace(workspace)?, project.folders.clone(), None)
+            (
+                project.workspace(workspace)?,
+                project.folders.clone(),
+                None,
+                None,
+            )
         };
         Ok(Task {
             project,
             workspace,
             folders,
             session_file,
+            mode,
         })
     }
 
@@ -763,4 +867,58 @@ fn storage(error: impl std::fmt::Display) -> HttpError {
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("Project storage error: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_chat_modes_default_to_work_and_are_saved_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        let store = Store::new(path.clone());
+        let project = store
+            .save(SaveProject {
+                id: None,
+                name: "Project".into(),
+                folders: vec![dir.path().to_path_buf()],
+                search_skill: None,
+            })
+            .unwrap();
+        let create = |name: &str| {
+            let input = serde_json::from_value(serde_json::json!({
+                "project_id": project.id,
+                "name": name,
+            }))
+            .unwrap();
+            store.create_session(input).unwrap()
+        };
+        let first = create("First");
+        let second = create("Second");
+        assert!(first.mode == ChatMode::Work);
+        let mut legacy = serde_json::to_value(&first).unwrap();
+        legacy.as_object_mut().unwrap().remove("mode");
+        assert!(serde_json::from_value::<Session>(legacy).unwrap().mode == ChatMode::Work);
+
+        store
+            .set_session_mode(SetSessionMode {
+                project_id: project.id,
+                project_session_id: first.id,
+                mode: ChatMode::Chat,
+            })
+            .unwrap();
+        let reopened = Store::new(path);
+        let mode = |session| {
+            reopened
+                .session_mode(SessionKey {
+                    project_id: project.id,
+                    project_session_id: session,
+                })
+                .unwrap()
+                .mode
+        };
+        assert!(mode(first.id) == ChatMode::Chat);
+        assert!(mode(second.id) == ChatMode::Work);
+    }
 }

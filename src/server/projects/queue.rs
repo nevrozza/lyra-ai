@@ -720,6 +720,7 @@ impl Store {
                     folder: session.folder.clone(),
                     folders: session.folders.clone(),
                     archived: false,
+                    mode: super::ChatMode::Work,
                     job: None,
                 }
             });
@@ -958,6 +959,7 @@ impl Store {
                     folder: folder.clone(),
                     folders: folders.clone(),
                     archived: false,
+                    mode: super::ChatMode::Work,
                     job: Some(step.job),
                 });
             }
@@ -1048,6 +1050,7 @@ impl Store {
                     folder: folders[0].clone(),
                     folders,
                     archived: false,
+                    mode: super::ChatMode::Work,
                     job: Some(Job {
                         model: new.model,
                         parallel: new.parallel,

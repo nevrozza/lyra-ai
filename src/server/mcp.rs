@@ -22,7 +22,8 @@ use super::{
     App,
     ai_settings::AI_SETTINGS,
     models::{execute_model_action, model_settings, save_description},
-    pi, projects,
+    pi,
+    projects::{self, ChatMode},
     sessions::{Call, Kind},
 };
 
@@ -84,6 +85,8 @@ async fn handle(
                     | "save_project"
                     | "create_project_session"
                     | "set_project_session_folders"
+                    | "get_project_session_mode"
+                    | "set_project_session_mode"
                     | "read_project_session"
                     | "archive_project"
                     | "enqueue_project_tasks"
@@ -215,6 +218,25 @@ fn tools() -> Value {
             "prompt": {"type": "string", "minLength": 1, "maxLength": 32000, "description": "Continuation prompt for the retry."}
         }, "required": ["project_id", "project_session_id", "prompt"], "additionalProperties": false}
     });
+    let get_session_mode = json!({
+        "name": "get_project_session_mode",
+        "description": "Read the saved Chat or Work mode of a project chat.",
+        "inputSchema": {"type": "object", "properties": {
+            "project_id": {"type": "integer", "minimum": 1},
+            "project_session_id": {"type": "integer", "minimum": 1}
+        }, "required": ["project_id", "project_session_id"], "additionalProperties": false},
+        "annotations": {"readOnlyHint": true}
+    });
+    let set_session_mode = json!({
+        "name": "set_project_session_mode",
+        "description": "Set the saved Chat or Work mode for subsequent dashboard and MCP messages in a project chat.",
+        "inputSchema": {"type": "object", "properties": {
+            "project_id": {"type": "integer", "minimum": 1},
+            "project_session_id": {"type": "integer", "minimum": 1},
+            "mode": {"enum": ["chat", "work"]}
+        }, "required": ["project_id", "project_session_id", "mode"], "additionalProperties": false},
+        "annotations": {"idempotentHint": true, "destructiveHint": false}
+    });
     let mut tools = json!([
         {
             "name": "inspect",
@@ -290,7 +312,8 @@ fn tools() -> Value {
                 "project_id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Registered working folders for this chat. The first is the working directory. Omit to use all project folders."},
-                "folder": {"type": "string", "description": "Legacy primary working directory."}
+                "folder": {"type": "string", "description": "Legacy primary working directory."},
+                "mode": {"enum": ["chat", "work"], "default": "work", "description": "Initial saved mode."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
         },
         {
@@ -340,12 +363,13 @@ fn tools() -> Value {
         },
         {
             "name": "run_pi",
-            "description": "Run a Pi Work session with an installed Ollama model.",
+            "description": "Run Pi with an installed Ollama model in Chat or Work mode.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
                 "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. With project_session_id, the folder is set by the chat."},
                 "project_id": {"type": "integer", "minimum": 1, "description": "Lyra project to use. Loads instructions from its registered folders."},
                 "project_session_id": {"type": "integer", "minimum": 1, "description": "Saved project chat to continue. Requires project_id."},
+                "mode": {"enum": ["chat", "work"], "description": "Expected saved mode for an existing chat. For runs without a saved chat, selects the mode and defaults to Work."},
                 "prompt": {"type": "string", "minLength": 1, "description": "Task prompt."},
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to the given installed Lyra skill names. Omit to make all installed Lyra skills available, or pass [] to run without skills."},
@@ -357,10 +381,12 @@ fn tools() -> Value {
             "annotations": {"destructiveHint": false}
         }
     ]);
-    tools
-        .as_array_mut()
-        .expect("tool definitions")
-        .extend([complete_step, retry_task]);
+    tools.as_array_mut().expect("tool definitions").extend([
+        complete_step,
+        retry_task,
+        get_session_mode,
+        set_session_mode,
+    ]);
     for tool in tools.as_array_mut().expect("tool definitions") {
         tool["inputSchema"]["properties"]["session_id"] = json!({
             "type": "string", "description": "Shared ID for related calls in the dashboard",
@@ -454,13 +480,6 @@ pub(super) struct RunPi {
     write_paths: Option<Vec<PathBuf>>,
     #[serde(skip)]
     writes: Vec<PathBuf>,
-}
-
-#[derive(Clone, Copy, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum ChatMode {
-    Chat,
-    Work,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -560,6 +579,14 @@ async fn call(
             project_result(
                 projects::work(app, |app| projects::set_session_folders(app, input)).await,
             )
+        }
+        "get_project_session_mode" => {
+            let input = arguments(args)?;
+            project_result(projects::work(app, |app| app.projects.session_mode(input)).await)
+        }
+        "set_project_session_mode" => {
+            let input = arguments(args)?;
+            project_result(projects::work(app, |app| projects::set_session_mode(app, input)).await)
         }
         "read_project_session" => {
             let input = arguments(args)?;
@@ -813,13 +840,19 @@ async fn run_pi(
             .map_err(|error| format!("Could not resolve workspace: {error}"))?;
         (None, workspace)
     };
+    let saved_mode = project.as_ref().and_then(|project| project.mode);
+    if let Some((expected, current)) = request.mode.zip(saved_mode)
+        && expected != current
+    {
+        return Err(format!(
+            "Режим чата изменился: сейчас {}, ожидался {}.",
+            current.as_str(),
+            expected.as_str(),
+        ));
+    }
+    let mode = saved_mode.or(request.mode).unwrap_or_default();
     let model = installed_model(&request.model).await?;
     let dashboard = matches!(origin, projects::MessageOrigin::Dashboard);
-    let mode = if dashboard {
-        request.mode.unwrap_or(ChatMode::Chat)
-    } else {
-        ChatMode::Work
-    };
     let store = app.clone();
     let source = model.clone();
     let text_only = mode == ChatMode::Chat;

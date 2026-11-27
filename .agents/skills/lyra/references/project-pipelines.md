@@ -17,14 +17,33 @@ Plan fresh chats early where a step can work from a short handoff. Use shared pr
 
 When the user delegates creation or explicitly forbids the orchestrator from writing code, the orchestrator learns the requirements, schedules work, and verifies results. It does not author the deliverable or silently finish a worker's partial edit. Give each worker the requested behavior and acceptance checks. Leave room for the worker to design details the user delegated. Preserve the requested file layout and restrictions on deployment or external actions independently of model choice.
 
-1. **Resolve the destination.** If the user names a chat, find it with `list_projects` and verify the registered working folder. Use `read_project_session` for the relevant history when the user refers to earlier work. For sequential work in that chat, use `run_pi` with its project and chat IDs. If concurrent execution is requested and separate step chats are acceptable, queue the steps in the same project. Scope all steps to the user's requested folder.
+1. **Resolve the destination.** If the user names a chat, find it with `list_projects` and verify the registered working folder and shared Chat or Work mode. Use `read_project_session` for the relevant history when the user refers to earlier work. For sequential work in that chat, use `run_pi` with its project and chat IDs and `mode: work` as the expected mode. If concurrent execution is requested and separate step chats are acceptable, queue the steps in the same project. Scope all steps to the user's requested folder.
 2. **Constrain writes.** With `run_pi` or `enqueue_project_tasks`, pass exact relative filenames in `write_paths`, such as `["index.html"]`. Keep the folder in `folders`, the chat's working folder, or `workspace` as appropriate. Pass `index.html` as plain text in the write tool's path value, without Markdown backticks, closing punctuation, or an appended Windows backslash. The orchestrator sets the allowlist itself. Lyra checks each write against it and disables shell access for that step. This works with a single file and with `parallel` omitted.
 3. **Run the independent review.** Choose an eligible local reviewer according to the required pipeline. Use `run_pi` with `role: review` in a fresh chat for direct work, unless the user explicitly requires all turns in one chat. In the queue, make the review depend on every implementation step, or attach `follow_up.review` to the final implementation step. Pass the original acceptance criteria. Ask the reviewer to inspect the actual directory and read the exact expected files. A worker's file path or completion claim alone is insufficient.
 4. **Close the loop.** If an expected file is missing, misnamed, or fails a check, delegate a bounded fix using the same exact allowed paths and repeat the relevant review. If an unexpected file already exists, report it and preserve it unless removal is authorized. State which checks actually ran. Maintain the no-deploy rule during verification.
 
 ### Example with parallel implementation
 
-For a static page with a settled HTML contract and where separate files fit the request, run styling and behavior in parallel with `write_paths: ["styles.css"]` and `write_paths: ["timer.js"]`. Give them shared IDs or interface details, then queue an integration step with `write_paths: ["index.html"]` and `after` pointing to both. Review the assembled page against the user's requirements. If the user requires a single HTML file, use one writer for that file and a separate review. Independent analysis may overlap without multiple writers editing the HTML. If the user requests multiple distinct local workers, explain how each will contribute and report which models ran.
+For a static page with a settled HTML contract and where separate files fit the request, run styling and behavior in parallel with `write_paths: ["styles.css"]` and `write_paths: ["timer.js"]`. Give them shared IDs or interface details, then queue an integration step with `write_paths: ["index.html"]` and `after` pointing to both. Review the assembled page against the user's requirements. When the deliverable must stay in one HTML file, use the sequential workflow below. If the user requests multiple distinct local workers, explain how each will contribute and report which models ran.
+
+## Split work on a single file
+
+Split a substantial single-file deliverable into implementation passes when the requirements have clear handoffs. Use separate task keys and chats for those passes. The file constraint determines which paths may be written and which passes must run in sequence. As a dispatch check, verify that each implementation pass has one outcome and its own task ID or chat ID. A request that hands all the requirements to one worker and then queues a review has one implementation pass.
+
+Queue same-file writers with a complete `write_paths` list and explicit `after` dependencies. For a new file, the first writer creates it and establishes the shared IDs and structure. Each successor reads the current file, makes targeted edits for its pass, and reads the saved result. Pass the contract and short acceptance checks to each chat. Keep earlier contributions in place. Use the strongest eligible independent model for final review and repeat the review after any fixes.
+
+### Worked example with one self-contained landing page
+
+Register the requested folder and scope each writer to `write_paths: ["landing.html"]`. Carry the requested limits on file writes, external resources, deployment, and servers into every step. In this example the page works as a directly opened file, including useful content and navigation with JavaScript disabled.
+
+| Step key | Deliverable for this chat | `after` | Write paths |
+| --- | --- | --- | --- |
+| `landing-structure` | Establish the concept, Russian copy, semantic sections, CTA and anchors. Create the HTML and define IDs or hooks for later passes. | — | `landing.html` |
+| `landing-visual` | Read the HTML. Add the original hero visual and embedded CSS. Verify layout down to 320 px, focus states, and reduced-motion styles. Preserve the anchor and interaction hooks. | `landing-structure` | `landing.html` |
+| `landing-motion` | Read the saved page. Add embedded JavaScript for scroll reveal and interaction feedback. Keep anchors and content usable without JavaScript and honor reduced motion. | `landing-visual` | `landing.html` |
+| `landing-review` | Read the assembled file and verify the concept, layout, internal navigation, accessibility, and motion against the original request. Report which checks were possible with the available tools. | `landing-motion` | Read-only file tools with `role: review` |
+
+Omit `parallel` for the shared-file writes. Check that the queue returns three implementation task IDs and a separate review task ID in this example. Report the actual stages, checks, and any blockers after completion.
 
 ## Plan and submit
 
