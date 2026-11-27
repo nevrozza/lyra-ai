@@ -19,6 +19,8 @@ export function createCommands({ openChat }) {
   const externalHost = get('command-external-host');
   const pendingLink = get('command-pending-link');
   const settingsDialog = get('command-settings-dialog');
+  const terminalButton = get('command-settings-global');
+  const modeLabel = get('command-mode-label');
   let selection;
   let fresh = false;
   let current;
@@ -43,7 +45,7 @@ export function createCommands({ openChat }) {
     if (visible && panel.parentElement !== host) host.append(panel);
     panel.hidden = !visible;
     pendingLink.hidden = place !== 'other';
-    pendingLink.textContent = command?.running ? 'Команда Pi в другом чате' : 'Pi ждёт подтверждения';
+    pendingLink.textContent = command?.running ? 'Команда в другом чате' : 'Терминал ждёт подтверждения';
     if (!visible) return;
     if (place === 'chat' && (changed || wasHidden)) panel.scrollIntoView({ block: 'nearest' });
     title.textContent = command.stopping ? 'Остановка команды' :
@@ -58,8 +60,14 @@ export function createCommands({ openChat }) {
   }
 
   function updateMode() {
-    mode.disabled = !online || !savedMode || saving;
+    mode.disabled = !online || !fresh || !savedMode || saving;
     if (!saving && savedMode) mode.value = savedMode;
+    const known = online && fresh && savedMode;
+    terminalButton.dataset.mode = known ? savedMode : '';
+    modeLabel.textContent = !known ? 'Терминал · нет данных' :
+      savedMode === 'allow_all' ? 'Команды разрешены' : 'Подтверждать команды';
+    terminalButton.title = 'Терминал — глобальные разрешения Lyra';
+    terminalButton.setAttribute('aria-label', `Терминал: ${modeLabel.textContent}. Глобальные разрешения Lyra`);
   }
 
   async function refresh() {
@@ -81,6 +89,7 @@ export function createCommands({ openChat }) {
     } catch {
       if (version !== request) return;
       fresh = false;
+      updateMode();
       render(current);
       if (!current) return;
       error.textContent = 'Не удалось обновить состояние команды.';
@@ -89,7 +98,7 @@ export function createCommands({ openChat }) {
   }
 
   mode.addEventListener('change', async () => {
-    if (!online || saving || mode.value === savedMode) return;
+    if (!online || !fresh || saving || mode.value === savedMode) return;
     saving = true;
     settingsError.hidden = true;
     updateMode();
@@ -144,11 +153,9 @@ export function createCommands({ openChat }) {
   }
 
   pendingLink.addEventListener('click', () => void reveal());
-  for (const id of ['project-command-link', 'command-settings-global']) {
-    get(id).addEventListener('click', () => {
-      if (!settingsDialog.open) settingsDialog.showModal();
-    });
-  }
+  terminalButton.addEventListener('click', () => {
+    if (!settingsDialog.open) settingsDialog.showModal();
+  });
   get('close-command-settings').addEventListener('click', () => settingsDialog.close());
   navigator.serviceWorker?.addEventListener('message', async event => {
     if (event.data !== 'show-command') return;
@@ -161,8 +168,6 @@ export function createCommands({ openChat }) {
     setSelection(next) {
       if (selection?.projectId === next?.projectId && selection?.chatId === next?.chatId) return;
       selection = next;
-      get('command-settings-global').hidden = next?.chatId != null;
-      get('project-command-link').hidden = next?.chatId == null;
       render(current);
     },
     setOnline(value) {
@@ -171,7 +176,7 @@ export function createCommands({ openChat }) {
       updateMode();
       render(current);
     },
-    clear() { request++; fresh = false; render(null); },
+    clear() { request++; fresh = false; updateMode(); render(null); },
   };
 }
 
@@ -209,7 +214,7 @@ function createNotifications() {
       if (id == null || !document.hidden || notified === id) return;
       if (!displayed.some(notification => notification.data === id)) {
         await registration.showNotification('Lyra ждёт подтверждения', {
-          body: 'Откройте Lyra, чтобы проверить команду Pi.',
+          body: 'Откройте Lyra, чтобы проверить команду терминала.',
           icon: '/lyra.svg',
           tag,
           data: id,

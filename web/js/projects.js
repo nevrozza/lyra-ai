@@ -212,6 +212,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     chatForm.querySelector('[type="submit"]').disabled = !ready;
     composer.hidden = !chat || chat.archived || project.archived;
     const working = chatMode() === 'work';
+    get('project-mode-control').hidden = !chat;
     const chatModeButton = get('project-mode-chat');
     const workModeButton = get('project-mode-work');
     chatModeButton.setAttribute('aria-pressed', String(!working));
