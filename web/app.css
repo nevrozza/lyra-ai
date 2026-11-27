@@ -324,11 +324,18 @@ h2 { font-size: .96rem; font-weight: 650; }
 #mcp-servers-status[data-error="true"] { color: #f0cd91; }
 .unload:disabled { background: transparent; border-color: var(--line); color: var(--muted); opacity: .6; }
 .model-roles { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); }
-.model-roles summary { cursor: pointer; font-size: .9rem; }
-#model-roles-form { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px 10px; margin-top: 10px; font-size: .85rem; }
-#model-roles-form select { min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #141b17; color: inherit; font: inherit; }
-#save-model-roles { grid-column: 1 / -1; justify-self: start; }
-#model-roles-feedback { grid-column: 1 / -1; margin: 0; overflow-wrap: anywhere; }
+.model-roles summary { cursor: pointer; font-size: .83rem; color: var(--muted); }
+.model-roles summary:hover { color: #edf0ea; }
+#model-roles-form { display: grid; gap: 0; margin-top: 10px; font-size: .83rem; }
+.model-role-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 122px), 1fr)); align-items: center; gap: 6px 12px; padding: 10px 0; min-width: 0; }
+.model-role-row + .model-role-row { border-top: 1px solid var(--line); }
+.model-role-row label { display: grid; gap: 2px; min-width: 0; }
+.model-role-row label strong { font-size: .83rem; font-weight: 600; }
+.model-role-row label small { color: var(--muted); font-size: .73rem; line-height: 1.35; }
+#model-roles-form select { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: #141b17; color: inherit; font: .78rem var(--mono); text-overflow: ellipsis; }
+#model-roles-form select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.model-role-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 5px; }
+#model-roles-feedback { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
 #model-roles-feedback:empty { display: none; }
 .model-error { margin-top: 8px; color: #f0ac9c; overflow-wrap: anywhere; }
 .facts { margin: 15px 0 0; }

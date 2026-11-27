@@ -241,16 +241,23 @@
             </div>
             <details id="model-roles" class="model-roles" open>
               <summary>Уровни интеллекта моделей</summary>
-              <p class="secondary">Low — механические правки; Medium — код; High — сложный код и ревью.</p>
               <form id="model-roles-form">
-                <label for="role-medium">Medium — средний</label>
-                <select id="role-medium" name="medium" disabled></select>
-                <label for="role-low">Low — низкий</label>
-                <select id="role-low" name="low" disabled></select>
-                <label for="role-high">High — высокий</label>
-                <select id="role-high" name="high" disabled></select>
-                <button id="save-model-roles" class="unload" type="submit" disabled>Сохранить уровни</button>
-                <p id="model-roles-feedback" class="secondary" role="status"></p>
+                <div class="model-role-row">
+                  <label for="role-low"><strong>Low</strong><small id="role-low-hint">Простые правки</small></label>
+                  <select id="role-low" name="low" aria-describedby="role-low-hint" disabled></select>
+                </div>
+                <div class="model-role-row">
+                  <label for="role-medium"><strong>Medium</strong><small id="role-medium-hint">Написание кода</small></label>
+                  <select id="role-medium" name="medium" aria-describedby="role-medium-hint" disabled></select>
+                </div>
+                <div class="model-role-row">
+                  <label for="role-high"><strong>High</strong><small id="role-high-hint">Сложный код и ревью</small></label>
+                  <select id="role-high" name="high" aria-describedby="role-high-hint" disabled></select>
+                </div>
+                <div class="model-role-actions">
+                  <button id="save-model-roles" class="unload" type="submit" disabled>Применить</button>
+                  <p id="model-roles-feedback" class="secondary" role="status"></p>
+                </div>
               </form>
             </details>
             <p id="model-error" class="secondary model-error" role="alert" hidden></p>
