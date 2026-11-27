@@ -77,15 +77,18 @@ export function createSkills() {
         toggle.setAttribute('aria-label', 'Включить скилл ' + skill.name);
         toggle.onchange = () => changeSkill(skill, toggle.checked);
         label.append(toggle, element('span', skill.enabled ? 'Включён' : 'Отключён'));
-        const remove = element('button', 'Удалить');
-        remove.type = 'button';
-        remove.className = 'unload skill-remove';
-        remove.dataset.remove = 'true';
-        remove.title = 'Удалить скилл ' + skill.name;
-        remove.onclick = () => {
-          if (window.confirm('Удалить скилл «' + skill.name + '» из Lyra?')) changeSkill(skill);
-        };
-        controls.append(label, remove);
+        controls.append(label);
+        if (!skill.builtin) {
+          const remove = element('button', 'Удалить');
+          remove.type = 'button';
+          remove.className = 'unload skill-remove';
+          remove.dataset.remove = 'true';
+          remove.title = 'Удалить скилл ' + skill.name;
+          remove.onclick = () => {
+            if (window.confirm('Удалить скилл «' + skill.name + '» из Lyra?')) changeSkill(skill);
+          };
+          controls.append(remove);
+        }
         heading.append(name, controls);
         entry.append(heading, description);
         if (skill.role_template) {
@@ -102,7 +105,7 @@ export function createSkills() {
   }
 
   async function changeSkill(skill, enabled) {
-    if (!online || saving || (enabled === undefined && running)) return;
+    if (!online || saving || (enabled === undefined && (running || skill.builtin))) return;
     saving = true;
     updateControls();
     result.dataset.error = 'false';
