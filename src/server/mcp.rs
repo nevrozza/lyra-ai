@@ -84,7 +84,7 @@ async fn handle(
                     | "list_projects"
                     | "save_project"
                     | "create_project_session"
-                    | "set_project_session_folders"
+                    | "set_project_session_settings"
                     | "get_project_session_mode"
                     | "set_project_session_mode"
                     | "read_project_session"
@@ -200,7 +200,7 @@ fn tools() -> Value {
         "parallel": {"type": "boolean", "default": false, "description": "Allow this step to overlap other steps. Requires write_paths."},
         "write_paths": write_paths,
         "role": worker_role,
-        "folders": {"type": "array", "items": {"type": "string"}, "description": "Optional registered project folders, primary first. Defaults to the project's folders."},
+        "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder."},
         "skills": {"type": "array", "items": {"type": "string"}},
         "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
         "follow_up": follow_up,
@@ -214,7 +214,7 @@ fn tools() -> Value {
             "project_id": {"type": "integer", "minimum": 1},
             "project_session_id": {"type": "integer", "minimum": 1, "description": "Original queued task ID."},
             "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context for the retry. Required and strictly larger for a retry in the same chat. For a fresh chat, omit to keep the last window."},
-            "fresh_chat": {"type": "boolean", "default": false, "description": "Start a new saved chat with the same working folders and no previous messages."},
+            "fresh_chat": {"type": "boolean", "default": false, "description": "Start a new saved chat with the same task workspace and no previous messages."},
             "prompt": {"type": "string", "minLength": 1, "maxLength": 32000, "description": "Continuation prompt for the retry."}
         }, "required": ["project_id", "project_session_id", "prompt"], "additionalProperties": false}
     });
@@ -302,8 +302,7 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default."},
-                "search_skill": {"type": ["string", "null"], "description": "Installed Lyra skill to prefer for project searches, such as ast-index."}
+                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default."}
             }, "required": ["name", "folders"], "additionalProperties": false}
         },
         {
@@ -314,20 +313,17 @@ fn tools() -> Value {
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing group in this project."},
                 "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a named group; mutually exclusive with group_id."},
-                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Registered working folders for this chat. The first is the working directory. Omit to use all project folders."},
-                "folder": {"type": "string", "description": "Legacy primary working directory."},
                 "mode": {"enum": ["chat", "work"], "default": "work", "description": "Initial saved mode."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
         },
         {
-            "name": "set_project_session_folders",
-            "description": "Change a saved chat's working folders. Keep its existing primary folder first.",
+            "name": "set_project_session_settings",
+            "description": "Rename a saved chat. Its working folders are inherited from the project.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1},
-                "name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}}
-            }, "required": ["project_id", "project_session_id", "folders"], "additionalProperties": false}
+                "name": {"type": "string", "minLength": 1, "maxLength": 120}
+            }, "required": ["project_id", "project_session_id", "name"], "additionalProperties": false}
         },
         {
             "name": "enqueue_project_tasks",
@@ -373,7 +369,7 @@ fn tools() -> Value {
             "description": "Run Pi with an installed Ollama model in Chat or Work mode.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
-                "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. With project_session_id, the folder is set by the chat."},
+                "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. Ordinary saved chats also inherit this default. Queued steps retain their reserved execution root."},
                 "project_id": {"type": "integer", "minimum": 1, "description": "Lyra project to use. Loads instructions from its registered folders."},
                 "project_session_id": {"type": "integer", "minimum": 1, "description": "Saved project chat to continue. Requires project_id."},
                 "mode": {"enum": ["chat", "work"], "description": "Expected saved mode for an existing chat. For runs without a saved chat, selects the mode and defaults to Work."},
@@ -581,10 +577,10 @@ async fn call(
             let input = arguments(args)?;
             project_result(projects::work(app, |app| projects::add_session(app, input)).await)
         }
-        "set_project_session_folders" => {
+        "set_project_session_settings" => {
             let input = arguments(args)?;
             project_result(
-                projects::work(app, |app| projects::set_session_folders(app, input)).await,
+                projects::work(app, |app| projects::set_session_settings(app, input)).await,
             )
         }
         "get_project_session_mode" => {
@@ -921,16 +917,6 @@ async fn run_pi(
     })
     .await
     .map_err(|error| error.to_string())??;
-    let search_skill = project
-        .as_ref()
-        .and_then(|project| project.project.search_skill.as_deref())
-        .filter(|skill| {
-            !text_only
-                && request
-                    .skills
-                    .as_ref()
-                    .is_none_or(|skills| skills.iter().any(|name| name == skill))
-        });
     let skill_store = app.clone();
     let selected = if text_only {
         Some(Vec::new())
@@ -940,19 +926,6 @@ async fn run_pi(
     let skills = tokio::task::spawn_blocking(move || skill_store.skills.paths(selected.as_deref()))
         .await
         .map_err(|_| "Could not read installed Pi skills")??;
-    let search_skill = search_skill
-        .map(|name| {
-            skills
-                .iter()
-                .find(|path| {
-                    path.parent()
-                        .and_then(|folder| folder.file_name())
-                        .is_some_and(|folder| folder == name)
-                })
-                .map(|manifest| (name, manifest.as_path()))
-                .ok_or_else(|| format!("Project search skill is not installed: {name}"))
-        })
-        .transpose()?;
     let scope = if project.is_some() {
         DelegationScope::Project {
             session_id,
@@ -976,7 +949,6 @@ async fn run_pi(
             skills: &skills,
             agents_file: &app.agents_file,
             project: project.as_ref(),
-            search_skill,
             origin,
             text_only,
             model: &model,
