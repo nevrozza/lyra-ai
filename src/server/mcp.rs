@@ -92,6 +92,8 @@ async fn handle(
                     | "set_group_context"
                     | "archive_project"
                     | "enqueue_project_tasks"
+                    | "enqueue_and_wait"
+                    | "await_project_tasks"
                     | "get_project_tasks"
                     | "cancel_project_task"
                     | "retry_project_task"
@@ -207,6 +209,39 @@ fn tools() -> Value {
         "max_output_tokens": pi_output_limit
     }, "required": ["name", "prompt"], "additionalProperties": false});
     queue_task["properties"]["role"]["default"] = json!("implement");
+    let enqueue_schema = json!({"type": "object", "properties": {
+                "project_id": {"type": "integer", "minimum": 1},
+                "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
+                "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing task group in this project across batches."},
+                "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a group named for the overall task. Mutually exclusive with group_id."},
+                "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared goal and constraints, saved atomically before any new group task starts. For an existing group use set_group_context instead."},
+                "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": queue_task}
+            }, "required": ["project_id", "tasks"], "additionalProperties": false});
+    let mut blocking_batch_schema = enqueue_schema.clone();
+    blocking_batch_schema["required"] = json!(["project_id", "batch_id", "tasks"]);
+    let await_timeout = json!({"type": "integer", "minimum": 1,
+        "maximum": projects::queue::MAX_AWAIT_SECONDS, "default": projects::queue::MAX_AWAIT_SECONDS,
+        "description": "Server-side wait limit; use the default with a 3600-second Codex MCP timeout. Expiry does not cancel work."});
+    let enqueue_and_wait = json!({
+        "name": "enqueue_and_wait",
+        "description": "Preferred for a settled batch when no independent orchestrator work is needed. Submit a batch and wait for completion including automatic review/fix rounds, or actionable failure, pause or ready external step. Returns task IDs and compact handoffs. Requires stable batch_id; reuse the same batch after a lost response, never duplicate it.",
+        "inputSchema": {"type": "object", "properties": {
+            "batch": blocking_batch_schema, "timeout_seconds": await_timeout.clone()
+        }, "required": ["batch"], "additionalProperties": false},
+        "annotations": {"destructiveHint": false}
+    });
+    let await_project_tasks = json!({
+        "name": "await_project_tasks",
+        "description": "Wait on saved task IDs or a group without polling. Includes automatic review/fix rounds and unresolved prerequisites. Returns only on completion, actionable attention, timeout or server stop. Read-only; timeout/disconnect does not cancel tasks. Prefer specific task IDs.",
+        "inputSchema": {"type": "object", "properties": {
+            "project_id": {"type": "integer", "minimum": 1},
+            "task_ids": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}},
+            "group_id": {"type": "integer", "minimum": 1},
+            "timeout_seconds": await_timeout,
+            "known_completed_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "IDs whose completed handoffs you already read; keep status but omit their result bodies. Never suppress failures."}
+        }, "required": ["project_id"], "anyOf": [{"required":["task_ids"]},{"required":["group_id"]}], "additionalProperties": false},
+        "annotations": {"readOnlyHint": true}
+    });
     let retry_task = json!({
         "name": "retry_project_task",
         "description": "Resume a task paused on context_full or output_limit while preserving its task ID and dependencies. Inspect saved tool evidence and continue only remaining work; do not retry user cancellation.",
@@ -329,18 +364,11 @@ fn tools() -> Value {
         {
             "name": "enqueue_project_tasks",
             "description": "Queue project steps in an optional named group with dependencies and parallel file scopes. Multi-step batches and automatic workflows are grouped by default.",
-            "inputSchema": {"type": "object", "properties": {
-                "project_id": {"type": "integer", "minimum": 1},
-                "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
-                "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing task group in this project across batches."},
-                "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a group named for the overall task. Mutually exclusive with group_id."},
-                "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared goal and constraints, saved atomically before any new group task starts. For an existing group use set_group_context instead."},
-                "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": queue_task}
-            }, "required": ["project_id", "tasks"], "additionalProperties": false}
+            "inputSchema": enqueue_schema
         },
         {
             "name": "get_project_tasks",
-            "description": "Read project task status, results, follow-ups, and context notices.",
+            "description": "Inspect task status, results and follow-ups once. Use await_project_tasks instead of repeated polling; wait_seconds is retained for older clients.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "task_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
@@ -407,6 +435,8 @@ fn tools() -> Value {
     tools.as_array_mut().expect("tool definitions").extend([
         complete_step,
         retry_task,
+        enqueue_and_wait,
+        await_project_tasks,
         get_session_mode,
         set_session_mode,
     ]);
@@ -644,6 +674,10 @@ async fn call(
             projects::queue::enqueue(app, arguments(args)?, projects::MessageOrigin::Orchestrator)
                 .await,
         ),
+        "enqueue_and_wait" => project_result(
+            projects::queue::enqueue_and_wait(app, arguments(args)?, projects::MessageOrigin::Orchestrator).await,
+        ),
+        "await_project_tasks" => project_result(projects::queue::await_tasks(app, arguments(args)?).await),
         "retry_project_task" => project_result(projects::queue::retry(app, arguments(args)?).await),
         "get_project_tasks" => project_result(projects::queue::query(app, arguments(args)?).await),
         "complete_project_step" => {
