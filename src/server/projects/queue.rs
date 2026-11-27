@@ -1526,7 +1526,7 @@ mod tests {
             &review,
             r#"local
 {"status":"fixes","findings":[
-    {"location":"a","issue":"first","check":"check a","model":"local"},
+    {"location":"a","issue":"first","instructions":"Read a; preserve the public contract; add a missing guard before returning.","check":"check a","model":"local"},
     {"location":"b","issue":"second","check":"check b","model":"local"},
     {"location":"a again","issue":"third","check":"check a again","model":"local","after":[1,2]}
 ]}"#,
@@ -1534,6 +1534,10 @@ mod tests {
         );
         let [first, second]: [TaskView; 2] = ready().try_into().ok().unwrap();
         assert!(first.job.parallel && second.job.parallel);
+        let prompt = &first.job.input.as_ref().unwrap().prompt;
+        assert!(prompt.contains("Read a; preserve the public contract; add a missing guard before returning."));
+        assert!(prompt.contains("## Acceptance and verification\ncheck a"));
+        assert!(second.job.input.as_ref().unwrap().prompt.contains("Legacy finding without a separate correction plan"));
         assert!(first.job.after.is_empty() && second.job.after.is_empty());
 
         let pass = "local\n{\"status\":\"pass\",\"summary\":\"fixed\"}";
