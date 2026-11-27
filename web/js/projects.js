@@ -164,7 +164,8 @@ export function createProjects() {
       if (icon.dataset.groupProgress != null) {
         const members = groupMembers(p, Number(icon.dataset.groupProgress));
         const states = members.map(chat => chatState(chat, p, activeChats));
-        setTreeState(icon, states.includes('busy') ? 'busy' : '');
+        const closed = collapsedGroups.has(`${p.id}/group/${icon.dataset.groupProgress}`);
+        setTreeState(icon, closed && states.includes('busy') ? 'busy' : '');
       } else {
         const chat = p.sessions.find(candidate => candidate.id === Number(icon.dataset.chatProgress));
         if (!chat) continue;
@@ -299,6 +300,7 @@ export function createProjects() {
           if (collapsedGroups.has(key)) collapsedGroups.delete(key);
           else collapsedGroups.add(key);
           applyCollapsed();
+          updateControls();
         };
         applyCollapsed();
         entry.append(toggle, children);
