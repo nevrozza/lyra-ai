@@ -181,7 +181,7 @@ pub(super) fn add_candidates(
     });
     let _ = write!(
         prompt,
-        "\n\nLyra can run up to {} scoped fixes with up to {} distinct models at once. Reuse one model for independent fixes when equally suitable.\nLocal hardware snapshot before starting this review (bytes, null means unknown): {system}\nUse inspect_review_resources for current headroom before deciding to overlap a build with diff review. Treat unknown estimates conservatively. Lyra may unload this reviewer before loading a different successor.\nInstalled models eligible for a fix (weights are estimates):\n{models}",
+        "\n\nLyra can run up to {} parallel fixes with up to {} distinct models at once. Reuse one model for independent fixes when equally suitable.\nLocal hardware snapshot before starting this review (bytes, null means unknown): {system}\nUse inspect_review_resources for current headroom before deciding to overlap a build with diff review. Treat unknown estimates conservatively. Lyra may unload this reviewer before loading a different successor.\nInstalled models eligible for a fix (weights are estimates):\n{models}",
         AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models,
     );
 }
