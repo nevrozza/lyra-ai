@@ -284,7 +284,7 @@ pub(in crate::server) fn mutate(
                     .map_err(|_| invalid("Only UTF-8 text can be edited"))?, edits)?,
         };
         if content.len() > FILE_LIMIT { return Err(invalid("File exceeds the 4 MiB guarded file limit")); }
-        replace_file(&target, &content)?;
+        replace_file(&target, &content, current.as_deref())?;
         versions.remember(&target, content.into_bytes(), full);
         Ok(())
     })();
@@ -298,7 +298,7 @@ pub(in crate::server) fn mutate(
     result
 }
 
-fn replace_file(target: &Path, content: &str) -> io::Result<()> {
+fn replace_file(target: &Path, content: &str, expected: Option<&[u8]>) -> io::Result<()> {
     let parent = target.parent().expect("file parent");
     fs::create_dir_all(parent)?;
     let permissions = match fs::metadata(&target) {
@@ -322,7 +322,26 @@ fn replace_file(target: &Path, content: &str) -> io::Result<()> {
     if let Some(permissions) = permissions {
         file.as_file().set_permissions(permissions)?;
     }
-    file.persist(target).map_err(|error| error.error)?;
+    if let Some(expected) = expected {
+        // Also catch external edits during preparation, although arbitrary external
+        // writers are not coordinated by Lyra and can still race the final rename.
+        match read_bytes(target) {
+            Ok(current) if current.as_slice() == expected => {}
+            Ok(_) => return Err(invalid("FILE_CHANGED: file changed during the edit. Read it again.")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound =>
+                return Err(invalid("FILE_CHANGED: file disappeared during the edit. Read it again.")),
+            Err(error) => return Err(error),
+        }
+        file.persist(target).map_err(|error| error.error)?;
+    } else {
+        // A file created by another process after the existence check must
+        // never be silently overwritten by a create operation.
+        file.persist_noclobber(target).map_err(|error| {
+            if error.error.kind() == io::ErrorKind::AlreadyExists {
+                invalid("FILE_CHANGED: a file appeared during creation. Read it before modifying.")
+            } else { error.error }
+        })?;
+    }
     Ok(())
 }
 
@@ -382,6 +401,17 @@ mod tests {
         change(root, &mut versions, r#"{"tool":"edit","path":"src/new.txt","edits":[{"oldText":"first\nsecond","newText":"one\ntwo"},{"oldText":"third","newText":"three"}]}"#).unwrap();
         assert_eq!(fs::read_to_string(root.join("src/new.txt")).unwrap(), "one\r\ntwo\r\nthree\r\n");
         assert!(change(root, &mut versions, r#"{"tool":"write","path":"../outside","content":"no"}"#).is_err());
+    }
+
+    #[test]
+    fn atomic_creation_never_overwrites_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, "created elsewhere").unwrap();
+        assert!(replace_file(&path, "new", None).unwrap_err().to_string().contains("FILE_CHANGED"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "created elsewhere");
+        assert!(replace_file(&path, "new", Some(b"old")).unwrap_err().to_string().contains("FILE_CHANGED"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "created elsewhere");
     }
 
     #[test]
