@@ -1317,6 +1317,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn unfinished_worker_does_not_release_dependents_or_automatic_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(super::super::SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let tasks = store.enqueue(serde_json::from_value(json!({
+            "project_id": project.id,
+            "tasks": [
+                {"name":"Design","key":"design","model":"local","prompt":"Design",
+                 "follow_up":{"review":{"model":"reviewer","prompt":"Review design"}}},
+                {"name":"Implementation","model":"local","prompt":"Implement","after":["design"]}
+            ]
+        })).unwrap(), MessageOrigin::Orchestrator).unwrap();
+        let design = tasks[0].key();
+        assert!(store.set_job(&design, &[Status::Queued], Status::Running, None).unwrap());
+        store.complete_job(&design, Status::Blocked, JobResult {
+            text: "I will now create the design".into(),
+            stop_reason: Some("task_incomplete".into()),
+            truncated: false,
+            context: None,
+        }, &[]).unwrap();
+        assert!(store.ready_tasks().unwrap().is_empty());
+        assert!(store.block_failed_dependencies().unwrap());
+        let catalog = store.list().unwrap();
+        let project = &catalog.projects[0];
+        assert_eq!(project.sessions.len(), 2);
+        assert!(project.sessions[0].job.as_ref().unwrap().status == Status::Blocked);
+        assert!(project.sessions[1].job.as_ref().unwrap().status == Status::Blocked);
+    }
+
+    #[test]
     fn dependency_text_is_available_before_consumer_dispatch_without_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("data"));

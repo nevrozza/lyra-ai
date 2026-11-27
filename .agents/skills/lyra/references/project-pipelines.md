@@ -167,3 +167,19 @@ Declare every data dependency with `after` (task keys in the same batch or task 
 Ask workers to finish with actionable decisions, interfaces, paths, checks and blockers. The orchestrator must inspect the shared context before the next batch and ensure omitted or truncated details are read or supplied when needed. A failed, stopped, or partial result is not a verified decision. Do not write CONTEXT.md into the project repository or ask workers to overwrite shared group memory. Lyra assembles results from separate persisted records.
 
 A queue task with `stop_reason: file_conflict` is blocked, not completed. Re-read current files, inspect the worker's final report and the conflicting task, and schedule only the remaining necessary work after its prerequisites. A resolved conflict does not block the task. Do not use shell to force a change.
+
+
+## Orchestrator-led checkpoints
+
+Use the existing queue, group context and brief revision APIs; do not invent an approval API or rely on after as a quality gate. The orchestrator is the lead developer, not another autonomous worker.
+
+For an unsettled design/architecture or other consequential decision:
+1. Create the group and its shared user requirements. Enqueue only the discovery/design step(s). Require a concrete, inspectable text proposal and evidence, not an implementation.
+2. Wait for the returned task IDs. Read the actual saved handoff via get_group_context/get_project_tasks or read_project_session when necessary. A finish_task call/Completed status means the worker claims to have finished; it does not approve the proposal.
+3. Personally evaluate whether it meets the original goal, has a coherent idea and is feasible. Accept it, make minor textual corrections yourself, or delegate a substantial revision with targeted feedback. Stay within the user's permission; do not edit implementation code when workers are meant to execute it. No extra model run for a small decision you can settle yourself.
+4. Persist the approved contract in the shared group brief using its current revision, preserving requirements and stating which earlier candidate it supersedes. Only after that create the consuming implementation tasks, with the approved contract and precise execution plans; use after for the actual prerequisite IDs. If a prior text proposal is inadequate, do not schedule its implementation.
+5. Read implementation handoffs and independently verify the assembled result. Use the local review/fix loop for technical checks and settled corrections, or manually coordinate fixes when their proposed approach needs your approval. Personally assess the final result against the user's goal, not merely the review JSON.
+
+For example, a proposed exhibition landing design might specify palette, hierarchy, grid, hero artwork, and mobile treatment. The orchestrator can reject a generic corporate hero, choose an editorial composition, correct the hierarchy and approve a coherent visual contract in CONTEXT.md. Only then should a new chat receive a precise implementation plan (semantic structure, approved visual tokens and layout, anchor behavior, responsive rules, and concrete verification). If a larger conceptual rework is needed, ask the designer for that revision before implementation. This does not authorize writing the implementation instead of the worker.
+
+Do not make every simple task pass through this process. Independent settled tasks can still be batched; meaningful checkpoints, not arbitrary task count, determine the handoff boundaries. A task that returns task_incomplete/task_blocked does not release its dependents. Inspect it before deciding on recovery; never override user cancellation.

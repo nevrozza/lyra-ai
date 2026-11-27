@@ -1143,8 +1143,9 @@ pub(super) async fn run_queued(
             let status = match stop_reason.as_deref() {
                 Some(projects::USER_STOP_REASON) => Status::Cancelled,
                 Some("context_full") => Status::ContextFull,
-                Some("file_conflict") => Status::Blocked,
+                Some("file_conflict" | "task_blocked" | "task_incomplete") => Status::Blocked,
                 _ if reply.is_error => Status::Failed,
+                _ if truncated || stop_reason.as_deref() != Some("stop") => Status::Blocked,
                 _ => Status::Completed,
             };
             (
