@@ -931,8 +931,16 @@ async fn run_pi(
     };
     let skill_store = app.clone();
     let selected = if text_only { Some(Vec::new()) } else { request.skills };
-    let skills = match tokio::task::spawn_blocking(move || skill_store.skills.paths(selected.as_deref())).await {
-        Ok(Ok(skills)) => skills,
+    let role = request.role;
+    let (skills, role_skill_enabled) = match tokio::task::spawn_blocking(move || {
+        let skills = skill_store.skills.paths(selected.as_deref())?;
+        let role_skill_enabled = match role {
+            Some(role) if !text_only => skill_store.skills.enabled(role.skill_name())?,
+            _ => false,
+        };
+        Ok::<_, String>((skills, role_skill_enabled))
+    }).await {
+        Ok(Ok(selection)) => selection,
         result => {
             if reserved.is_none() {
                 finish_delegation(&app, delegation, false, false).await;
@@ -961,6 +969,7 @@ async fn run_pi(
             context_window: Some(context_window),
             think: think.as_ref(),
             role: request.role,
+            role_skill_enabled,
             writes: &writes,
             request_id: (dashboard || reserved.is_some())
                 .then_some(request.request_id.as_deref())
