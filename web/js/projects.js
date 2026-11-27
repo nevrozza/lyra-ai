@@ -39,6 +39,11 @@ export function createProjects() {
   const groupDialog = get('project-group-dialog');
   const groupForm = get('project-group-form');
   let groupEditor;
+  const contextDialog = get('group-context-dialog');
+  const contextForm = get('group-context-form');
+  const contextBrief = get('group-context-brief');
+  let contextEditor;
+  let contextRequest = 0;
   const sendButton = get('send-project-prompt');
   const stopButton = get('stop-project-prompt');
   const modelSelect = get('project-chat-model');
@@ -121,7 +126,7 @@ export function createProjects() {
   }
 
   function report(text = '', error = false) {
-    const target = groupDialog.open ? 'project-group-form-message'
+    const target = contextDialog.open ? 'group-context-message' : groupDialog.open ? 'project-group-form-message'
       : taskDialog.open ? 'project-task-form-message'
       : projectDialog.open ? 'project-form-message'
       : chatDialog.open ? 'project-chat-form-message' : 'project-message';
@@ -196,6 +201,8 @@ export function createProjects() {
     get('new-project-task').hidden = !project || project.archived || archiveView;
     get('new-project-task').disabled = !ready || !(installedModels.length || run?.model);
     for (const button of tree.querySelectorAll('.project-entry-more')) button.disabled = !ready;
+    updateContextControls();
+    for (const button of tree.querySelectorAll('.group-context-entry')) button.disabled = !ready;
     get('cancel-project-group').disabled = saving;
     groupForm.querySelector('[type="submit"]').disabled = !ready;
     pickFolder.disabled = !ready;
@@ -280,6 +287,16 @@ export function createProjects() {
         toggle.append(label, chevron, icon);
         const children = element('ul', '');
         children.className = 'project-group-chats';
+        const contextRow = element('li', '');
+        const contextButton = element('button', '');
+        contextButton.type = 'button';
+        contextButton.className = 'group-context-entry';
+        contextButton.dataset.projectEntry = key + '/context';
+        contextButton.title = 'Общий контекст группы';
+        contextButton.append(element('span', 'CONTEXT.md'));
+        contextButton.onclick = () => openGroupContext(project, group);
+        contextRow.append(contextButton);
+        children.append(contextRow);
         for (const member of chats.filter(candidate => candidate.group?.id === group.id)) {
           const row = element('li', '');
           row.append(entryRow(treeButton(chatLabel(member, project), project.id, member.id), project, member));
@@ -355,6 +372,7 @@ export function createProjects() {
       button.onclick = () => { closeEntryMenu(); handler(); };
       entryMenu.append(button);
     };
+    if (group) add('Общий контекст', () => openGroupContext(project, group));
     if (!project.archived && !archived) {
       if (group) add('Настройки группы', () => openGroupForm(project, group));
       else if (chat) add('Настройки чата', () => openChatForm(chat, project), busy);
@@ -372,6 +390,110 @@ export function createProjects() {
     entryMenu.style.top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8)) + 'px';
     entryMenu.querySelector('button:not(:disabled)')?.focus();
   }
+
+  function updateContextControls() {
+    const doc = contextEditor?.doc;
+    const dirty = doc && contextBrief.value !== contextEditor.baseBrief;
+    const editable = doc?.editable && !contextEditor.readonly;
+    contextBrief.readOnly = !editable || saving || !online;
+    get('group-context-save').disabled = !available() || !editable || !dirty || contextEditor.stale;
+    get('group-context-reload').disabled = !online || saving;
+    get('group-context-download').disabled = !doc;
+    get('group-context-close').disabled = saving;
+  }
+
+  function applyContextDocument(doc, force = false) {
+    if (!contextEditor) return;
+    const dirty = contextEditor.doc && contextBrief.value !== contextEditor.baseBrief;
+    const oldRevision = contextEditor.baseRevision;
+    const oldMarkdown = contextEditor.doc?.markdown;
+    contextEditor.doc = doc;
+    if (force || !dirty) {
+      contextBrief.value = doc.brief;
+      contextEditor.baseBrief = doc.brief;
+      contextEditor.baseRevision = doc.brief_revision;
+      contextEditor.stale = false;
+    } else if (oldRevision !== doc.brief_revision) {
+      contextEditor.stale = true;
+      report('Общая цель изменена в другом окне. Скопируйте черновик и обновите контекст.', true);
+    }
+    get('group-context-title').textContent = doc.name + ' · CONTEXT.md';
+    if (oldMarkdown !== doc.markdown) {
+      get('group-context-preview').replaceChildren(renderMarkdown(doc.markdown));
+    }
+    updateContextControls();
+  }
+
+  async function refreshGroupContext(force = false) {
+    if (!contextDialog.open || !contextEditor || !online) return;
+    const editor = contextEditor;
+    const requestId = ++contextRequest;
+    try {
+      const doc = await request(`/projects/${editor.projectId}/groups/${editor.groupId}/context`);
+      if (requestId === contextRequest && contextEditor === editor && contextDialog.open) {
+        if (force) report();
+        applyContextDocument(doc, force);
+      }
+    } catch (error) {
+      if (requestId === contextRequest && contextEditor === editor && contextDialog.open) {
+        report(error.message, true);
+      }
+    }
+  }
+
+  function openGroupContext(project, group) {
+    if (!available()) return;
+    contextEditor = { projectId: project.id, groupId: group.id, readonly: archiveView || project.archived };
+    contextBrief.value = '';
+    get('group-context-title').textContent = group.name + ' · CONTEXT.md';
+    get('group-context-preview').replaceChildren(element('p', 'Загружаем контекст…'));
+    contextDialog.showModal();
+    report();
+    updateContextControls();
+    refreshGroupContext(true);
+  }
+
+  contextBrief.oninput = updateContextControls;
+  contextDialog.oncancel = event => {
+    if (saving || (contextEditor?.doc && contextBrief.value !== contextEditor.baseBrief &&
+        !window.confirm('Закрыть без сохранения общей цели?'))) event.preventDefault();
+  };
+  contextDialog.onclose = () => { contextRequest++; contextEditor = undefined; };
+  get('group-context-close').onclick = () => {
+    if (saving) return;
+    if (contextEditor?.doc && contextBrief.value !== contextEditor.baseBrief &&
+        !window.confirm('Закрыть без сохранения общей цели?')) return;
+    contextDialog.close();
+  };
+  get('group-context-reload').onclick = () => {
+    if (contextEditor?.doc && contextBrief.value !== contextEditor.baseBrief &&
+        !window.confirm('Обновить контекст и сбросить несохранённые изменения?')) return;
+    refreshGroupContext(true);
+  };
+  get('group-context-download').onclick = () => {
+    if (!contextEditor?.doc) return;
+    const url = URL.createObjectURL(new Blob([contextEditor.doc.markdown], { type: 'text/markdown;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'CONTEXT.md';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  contextForm.onsubmit = event => {
+    event.preventDefault();
+    if (get('group-context-save').disabled || !contextEditor?.doc) return;
+    const editor = contextEditor;
+    const brief = contextBrief.value;
+    ++contextRequest;
+    save('/projects/groups/context', {
+      project_id: editor.projectId, group_id: editor.groupId,
+      brief, brief_revision: editor.baseRevision,
+    }, async doc => {
+      if (contextEditor !== editor) return;
+      applyContextDocument(doc, true);
+      report('Общая цель сохранена.');
+    });
+  };
 
   function openGroupForm(project, group) {
     groupEditor = { project, group };
@@ -559,6 +681,7 @@ export function createProjects() {
       const selection = preferredSelection;
       preferredSelection = undefined;
       await select(selection);
+      if (contextDialog.open && !saving) refreshGroupContext();
     } catch (error) {
       if (requestId === catalogRequest) report(error.message, true);
     }
