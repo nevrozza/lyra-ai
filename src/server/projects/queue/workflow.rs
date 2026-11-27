@@ -469,7 +469,6 @@ Return one JSON verdict. Use {"status":"pass","summary":"change made or confirme
                 batch_id: None,
                 input: Some(Prompt {
                     prompt,
-                    max_output_tokens: None,
                     skills: None,
                     context_tokens: None,
                     retry_prompt: None,

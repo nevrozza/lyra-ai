@@ -1,5 +1,5 @@
 import { contextMemoryWarning } from './memory-budget.js';
-import { modelResponseError, postModel, sameModelName } from './model-api.js';
+import { modelResponseError, postModel } from './model-api.js';
 import { get, memoryAmount, whole } from './ui.js';
 
 const contextPresets = [null, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
@@ -64,23 +64,19 @@ export function createContextSettings(session, {
   function renderContextChoice() {
     const tokens = contextOptions[contextSize.value];
     const estimated = tokens && contextBytesPerToken ? tokens * contextBytesPerToken : null;
-    const label = contextLabel(tokens) + (estimated ? ` ≈ ${memoryAmount(estimated)}` : '');
+    const auto = tokens == null ? configuredAutoContext : null;
+    const label = contextLabel(tokens) + (auto ? ` ≈ ${whole.format(auto)} токенов` : '') +
+      (estimated ? ` ≈ ${memoryAmount(estimated)}` : '');
     get('context-choice').textContent = label;
     contextSize.setAttribute('aria-valuetext', label);
-    get('context-note').textContent = estimated ?
-      'Оценка для KV-кэша в FP16. Веса модели и рабочие буферы занимают память дополнительно.' :
-      tokens && contextBytesPerToken === null ? 'Для этой модели оценка памяти недоступна.' :
-      'Лимит действует при следующей загрузке.';
-    const autoTokens = tokens == null ? autoContextTokens(displayedModel()) : null;
-    const autoEstimate = autoTokens && contextBytesPerToken ? autoTokens * contextBytesPerToken : null;
-    renderContextMemoryWarning(estimated ?? autoEstimate);
-  }
-
-  function autoContextTokens(model) {
-    const loaded = session.metrics?.models?.find((entry) => !entry.context_profile && sameModelName(entry.name, model));
-    const latest = getRecord()?.latest;
-    return configuredAutoContext ?? loaded?.context_length ??
-      (latest?.context_tokens == null ? latest?.measured_context_tokens : null);
+    get('context-note').textContent = tokens == null ?
+      (auto ? 'При запуске Lyra заново подберёт окно по свободной VRAM. Оценка для одного агента.' :
+        'Авто: подбор по VRAM при запуске. Если оценка недоступна, используется окно Ollama.') :
+      estimated ? 'Оценка для KV-кэша в FP16. Веса модели и рабочие буферы занимают память дополнительно.' :
+      contextBytesPerToken === null ? 'Для этой модели оценка памяти недоступна.' :
+      'Размер применяется при следующей загрузке.';
+    // Auto already accounts for weights, free VRAM and a workspace reserve.
+    renderContextMemoryWarning(estimated);
   }
 
   function refreshMemoryWarning() {
@@ -116,7 +112,7 @@ export function createContextSettings(session, {
     }
     if (request !== contextEstimateRequest) return;
     contextBytesPerToken = estimate?.bytes_per_token_f16 ?? null;
-    configuredAutoContext = estimate?.configured_context_tokens;
+    configuredAutoContext = estimate?.auto_context_tokens;
     renderContextChoice();
   }
 

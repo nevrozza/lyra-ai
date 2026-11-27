@@ -22,6 +22,20 @@ The MCP timeout defaults to 60 seconds in Codex. Lyra's new waits default to 330
 
 See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#other-configuration-options). Lyra defaults to loopback; its optional LAN mode is unauthenticated and should only be used on a trusted network.
 
+## Automatic context sizing
+
+The saved model context setting **Auto** (or an omitted `context_tokens` when no manual setting is saved) chooses a context at dispatch from measured free GPU memory, model weight size, estimated KV cache, the model's context ceiling, and a compute/driver reserve. It is not written back as a manual context. A lone worker can use the available budget; a task marked `parallel: true` reserves a share for configured concurrent tasks and models. Active compatible context profiles are reused; new automatic runners wait when competing allocations are not yet visible or there is insufficient measured headroom. Manual context choices remain supported.
+
+`inspect` exposes `auto_context.solo_tokens` and `parallel_tokens` as estimates. Codex should normally omit `context_tokens` and decide whether concurrency is worthwhile based on those estimates and the task dependencies, rather than impose a small window. Choose task granularity independently of context capacity: use model capability, measured timings and prior outcomes, expected rework, handoff/integration cost, and GPU contention to decide between coherent assignments, smaller sequential steps, or concurrent tasks. No fixed task count or model-specific split rule is imposed. The dashboard Auto setting also shows an estimate for a single worker; ordinary Chat/Work and load/pin use the same policy. Actual context is chosen again at launch, not from the preview.
+
+The estimate is not an Ollama allocation guarantee: GPU telemetry and model metadata must be available, and a solo run falls back to the normal provider setting when the estimate cannot be made. Idle unpinned capacity of the same model may be counted on a single GPU (Ollama handles replacement); pinned and active runners are not treated as reclaimable. Multi-GPU fitting is conservative (one GPU's available space, not the sum). FP16 cache is estimated even if a quantized cache is enabled. If Ollama is configured with multiple parallel request slots, set `OLLAMA_NUM_PARALLEL` in Lyra's environment to match the server so sizing includes all slots; the configured Lyra queue concurrency is also accounted for. Benchmarks are unchanged.
+
+## Local generation and task completion
+
+Lyra no longer exposes `max_output_tokens` in its normal MCP calls, queued tasks or AI settings. Direct Ollama generation uses `num_predict = -1`; the Pi extension overrides the Ollama-compatible request's finite generation cap. Old saved task prompts with a cap remain readable, but the cap is ignored. The fixed benchmark budget remains separate so benchmark measurements stay comparable. Model context windows, natural provider limits and existing execution timeouts still apply.
+
+Work agents are instructed to call `finish_task` before their final answer, reporting completed or blocked and their actual checks and remaining work. Lyra records that outcome in `work_progress` but never sends automatic completion-check or continuation prompts. If a worker stops normally without the tool, Lyra returns the original handoff with `confirmation_status: unconfirmed`; an explicit blocked report is still treated as a blocker. A normal stop, even with self-confirmation, is not proof of task acceptance. Provider errors, context/output exhaustion, guarded file conflicts, cancellation and recorded file evidence remain observable. Codex must inspect the result and decide whether to continue; premature stopping is intentionally not solved by a new heuristic.
+
 ## Queue work without polling
 
 - `enqueue_and_wait`: submit a settled batch and wait until its work and automatic review/fix rounds complete or require attention. Its `batch` object uses the usual `enqueue_project_tasks` schema and requires a stable `batch_id`. Reuse the same ID and payload only to recover a lost response.

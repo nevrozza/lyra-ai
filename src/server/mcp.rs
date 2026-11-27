@@ -193,7 +193,6 @@ fn tools() -> Value {
         "required": ["review"],
         "additionalProperties": false
     });
-    let pi_output_limit = json!({"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional Pi generation cap. Omit to use Pi's default."});
     let worker_role = json!({"enum": ["implement", "fix", "review"], "description": "Local worker role. Review uses read-only file tools."});
     let mut queue_task = json!({"type": "object", "properties": {
         "name": {"type": "string"}, "prompt": {"type": "string", "description": "Actionable technical specification for the step: goal, verified code context, concrete implementation or review plan, constraints, dependencies, acceptance checks and handoff."}, "model": {"type": "string", "description": "Installed model for a local task. Optional tool or model label for an external step."},
@@ -204,9 +203,8 @@ fn tools() -> Value {
         "role": worker_role,
         "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder."},
         "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional enabled skill names. Omit for enabled non-role skills; disabled or removed names are rejected."},
-        "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this task only."},
-        "follow_up": follow_up,
-        "max_output_tokens": pi_output_limit
+        "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional manual context window for this task only. Omit to use saved model setting or VRAM-aware Auto at dispatch. Leave parallel false for a solo agent to use the available VRAM."},
+        "follow_up": follow_up
     }, "required": ["name", "prompt"], "additionalProperties": false});
     queue_task["properties"]["role"]["default"] = json!("implement");
     let enqueue_schema = json!({"type": "object", "properties": {
@@ -303,12 +301,11 @@ fn tools() -> Value {
         },
         {
             "name": "run_model",
-            "description": "Generate a bounded text response with an installed Ollama model.",
+            "description": "Generate a text response with an installed Ollama model without a Lyra output token cap.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name from Lyra inspect"},
                 "prompt": {"type": "string", "minLength": 1, "description": "Text prompt."},
-                "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or Ollama default."},
-                "max_output_tokens": {"type": "integer", "minimum": AI_SETTINGS.minimum_output_tokens, "maximum": AI_SETTINGS.maximum_output_tokens, "default": AI_SETTINGS.default_output_tokens, "description": "Generation budget. On reasoning models it can include thinking tokens and run out before any visible text."},
+                "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Manual context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or VRAM-aware Auto (not persisted); require_loaded preserves the existing loaded-runner behavior."},
                 "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional Thinking override. Pass false for Off, true for On, or a model-supported level. Omit to use the Lyra model setting or the Ollama default."},
                 "require_loaded": {"type": "boolean", "description": "Use only a model already loaded with the requested or configured context"}
             }, "required": ["model", "prompt"], "additionalProperties": false},
@@ -425,9 +422,8 @@ fn tools() -> Value {
                 "prompt": {"type": "string", "minLength": 1, "description": "Task prompt."},
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to enabled Lyra skill names. Omit for enabled non-role skills, or pass [] to run without optional skills. Disabled or removed names are rejected."},
-                "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
-                "role": worker_role,
-                "max_output_tokens": pi_output_limit
+                "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional manual context window for this run. Omit for the saved setting or VRAM-aware Auto. Uses a separate model profile without changing the saved default."},
+                "role": worker_role
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
         }
@@ -451,7 +447,7 @@ fn tools() -> Value {
                 "properties": {
                     "stop_reason": {"type": ["string", "null"]},
                     "truncated": {"type": "boolean"},
-                    "work_progress": {"type": "object", "description": "Work execution evidence, worker confirmation and final handoff status; not proof of task acceptance.", "properties": {
+                    "work_progress": {"type": "object", "description": "Work execution evidence, worker-reported finish_task outcome and received handoff status; not proof of task acceptance. A missing confirmation remains unconfirmed without automatic continuation. continuation_attempts is zero for new runs.", "properties": {
                         "generation_stop_reason": {"type": ["string", "null"]},
                         "confirmation_status": {"enum": ["unconfirmed", "completed", "blocked"]},
                         "confirmation_summary": {"type": "string"},
@@ -460,7 +456,6 @@ fn tools() -> Value {
                         "confirmed_mutation_count": {"type": "integer"},
                         "recent_mutations": {"type": "array", "items": {"type": "object", "properties": {"tool": {"type": "string"}, "path": {"type": "string"}}, "required": ["tool", "path"]}}
                     }, "required": ["generation_stop_reason", "confirmation_status", "handoff_complete", "continuation_attempts", "confirmed_mutation_count", "recent_mutations"]},
-                    "max_output_tokens": {"type": "integer"},
                     "context": {"type": "object", "properties": {
                         "context_tokens": {"type": "integer"},
                         "notice": {"enum": ["near_limit", "compacting", "compacted", "full"]}
@@ -468,12 +463,6 @@ fn tools() -> Value {
                 },
                 "required": ["stop_reason", "truncated"]
             });
-            if tool["name"] == "run_model" {
-                tool["outputSchema"]["required"]
-                    .as_array_mut()
-                    .expect("required output fields")
-                    .push(json!("max_output_tokens"));
-            }
         }
     }
     tools
@@ -515,7 +504,6 @@ struct RunModel {
     model: String,
     prompt: String,
     context_tokens: Option<NonZeroU32>,
-    max_output_tokens: Option<u32>,
     think: Option<ollama::Think>,
     #[serde(default)]
     require_loaded: bool,
@@ -534,7 +522,6 @@ pub(super) struct RunPi {
     #[serde(skip)]
     chat_session_id: Option<u64>,
     prompt: String,
-    max_output_tokens: Option<u32>,
     skills: Option<Vec<String>>,
     #[serde(rename = "allow_commands")]
     _allow_commands: Option<bool>,
@@ -552,8 +539,6 @@ pub(super) struct PiContext {
 struct GenerationInfo {
     stop_reason: Option<String>,
     truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -758,26 +743,9 @@ async fn manage_model(app: Arc<App>, request: ManageModel) -> Result<String, Str
     Ok(format!("model={model} action={action} ok"))
 }
 
-fn output_limit(prompt: &str, requested: Option<u32>) -> Result<u32, String> {
-    let limit = requested.unwrap_or(AI_SETTINGS.default_output_tokens);
-    if !(AI_SETTINGS.minimum_output_tokens..=AI_SETTINGS.maximum_output_tokens).contains(&limit) {
-        return Err(format!(
-            "max_output_tokens must be between {} and {}",
-            AI_SETTINGS.minimum_output_tokens, AI_SETTINGS.maximum_output_tokens
-        ));
-    }
+pub(super) fn validate_pi_generation(prompt: &str) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Err("Prompt is empty".into());
-    }
-    Ok(limit)
-}
-
-pub(super) fn validate_pi_generation(prompt: &str, limit: Option<u32>) -> Result<(), String> {
-    if prompt.trim().is_empty() {
-        return Err("Prompt is empty".into());
-    }
-    if limit == Some(0) {
-        return Err("max_output_tokens must be positive when supplied".into());
     }
     Ok(())
 }
@@ -787,25 +755,33 @@ async fn run_model(
     request: RunModel,
     trace: &mut Call,
 ) -> Result<ToolOutput, String> {
-    let limit = output_limit(&request.prompt, request.max_output_tokens)?;
+    validate_pi_generation(&request.prompt)?;
     if matches!(&request.think, Some(ollama::Think::Level(level)) if level.trim().is_empty()) {
         return Err("think must be a boolean or a non-empty supported level".into());
     }
     let model = installed_model(&request.model).await?;
     let delegation = begin_delegation(&app, &model, DelegationScope::Standalone)?;
-    trace.record_token_usage(limit, None, None, None);
+    let metrics = if request.context_tokens.is_none() && !request.require_loaded {
+        Some(fresh_metrics(&app).await)
+    } else { None };
     let store = app.clone();
     let source = model.clone();
     let execution = tokio::task::spawn_blocking(move || {
         let settings = model_settings(&store, &source)?;
         let tokens = settings.context_tokens;
         let requested = request.context_tokens.map(NonZeroU32::get);
+        let auto = if requested.is_none() && tokens.is_none() {
+            metrics.as_ref().and_then(|metrics| {
+                let estimate = context::estimate_auto(&source)?;
+                auto_context_estimate(metrics, &source, &estimate, 1, 1, true)
+            })
+        } else { None };
+        let selected = requested.or(auto);
         let reply = ollama::chat(
             &source,
             &request.prompt,
-            limit,
             tokens,
-            requested,
+            selected,
             request.require_loaded,
             request.think.or(settings.think),
         )?;
@@ -817,18 +793,17 @@ async fn run_model(
         } else {
             Ok(false)
         };
-        Ok((reply, saved))
+        Ok((reply, saved, selected.or(tokens)))
     })
     .await
     .map_err(|_| "Ollama chat task failed".to_owned())
     .and_then(|result| result);
     let context_changed = execution
         .as_ref()
-        .is_ok_and(|(_, saved)| matches!(saved, Ok(true)));
+        .is_ok_and(|(_, saved, _)| matches!(saved, Ok(true)));
     finish_delegation(&app, delegation, execution.is_ok(), context_changed).await;
-    let (reply, saved) = execution?;
+    let (reply, saved, selected_context) = execution?;
     trace.record_token_usage(
-        limit,
         reply.prompt_eval_count,
         reply.eval_count,
         reply.stop_reason(),
@@ -841,15 +816,14 @@ async fn run_model(
     let generation = Some(GenerationInfo {
         truncated: stop_reason.as_deref() == Some("length") || !reply.completed(),
         stop_reason,
-        max_output_tokens: Some(limit),
         text_only: None,
-        context: None,
+        context: selected_context.map(|context_tokens| PiContext { context_tokens, notice: None }),
         work_progress: None,
     });
     if let Some(thinking) = reply.thinking() {
         trace.event(Kind::Thinking, "Ollama", thinking, None);
     }
-    let (text, truncated) = match reply.into_text(limit) {
+    let (text, truncated) = match reply.into_text() {
         Ok(answer) => answer,
         Err(error) => {
             return Ok(ToolOutput {
@@ -861,7 +835,7 @@ async fn run_model(
     };
     trace.event(Kind::Answer, "Ollama", &text, None);
     let status = if truncated && had_thinking {
-        " (output limit reached; the budget includes thinking)"
+        " (provider stopped at a generation/context limit after thinking)"
     } else if truncated {
         " (output limit reached)"
     } else {
@@ -881,8 +855,7 @@ async fn run_pi(
     origin: projects::MessageOrigin,
     reserved: Option<u64>,
 ) -> Result<ToolOutput, String> {
-    let limit = request.max_output_tokens;
-    validate_pi_generation(&request.prompt, limit)?;
+    validate_pi_generation(&request.prompt)?;
     let session_id = request.project_session_id;
     let (project, workspace) = if let Some(id) = request.project_id {
         let workspace = request.workspace;
@@ -934,7 +907,7 @@ async fn run_pi(
         return Err("role requires Work mode".into());
     }
     let requested_context = request.context_tokens.map(NonZeroU32::get);
-    let (tokens, context_window, think) = tokio::task::spawn_blocking(move || {
+    let (mut tokens, mut context_window, think) = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
         if text_only && estimate.as_ref().and_then(|info| info.capabilities.as_ref())
             .is_some_and(|capabilities| !capabilities.iter().any(|item| item == "completion"))
@@ -986,8 +959,25 @@ async fn run_pi(
     };
     let delegation = match reserved {
         Some(id) => id,
-        None => begin_delegation(&app, &model, scope)?,
+        None => {
+            let _admission = app.context_admission.lock().await;
+            if !app.task.borrow().can_begin_delegation(&model, scope) {
+                return Err("Lyra is busy, stopped, or the project chat is already active".into());
+            }
+            if tokens.is_none() {
+                let selected = plan_auto_context(&app, &model, 1, 1).await
+                    .ok_or("No safe automatic context available while other models are starting or running; wait or specify context_tokens explicitly")?;
+                if let Some(window) = selected {
+                    tokens = Some(window);
+                    context_window = window;
+                }
+            }
+            let id = begin_delegation(&app, &model, scope)?;
+            app.task.send_modify(|state| state.set_delegation_context_tokens(id, tokens));
+            id
+        }
     };
+    trace.event(Kind::Pi, "Context window", &format!("{context_window} tokens"), None);
     let skill_store = app.clone();
     let selected = if text_only { Some(Vec::new()) } else { request.skills };
     let role = request.role;
@@ -1003,7 +993,7 @@ async fn run_pi(
         result => {
             if reserved.is_none() {
                 if finish_delegation(&app, delegation, false, false).await {
-                    return Ok(user_cancelled_output(trace, context_window, limit));
+                    return Ok(user_cancelled_output(trace, context_window));
                 }
             }
             return Err(match result {
@@ -1046,7 +1036,7 @@ async fn run_pi(
             },
             result = tokio::time::timeout(
                 Duration::from_secs(900),
-                AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, limit, Some(task)))
+                AssertUnwindSafe(pi::run(&workspace, &model, &request.prompt, &config, tokens, Some(task)))
                     .catch_unwind(),
             ) => Some(match result {
                 Ok(Ok(reply)) => reply,
@@ -1057,7 +1047,7 @@ async fn run_pi(
     };
     let Some(result) = result else {
         finish_delegation(&app, delegation, false, false).await;
-        return Ok(user_cancelled_output(trace, context_window, limit));
+        return Ok(user_cancelled_output(trace, context_window));
     };
     let error = match &result {
         Ok(reply) => reply.error.as_deref(),
@@ -1078,7 +1068,7 @@ async fn run_pi(
         notice: app.task.borrow().context_notice(delegation),
     });
     if finish_delegation(&app, delegation, !context_full && error.is_none(), false).await {
-        return Ok(user_cancelled_output(trace, context_window, limit));
+        return Ok(user_cancelled_output(trace, context_window));
     }
     if context_full {
         let work_progress = result.as_ref().ok().and_then(|reply| reply.work_progress.clone());
@@ -1091,8 +1081,7 @@ async fn run_pi(
             generation: Some(GenerationInfo {
                 stop_reason: Some("context_full".into()),
                 truncated: true,
-                max_output_tokens: limit,
-                text_only: text_only.then_some(true),
+                                text_only: text_only.then_some(true),
                 context,
                 work_progress,
             }),
@@ -1135,8 +1124,7 @@ async fn run_pi(
         generation: Some(GenerationInfo {
             stop_reason: reply.stop_reason,
             truncated: reply.truncated,
-            max_output_tokens: limit,
-            text_only: text_only.then_some(true),
+                        text_only: text_only.then_some(true),
             context,
             work_progress: reply.work_progress,
         }),
@@ -1153,7 +1141,6 @@ pub(super) fn queued_request(
     RunPi {
         model,
         prompt: input.prompt,
-        max_output_tokens: input.max_output_tokens,
         skills: input.skills,
         context_tokens: input.context_tokens,
         chat_session_id,
@@ -1304,7 +1291,7 @@ fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u6
     })
 }
 
-fn user_cancelled_output(trace: &Call, context_window: u32, limit: Option<u32>) -> ToolOutput {
+fn user_cancelled_output(trace: &Call, context_window: u32) -> ToolOutput {
     let text = projects::USER_STOP_TEXT;
     trace.event(Kind::Pi, "Остановлено пользователем", text, Some("ok"));
     ToolOutput {
@@ -1313,8 +1300,7 @@ fn user_cancelled_output(trace: &Call, context_window: u32, limit: Option<u32>) 
         generation: Some(GenerationInfo {
             stop_reason: Some(projects::USER_STOP_REASON.into()),
             truncated: false,
-            max_output_tokens: limit,
-            text_only: None,
+                        text_only: None,
             context: Some(PiContext { context_tokens: context_window, notice: None }),
             work_progress: None,
         }),
@@ -1367,7 +1353,7 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
         let source = model.clone();
         let (record, estimate) = tokio::task::spawn_blocking(move || {
             let record = store.benchmarks.get(&source)?;
-            Ok::<_, std::io::Error>((record, context::estimate(&source).unwrap_or_default()))
+            Ok::<_, std::io::Error>((record, context::estimate_auto(&source).unwrap_or_default()))
         })
         .await
         .map_err(|_| "Could not read model details")?
@@ -1419,6 +1405,13 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                 "loaded": loaded,
                 "memory_estimate": memory,
                 "max_context_tokens": estimate.max_context_tokens,
+                "auto_context": {
+                    "solo_tokens": auto_context_estimate(&metrics, &model, &estimate, 1, 1, !app.task.borrow().busy()),
+                    "parallel_tokens": auto_context_estimate(&metrics, &model, &estimate, AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models, !app.task.borrow().busy()),
+                    "estimated_kv_bytes_per_token": estimate.auto_kv_bytes_per_token,
+                    "estimated_fixed_cache_bytes": estimate.auto_fixed_cache_bytes,
+                    "policy": "Omit context_tokens to use saved manual setting or VRAM-aware Auto at dispatch. Solo uses available VRAM; parallel shares the budget. Estimates are not guaranteed."
+                },
                 "ollama_agent_tools": match estimate.supports_agent_tools() {
                     Some(true) => "advertised",
                     Some(false) => "unsupported",
@@ -1426,8 +1419,7 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                 },
                 "thinking": {
                     "supported": thinking_supported,
-                    "controls": estimate.thinking,
-                    "counts_toward_max_output_tokens": thinking_supported
+                    "controls": estimate.thinking
                 }
             })
         )
@@ -1539,6 +1531,101 @@ fn memory_pair(memory: Option<&telemetry::Memory>) -> String {
             )
         },
     )
+}
+
+// A context recommendation is a conservative memory estimate, not a promise
+// from the Ollama scheduler. We never reclaim pinned or active runners.
+pub(super) fn auto_context_estimate(
+    metrics: &telemetry::Metrics,
+    model: &str,
+    estimate: &context::Estimate,
+    slots: usize,
+    model_slots: usize,
+    reclaim_idle: bool,
+) -> Option<u32> {
+    let maximum = estimate.max_context_tokens?;
+    let matches = |entry: &&ollama::Model| ollama::same_model(&entry.name, model);
+    let loaded = metrics.models.as_deref().unwrap_or_default();
+    if let Some(window) = loaded.iter().filter(matches)
+        .filter(|entry| entry.is_pinned() && entry.context_profile)
+        .filter_map(|entry| entry.context_length)
+        .filter(|&window| window > 0 && window <= maximum)
+        .max().and_then(|window| u32::try_from(window).ok())
+    {
+        // An already pinned matching profile can be reused without growth.
+        return Some(window);
+    }
+    let weights = metrics.model_sizes.as_ref()?.get(model).copied()?;
+    let per_token = estimate.auto_kv_bytes_per_token.or(estimate.bytes_per_token_f16)?;
+    let fixed_cache = estimate.auto_fixed_cache_bytes.unwrap_or(0);
+    let mut gpus = metrics.gpus.iter().filter_map(|gpu| gpu.vram.as_ref()).peekable();
+    let first = gpus.next()?;
+    let available = if gpus.peek().is_none() {
+        let reclaimable = if reclaim_idle {
+            loaded.iter().filter(matches).filter(|entry| !entry.is_pinned())
+                .filter_map(|entry| entry.size_vram).max()
+        } else { None };
+        room(first, reclaimable)
+    } else {
+        // Ollama only reports aggregate model VRAM; don't attribute an
+        // existing runner to a particular GPU when there is more than one.
+        std::iter::once(first).chain(gpus).map(|gpu| room(gpu, None)).max()?
+    };
+    let daemon_slots = std::env::var("OLLAMA_NUM_PARALLEL").ok()
+        .and_then(|value| value.parse::<usize>().ok()).unwrap_or(1).max(1);
+    context::fit_window(available, weights, per_token, fixed_cache, maximum,
+        slots.max(daemon_slots), model_slots)
+}
+
+pub(super) async fn fresh_metrics(app: &App) -> telemetry::Metrics {
+    let mut cache = app.metrics.lock().await;
+    cache.invalidate();
+    cache.sample().await
+}
+
+// The caller serializes plan + reservation through context_admission.
+// Outer None = defer new automatic runner while other work is active.
+// Inner None = retain Ollama/default behavior if the estimate is unknown.
+pub(super) async fn plan_auto_context(
+    app: &App, model: &str, slots: usize, model_slots: usize,
+) -> Option<Option<u32>> {
+    let (active, existing) = {
+        let state = app.task.borrow();
+        (state.active_context_profiles(), state.active_context_for_model(model))
+    };
+    if let Some(existing) = existing {
+        // A shared active runner must keep exactly the same context profile.
+        return Some(existing);
+    }
+    let metrics = fresh_metrics(app).await;
+    if !active.is_empty() {
+        // The other runner may have reserved its slot but not allocated VRAM
+        // yet. Don't spend the same free memory twice.
+        let loaded = metrics.models.as_deref()?;
+        if !active.iter().all(|(name, tokens)| loaded.iter().any(|entry|
+            ollama::same_model(&entry.name, name)
+            && tokens.is_none_or(|tokens| entry.context_length == Some(u64::from(tokens)))))
+        {
+            return None;
+        }
+    }
+    let source = model.to_owned();
+    let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
+        .await.ok().flatten().unwrap_or_default();
+    let selected = auto_context_estimate(&metrics, model, &estimate, slots, model_slots, active.is_empty());
+    if selected.is_none() && !active.is_empty() { None } else { Some(selected) }
+}
+
+pub(super) async fn plan_queued_context(
+    app: &App, model: &str, requested: Option<u32>, parallel: bool,
+) -> Result<Option<Option<u32>>, String> {
+    if requested.is_some() { return Ok(Some(requested)); }
+    let saved = model_settings(app, model)?.context_tokens;
+    if saved.is_some() { return Ok(Some(saved)); }
+    let (slots, models) = if parallel {
+        (AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models)
+    } else { (1, 1) };
+    Ok(plan_auto_context(app, model, slots, models).await)
 }
 
 pub(super) fn memory_estimate(

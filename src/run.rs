@@ -161,7 +161,7 @@ impl Snapshot {
         true
     }
 
-    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope) -> Option<u64> {
+    fn delegation_params(&self, model: &str, scope: DelegationScope) -> Option<(bool, Option<u64>, bool, bool, Option<u32>)> {
         if self.closed || self.model_action.is_some() || self.benchmark_running {
             return None;
         }
@@ -211,6 +211,35 @@ impl Snapshot {
         {
             return None;
         }
+        Some((project, project_session_id, exclusive, parallel, context_tokens))
+    }
+
+    pub fn can_begin_delegation(&self, model: &str, scope: DelegationScope) -> bool {
+        self.delegation_params(model, scope).is_some()
+    }
+
+    pub fn active_delegation_count(&self) -> usize {
+        self.delegations.len()
+    }
+
+    pub fn active_context_profiles(&self) -> Vec<(String, Option<u32>)> {
+        self.delegations.values().map(|active| (active.model.clone(), active.context_tokens)).collect()
+    }
+
+    pub fn active_context_for_model(&self, model: &str) -> Option<Option<u32>> {
+        self.delegations.values().find(|active| active.model == model)
+            .map(|active| active.context_tokens)
+    }
+
+    pub fn set_delegation_context_tokens(&mut self, id: u64, tokens: Option<u32>) {
+        if let Some(active) = self.delegations.get_mut(&id) {
+            active.context_tokens = tokens;
+        }
+    }
+
+    pub fn begin_delegation(&mut self, model: &str, scope: DelegationScope) -> Option<u64> {
+        let (project, project_session_id, exclusive, parallel, context_tokens) =
+            self.delegation_params(model, scope)?;
         self.next_delegation += 1;
         if let Some(session) = project_session_id {
             self.chat_context.remove(&session);
@@ -499,6 +528,21 @@ mod tests {
         assert!(snapshot.chat_history_changed(id));
         assert_eq!(snapshot.delegations[&id].history_revision, 2);
         assert!(!snapshot.chat_history_changed(id + 1));
+    }
+
+    #[test]
+    fn planned_context_participates_in_queue_model_limit() {
+        let mut snapshot = Snapshot::new(None);
+        let scope = |session_id, context_tokens| DelegationScope::Queued {
+            session_id, parallel: true, context_tokens, max_tasks: 2, max_models: 1,
+        };
+        let first = snapshot.begin_delegation("one", scope(1, Some(32768))).unwrap();
+        assert_eq!(snapshot.active_context_for_model("one"), Some(Some(32768)));
+        assert!(!snapshot.can_begin_delegation("one", scope(2, Some(8192))));
+        assert!(snapshot.can_begin_delegation("one", scope(2, Some(32768))));
+        assert_eq!(snapshot.active_delegation_count(), 1);
+        snapshot.finish_delegation(first, true);
+        assert!(snapshot.can_begin_delegation("one", scope(2, Some(8192))));
     }
 
     #[test]

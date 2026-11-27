@@ -52,14 +52,15 @@ pub fn backend_model(model: &str, tokens: Option<u32>) -> Result<String, String>
     }
     // Pi uses the OpenAI-compatible API, where Ollama takes num_ctx from the model.
     let legacy = alias(model);
-    if ollama::running_models().is_some_and(|models| {
-        models
-            .iter()
-            .any(|entry| entry.name == legacy && entry.context_length == Some(u64::from(tokens)))
-    }) {
-        return Ok(legacy);
-    }
     let alias = profile(model, tokens);
+    if let Some(loaded) = ollama::running_models().and_then(|models| {
+        models.into_iter().find(|entry| {
+            (entry.name == legacy || entry.name == alias)
+                && entry.context_length == Some(u64::from(tokens))
+        })
+    }) {
+        return Ok(loaded.name);
+    }
     #[derive(Deserialize)]
     struct Created {
         status: String,
@@ -174,6 +175,9 @@ pub fn cache_bytes_per_token(model: &str) -> Option<u64> {
 #[derive(Default, Serialize)]
 pub(crate) struct Estimate {
     pub bytes_per_token_f16: Option<u64>,
+    // A separate estimate for auto sizing, including hybrid/SWA cache layouts.
+    pub auto_kv_bytes_per_token: Option<u64>,
+    pub auto_fixed_cache_bytes: Option<u64>,
     pub configured_context_tokens: Option<u64>,
     pub max_context_tokens: Option<u64>,
     pub thinking: Value,
@@ -206,6 +210,14 @@ pub(crate) fn validate_window(
 }
 
 pub(crate) fn estimate(model: &str) -> Option<Estimate> {
+    estimate_inner(model, false)
+}
+
+pub(crate) fn estimate_auto(model: &str) -> Option<Estimate> {
+    estimate_inner(model, true)
+}
+
+fn estimate_inner(model: &str, detailed_cache: bool) -> Option<Estimate> {
     #[derive(Deserialize)]
     struct Show {
         #[serde(default)]
@@ -262,7 +274,20 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
         .as_str()
         .and_then(|architecture| info.model_info[format!("{architecture}.context_length")].as_u64())
         .filter(|&tokens| tokens > 0);
+    let auto_cache = auto_cache_estimate(&info.model_info).or_else(|| {
+        // Non-verbose /api/show can omit per-layer GGUF arrays. Fetch them
+        // only when the compact hybrid metadata did not suffice.
+        let arch = info.model_info["general.architecture"].as_str()?;
+        if !detailed_cache || !matches!(arch, "gemma4" | "qwen35" | "qwen35moe") { return None; }
+        let detailed = ollama::agent(Duration::from_secs(8))
+            .post("http://127.0.0.1:11434/api/show")
+            .send_json(json!({"model": model, "verbose": true})).ok()?
+            .into_json::<Show>().ok()?;
+        auto_cache_estimate(&detailed.model_info)
+    });
     Some(Estimate {
+        auto_kv_bytes_per_token: auto_cache.map(|cache| cache.0),
+        auto_fixed_cache_bytes: auto_cache.map(|cache| cache.1),
         max_context_tokens,
         bytes_per_token_f16: estimate_f16(&info.model_info),
         configured_context_tokens,
@@ -270,6 +295,95 @@ pub(crate) fn estimate(model: &str) -> Option<Estimate> {
         thinking_options,
         capabilities: info.capabilities,
     })
+}
+
+// FP16 upper estimate for ordinary attention, and metadata-based estimates
+// for supported hybrid architectures. Unknown layouts are not guessed.
+fn auto_cache_estimate(info: &Value) -> Option<(u64, u64)> {
+    if let Some(bytes) = estimate_f16(info) {
+        return Some((bytes, 0));
+    }
+    let architecture = info["general.architecture"].as_str()?;
+    let field = |key: &str| &info[format!("{architecture}.{key}")];
+    let number = |key: &str| field(key).as_u64().filter(|&value| value > 0);
+    let layers = number("block_count")?;
+    let pair = |key: &str, value: &str| {
+        number(key)?.checked_add(number(value)?)?.checked_mul(2)
+    };
+    match architecture {
+        "qwen35" | "qwen35moe" => {
+            let interval = number("full_attention_interval")?;
+            let bytes = pair("attention.key_length", "attention.value_length")?
+                .checked_mul(number("attention.head_count_kv")?)?
+                .checked_mul(layers.div_ceil(interval))?;
+            // Recurrent state and non-KV allocations are covered by the
+            // additional per-slot workspace reserve in the sizing function.
+            Some((bytes, 0))
+        }
+        "gemma4" => {
+            let pattern = field("attention.sliding_window_pattern").as_array()?;
+            let window = number("attention.sliding_window")?;
+            let heads = field("attention.head_count_kv");
+            let global = pair("attention.key_length", "attention.value_length")?;
+            let sliding = pair("attention.key_length_swa", "attention.value_length_swa")?;
+            if pattern.len() as u64 != layers { return None; }
+            let mut linear = 0u64;
+            let mut fixed = 0u64;
+            for (index, local) in pattern.iter().enumerate() {
+                let kv = heads.as_u64().or_else(|| heads.as_array()?.get(index)?.as_u64())
+                    .filter(|&heads| heads > 0)?;
+                if local.as_bool()? {
+                    // Include extra cells for prefill/cache padding. This
+                    // assumes Ollama uses a bounded sliding-window cache.
+                    fixed = fixed.checked_add(sliding.checked_mul(kv)?
+                        .checked_mul(window.checked_add(1024)?)?)?;
+                } else {
+                    linear = linear.checked_add(global.checked_mul(kv)?)?;
+                }
+            }
+            (linear > 0).then_some((linear, fixed))
+        }
+        _ => None,
+    }
+}
+
+// Largest aligned context fitting estimated weights, cache, and compute
+// overhead on one GPU. Do not impose a fixed upper preset; model metadata
+// provides the ceiling. Round down to 1024-token boundaries for profile reuse.
+pub(crate) fn fit_window(
+    available: u64, weights: u64, bytes_per_token: u64, fixed_cache: u64,
+    maximum: u64, slots: usize, model_slots: usize,
+) -> Option<u32> {
+    if weights == 0 || bytes_per_token == 0 || maximum == 0 || slots == 0 || model_slots == 0 {
+        return None;
+    }
+    let slots = u64::try_from(slots).ok()?;
+    let models = u64::try_from(model_slots).ok()?;
+    // Reserve display/driver headroom before dividing among distinct runners.
+    let available = available.saturating_sub(256 << 20) / models;
+    // The same runner shares weights but needs one cache per request slot.
+    let per_slot_workspace = 256u64 << 20;
+    let fits = |tokens: u64| {
+        let cache = bytes_per_token.saturating_mul(tokens).saturating_add(fixed_cache)
+            .saturating_mul(slots);
+        let base = weights.saturating_add(cache);
+        let compute = (512u64 << 20).max(base.div_ceil(10))
+            .saturating_add(per_slot_workspace.saturating_mul(slots));
+        base.saturating_add(compute) <= available
+    };
+    let maximum = maximum.min(u64::from(u32::MAX));
+    // Avoid auto-selecting a tiny window that cannot hold an agent's system prompt.
+    let minimum = maximum.min(4096);
+    if !fits(minimum) { return None; }
+    // Monotone binary search, then align down to avoid creating a profile
+    // for every tiny telemetry fluctuation.
+    let (mut low, mut high) = (minimum, maximum);
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        if fits(mid) { low = mid; } else { high = mid - 1; }
+    }
+    let selected = if low == maximum { low } else { low / 1024 * 1024 };
+    u32::try_from(selected.max(minimum)).ok()
 }
 
 fn estimate_f16(info: &Value) -> Option<u64> {
@@ -337,6 +451,41 @@ mod tests {
         );
         assert!(orphan_profiles(&installed, &[]).is_empty());
         assert!(is_alias(&alpha));
+    }
+
+    #[test]
+    fn auto_window_uses_available_memory_and_model_maximum() {
+        let gib = 1u64 << 30;
+        let fit = |free, slots, models| fit_window(free, 5*gib, 65_536, 0, 262_144, slots, models);
+        let single = fit(12*gib, 1, 1).unwrap();
+        let parallel = fit(12*gib, 2, 1).unwrap();
+        assert!(single > parallel);
+        assert!(single > 32_768);
+        assert!(fit(10*gib, 1, 1).unwrap() < single);
+        assert!(fit(12*gib, 1, 2).is_none_or(|window| window < parallel));
+        assert!(fit(10*gib, 1, 2).is_none());
+        assert_eq!(fit_window(12*gib, 5*gib, 65_536, 0, 8192, 1, 1), Some(8192));
+        assert_eq!(fit_window(4*gib, 5*gib, 65_536, 0, 262_144, 1, 1), None);
+    }
+
+    #[test]
+    fn hybrid_cache_uses_model_metadata() {
+        let qwen = json!({
+            "general.architecture":"qwen35", "qwen35.block_count":32,
+            "qwen35.full_attention_interval":4, "qwen35.attention.head_count_kv":4,
+            "qwen35.attention.key_length":256, "qwen35.attention.value_length":256
+        });
+        assert_eq!(auto_cache_estimate(&qwen), Some((32768, 0)));
+        let gemma = json!({
+            "general.architecture":"gemma4", "gemma4.block_count":2,
+            "gemma4.attention.sliding_window_pattern":[true,false],
+            "gemma4.attention.sliding_window":1024,
+            "gemma4.attention.head_count_kv":[8,1],
+            "gemma4.attention.key_length":512, "gemma4.attention.value_length":512,
+            "gemma4.attention.key_length_swa":256, "gemma4.attention.value_length_swa":256
+        });
+        assert_eq!(auto_cache_estimate(&gemma), Some((2048, 16_777_216)));
+        assert_eq!(auto_cache_estimate(&json!({"general.architecture":"unknown"})), None);
     }
 
     #[test]

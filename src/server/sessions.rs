@@ -240,7 +240,6 @@ impl Call {
 
     pub(super) fn record_token_usage(
         &mut self,
-        budget: u32,
         prompt: Option<u64>,
         generated: Option<u64>,
         stop_reason: Option<&str>,
@@ -251,7 +250,7 @@ impl Call {
         let count =
             |count: Option<u64>| count.map_or_else(|| "—".into(), |count| count.to_string());
         call.token_usage = Some(format!(
-            "Токены · вход {} · генерация {} / {budget} · остановка {}",
+            "Токены · вход {} · генерация {} · остановка {}",
             count(prompt),
             count(generated),
             stop_reason

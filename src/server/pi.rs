@@ -18,65 +18,7 @@ use super::{
     sessions::{Call, Kind},
 };
 
-const ANSWER_LIMIT: usize = 8_000;
-// Automatic review verdicts carry technical assignments for multiple fixes.
-const REVIEW_ANSWER_LIMIT: usize = 32_000;
-const COMPLETION_RETRIES: u8 = 2;
-const COMPLETION_RULE: &str = "\n\n# Task completion\nComplete the actual assignment, not a plan. Before ending, use the smallest sufficient verification against the original requirements. For a single operation, an unambiguous successful tool result is enough if it confirms the requested outcome; do not repeat it just for reporting. Distinguish confirmed changes, checks actually performed, and remaining or unverified requirements. Call finish_task as your last tool with completed only if the assignment is done, or blocked if essential work or verification is missing. Give a concise concrete summary, then immediately return the required final handoff or exact JSON verdict. If more tool work is needed, confirm again afterward.\n";
-const COMPLETION_REMINDER: &str = "Lyra completion check: no valid confirmation and final handoff yet. Use the actual results already recorded; do not redo confirmed work. Check what remains against the original assignment, finish only the missing work or verification, call finish_task with a concrete completed or blocked outcome, then return the required final handoff.";
-
-#[derive(Debug, PartialEq, Eq)]
-enum Confirmation {
-    Completed(String),
-    Blocked(String),
-}
-
-#[derive(Default)]
-struct Completion {
-    confirmation: Option<Confirmation>,
-    retries: u8,
-}
-
-impl Completion {
-    fn confirm(&mut self, request: &str) -> Result<(), String> {
-        self.invalidate();
-        let value: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
-        let summary = value["summary"].as_str().map(str::trim)
-            .filter(|s| !s.is_empty() && s.len() <= 8_000)
-            .ok_or("Provide a concrete outcome or blocker in summary")?;
-        self.confirmation = Some(match value["status"].as_str() {
-            Some("completed") => Confirmation::Completed(summary.into()),
-            Some("blocked") => Confirmation::Blocked(summary.into()),
-            _ => return Err("Use status completed or blocked".into()),
-        });
-        Ok(())
-    }
-
-    fn invalidate(&mut self) { self.confirmation = None; }
-
-    fn retry(&mut self) -> bool {
-        if self.retries >= COMPLETION_RETRIES { return false; }
-        self.retries += 1;
-        self.invalidate();
-        true
-    }
-
-    fn can_retry(&self, reason: Option<&str>, has_error: bool, clipped: bool, context_exhausted: bool, answer: &str) -> bool {
-        !has_error && !context_exhausted
-            && !matches!(&self.confirmation, Some(Confirmation::Blocked(_)))
-            && match reason {
-                Some("stop") => !clipped && !self.confirmed(answer, clipped),
-                // An output-limited turn may already have made valid changes or
-                // confirmed its work, but its handoff is not complete.
-                Some("length") => true,
-                _ => false,
-            }
-    }
-
-    fn confirmed(&self, answer: &str, clipped: bool) -> bool {
-        self.confirmation.is_some() && !answer.trim().is_empty() && !clipped
-    }
-}
+const WORK_HANDOFF_RULE: &str = "\n\n# Work result\nPerform the assigned work with the available tools. Before your final answer, call finish_task with completed or blocked and a concise factual summary of changes, checks actually run and any unmet requirements. Use completed only when you have finished the assigned work. Then return the requested final handoff or exact verdict format. Do not claim unperformed checks. If you perform more tool work, record the updated outcome before ending.\n";
 
 fn input_window_exhausted(input: Option<u64>, window: Option<u32>) -> bool {
     input.zip(window).is_some_and(|(input, window)| input >= u64::from(window))
@@ -119,6 +61,33 @@ impl Default for WorkProgress {
 }
 
 impl WorkProgress {
+    fn invalidate_confirmation(&mut self) {
+        self.confirmation_status = "unconfirmed".into();
+        self.confirmation_summary = None;
+    }
+
+    fn confirm(&mut self, request: &str) -> Result<(), String> {
+        self.invalidate_confirmation();
+        let value: Value = serde_json::from_str(request).map_err(|error| error.to_string())?;
+        let status = value["status"].as_str()
+            .filter(|status| matches!(*status, "completed" | "blocked"))
+            .ok_or("Use status completed or blocked")?;
+        let summary = value["summary"].as_str().map(str::trim)
+            .filter(|summary| !summary.is_empty() && summary.chars().count() <= 2000)
+            .ok_or("Provide a concrete outcome or blocker in summary (1–2000 characters)")?;
+        self.confirmation_status = status.into();
+        self.confirmation_summary = Some(summary.into());
+        Ok(())
+    }
+
+    fn reported_blocker(&self) -> Option<&str> {
+        if self.confirmation_status == "blocked" {
+            self.confirmation_summary.as_deref()
+        } else {
+            None
+        }
+    }
+
     fn record_guarded_success(&mut self, request: &str) {
         let Ok(request) = serde_json::from_str::<Value>(request) else { return };
         let (Some(tool), Some(path)) = (request["tool"].as_str(), request["path"].as_str()) else { return };
@@ -130,17 +99,10 @@ impl WorkProgress {
         self.recent_mutations.push(ConfirmedMutation { tool: tool.into(), path: path.into() });
     }
 
-    fn finish(&mut self, completion: &Completion, reason: Option<String>, handoff_complete: bool) {
+    fn finish(&mut self, reason: Option<String>, handoff_complete: bool) {
         self.generation_stop_reason = reason;
         self.handoff_complete = handoff_complete;
-        self.continuation_attempts = completion.retries;
-        let (status, summary) = match &completion.confirmation {
-            Some(Confirmation::Completed(summary)) => ("completed", Some(summary.clone())),
-            Some(Confirmation::Blocked(summary)) => ("blocked", Some(summary.clone())),
-            None => ("unconfirmed", None),
-        };
-        self.confirmation_status = status.into();
-        self.confirmation_summary = summary;
+        // continuation_attempts stays zero: a missing confirmation never resumes generation.
     }
 
     pub(super) fn recovery_note(&self) -> String {
@@ -265,7 +227,6 @@ pub(super) async fn check(model: &str, context_tokens: Option<u32>) -> Result<bo
             &config,
             context_tokens,
             None,
-            None,
         ),
     )
     .await
@@ -319,7 +280,6 @@ pub(super) async fn run(
     prompt: &str,
     config: &Path,
     context_tokens: Option<u32>,
-    limit: Option<u32>,
     task: Option<Task<'_>>,
 ) -> Result<Reply, String> {
     let project = task.as_ref().and_then(|task| task.project);
@@ -353,7 +313,7 @@ pub(super) async fn run(
         .as_ref()
         .and_then(|task| task.context_window)
         .or(context_tokens);
-    configure_pi(config, &backend, model, context_window, limit)
+    configure_pi(config, &backend, model, context_window)
         .await
         .map_err(|error| format!("Could not configure Pi: {error}"))?;
     if let Some(window) = task.as_ref().and_then(|task| {
@@ -371,7 +331,6 @@ pub(super) async fn run(
     let reviewing = task
         .as_ref()
         .is_some_and(|task| matches!(task.role, Some(Role::Review)));
-    let answer_limit = if reviewing { REVIEW_ANSWER_LIMIT } else { ANSWER_LIMIT };
     let skills = task.as_ref().map_or(&[][..], |task| task.skills);
     let project_instructions;
     let agents_file = if let (Some(project), Some(directory), Some(task)) =
@@ -446,7 +405,7 @@ pub(super) async fn run(
         };
         instructions.push_str(&super::skills::prompt_catalog(skills)
             .map_err(|error| format!("Could not prepare skill catalog: {error}"))?);
-        instructions.push_str(COMPLETION_RULE);
+        instructions.push_str(WORK_HANDOFF_RULE);
         tokio::fs::write(path, instructions).await.map_err(|error| error.to_string())?;
     }
     let agents_file = catalog_instructions.as_deref().or(agents_file);
@@ -486,16 +445,11 @@ pub(super) async fn run(
     let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
     let mut answer = String::new();
     let mut text_deltas = String::new();
-    let mut delta_bytes = 0usize;
-    let completion_required = commands.is_some() && !text_only;
-    let mut completion = Completion::default();
+    let work_mode = commands.is_some() && !text_only;
     let mut work_progress = WorkProgress::default();
-    let mut completion_terminal = false;
-    let mut continuation_deadline = None::<tokio::time::Instant>;
     let mut last_error = None;
     let mut stop_reason = None;
     let mut last_input_tokens = None;
-    let mut text_clipped = false;
     let mut successful_file_tools = [false; 3];
     let mut ready = commands.is_none();
     let mut legacy_rpc = false;
@@ -505,10 +459,7 @@ pub(super) async fn run(
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
     loop {
-        let line = if let Some(deadline) = continuation_deadline {
-            tokio::time::timeout_at(deadline, lines.next_line()).await
-                .map_err(|_| "Pi did not become idle for the completion continuation")?
-        } else if ready {
+        let line = if ready {
             lines.next_line().await
         } else {
             tokio::time::timeout_at(startup_deadline, lines.next_line()).await
@@ -586,56 +537,20 @@ pub(super) async fn run(
                         ready = true;
                     }
                     Some("input")
-                        if ready && completion_required && event["title"] == "lyra:finish-task" =>
+                        if ready && work_mode && event["title"] == "lyra:finish-task" =>
                     {
                         let id = event["id"].as_str().ok_or("Missing Pi completion request ID")?;
                         let request = event["placeholder"].as_str().ok_or("Missing Pi completion request")?;
-                        let result = match completion.confirm(request) {
+                        let result = match work_progress.confirm(request) {
                             Ok(()) => {
-                                let (status, summary) = match completion.confirmation.as_ref().expect("confirmed outcome") {
-                                    Confirmation::Completed(summary) => ("completed", summary),
-                                    Confirmation::Blocked(summary) => ("blocked", summary),
-                                };
-                                log(Kind::Pi, "Confirmed outcome", summary, Some(status));
-                                json!({"ok": true})
+                                log(Kind::Tool, "finish_task", work_progress.confirmation_summary.as_deref().unwrap_or_default(), Some("ok"));
+                                json!({"ok": true, "status": work_progress.confirmation_status})
                             }
                             Err(error) => json!({"ok": false, "message": error}),
                         };
                         rpc_send(stdin, json!({
                             "type": "extension_ui_response", "id": id, "value": result.to_string()
                         })).await?;
-                    }
-                    Some("input")
-                        if ready && completion_required && event["title"] == "lyra:completion-check" =>
-                    {
-                        let id = event["id"].as_str().ok_or("Missing Pi completion check ID")?;
-                        // Ordinary unfinished stops and output exhaustion can resume
-                        // in the same session with the same locks and retry budget.
-                        // Never restart errors, known context exhaustion or cancellation.
-                        let retry = completion.can_retry(
-                            stop_reason.as_deref(), last_error.is_some(), text_clipped,
-                            input_window_exhausted(last_input_tokens, context_window), &answer,
-                        ) && completion.retry();
-                        if retry {
-                            log(Kind::Pi, "Completion check", &format!("Continuing unfinished task ({}/{COMPLETION_RETRIES})", completion.retries), Some("running"));
-                        } else {
-                            completion_terminal = true;
-                        }
-                        rpc_send(stdin, json!({
-                            "type": "extension_ui_response", "id": id,
-                            "value": if retry { "continue" } else { "stop" }
-                        })).await?;
-                    }
-                    Some("notify") if completion_required && event["message"] == "lyra:completion-continue" => {
-                        // Do not prompt inside agent_end: Pi may still be streaming.
-                        // Wait for its RPC idle state, keeping this process/session and locks.
-                        continuation_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(15));
-                        rpc_send(stdin, json!({"id": "completion-idle", "type": "get_state"})).await?;
-                    }
-                    Some("notify") if completion_required && event["message"] == "lyra:completion-terminal" => {
-                        if legacy_rpc {
-                            rpc_send(stdin, json!({"type": "get_state"})).await?;
-                        }
                     }
                     Some("input")
                         if ready && !text_only && event["title"] == "lyra:load-skill" =>
@@ -780,38 +695,13 @@ pub(super) async fn run(
                     _ => {}
                 }
             }
-            Some("response") if event["id"] == "completion-idle" => {
-                if event["success"] != true {
-                    return Err("Pi rejected completion idle-state check".into());
-                }
-                if event["data"]["isStreaming"] == false && event["data"]["isCompacting"] != true {
-                    continuation_deadline = None;
-                    completion_terminal = false;
-                    // Discard the preceding promise/partial answer as the current result.
-                    answer.clear();
-                    text_clipped = false;
-                    stop_reason = None;
-                    last_error = None;
-                    last_input_tokens = None;
-                    rpc_send(stdin.as_mut().expect("Pi RPC input"), json!({
-                        "id": "completion-prompt", "type": "prompt",
-                        "message": COMPLETION_REMINDER
-                    })).await?;
-                } else {
-                    if continuation_deadline.is_none_or(|deadline| tokio::time::Instant::now() >= deadline) {
-                        return Err("Pi did not become idle for the completion continuation".into());
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    rpc_send(stdin.as_mut().expect("Pi RPC input"), json!({"id": "completion-idle", "type": "get_state"})).await?;
-                }
-            }
-            Some("response") if matches!(event["id"].as_str(), Some("task" | "completion-prompt")) && event["success"] == false => {
+            Some("response") if event["id"] == "task" && event["success"] == false => {
                 return Err(format!(
                     "Pi rejected the task: {}",
                     event["error"].as_str().unwrap_or("unknown error")
                 ));
             }
-            Some("agent_end") if legacy_rpc && !completion_required => {
+            Some("agent_end") if legacy_rpc => {
                 // Pi 0.x checks extension shutdown requests after handling an RPC command.
                 rpc_send(
                     stdin.as_mut().expect("Pi RPC input"),
@@ -827,7 +717,6 @@ pub(super) async fn run(
             }
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 text_deltas.clear();
-                delta_bytes = 0;
                 first_thinking_delta = true;
             }
             Some("message_update") => {
@@ -848,8 +737,7 @@ pub(super) async fn run(
                             log(Kind::Thinking, "Pi", delta, None);
                         }
                         Some("text_delta") => {
-                            delta_bytes = delta_bytes.saturating_add(delta.len());
-                            append_tail(&mut text_deltas, delta, answer_limit);
+                            text_deltas.push_str(delta);
                         }
                         _ => {}
                     }
@@ -857,8 +745,10 @@ pub(super) async fn run(
             }
             Some("tool_execution_start") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
-                // Any further tool work invalidates an earlier confirmation.
-                completion.invalidate();
+                // A previous report no longer describes the final state after more tools.
+                if work_mode {
+                    work_progress.invalidate_confirmation();
+                }
                 if commands.is_some() && name == "run_command" {
                     continue;
                 }
@@ -913,19 +803,13 @@ pub(super) async fn run(
                     .filter_map(|block| block["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                let (text, text_bytes) = if text.is_empty() {
-                    (text_deltas.as_str(), delta_bytes)
-                } else {
-                    (text.as_str(), text.len())
-                };
-                text_clipped = text_bytes > answer_limit;
-                answer = text[..text.floor_char_boundary(answer_limit)].to_owned();
+                answer = if text.is_empty() { std::mem::take(&mut text_deltas) } else { text };
                 if !answer.trim().is_empty() {
                     log(
                         Kind::Answer,
                         "Pi",
                         &answer,
-                        (reason == Some("length") || text_clipped).then_some("partial"),
+                        (reason == Some("length")).then_some("partial"),
                     );
                 }
             }
@@ -962,17 +846,10 @@ pub(super) async fn run(
             format!("Pi: {reason}")
         });
     }
-    let truncated = text_clipped
-        || matches!(
-            stop_reason.as_deref(),
-            Some("length" | "aborted" | "toolUse" | "deferred")
-        );
+    let truncated = matches!(stop_reason.as_deref(), Some("length" | "aborted" | "toolUse" | "deferred"));
     let generation_stop_reason = stop_reason.clone();
     let context_overflow = stop_reason.as_deref() == Some("length")
         && input_window_exhausted(last_input_tokens, context_window);
-    let handoff_complete = completion_terminal && last_error.is_none()
-        && stop_reason.as_deref() == Some("stop") && !truncated
-        && completion.confirmed(&answer, text_clipped);
     if last_error.is_none()
         && !matches!(stop_reason.as_deref(), Some("aborted" | "length"))
         && let Some(conflicts) = file_versions.unresolved_conflicts()
@@ -983,39 +860,19 @@ pub(super) async fn run(
         last_error = Some(format!("{conflicts}\n\nWorker's final answer:\n{answer}"));
         log(Kind::Pi, "File conflict", &conflicts, Some("error"));
     }
-    if last_error.is_none() && completion_required {
-        match &completion.confirmation {
-            Some(Confirmation::Blocked(summary)) => {
-                stop_reason = Some("task_blocked".into());
-                last_error = Some(format!("Task blocked: {summary}\n\nWorker's final answer:\n{answer}"));
-            }
-            Some(Confirmation::Completed(_)) if completion_terminal
-                && stop_reason.as_deref() == Some("stop") && !truncated
-                && !answer.trim().is_empty() => {}
-            _ if stop_reason.as_deref() == Some("length") => {
-                // Keep the actual stop reason even when some text was generated.
-                // The queue can pause this task without releasing its dependents.
-                last_error = Some(format!(
-                    "Pi reached its output limit before a complete handoff ({} continuation attempts).\n\nWorker's last answer:\n{answer}",
-                    completion.retries
-                ));
-            }
-            _ => {
-                stop_reason = Some("task_incomplete".into());
-                last_error = Some(format!(
-                    "Task incomplete: no valid completion confirmation and final handoff ({} continuation attempts).\n\nWorker's last answer:\n{answer}",
-                    completion.retries
-                ));
-            }
-        }
+    if work_mode && last_error.is_none() && stop_reason.as_deref() == Some("stop")
+        && let Some(summary) = work_progress.reported_blocker()
+    {
+        stop_reason = Some("task_blocked".into());
+        last_error = Some(format!("Task blocked: {summary}\n\nWorker's final answer:\n{answer}"));
+    }
+    if work_mode && last_error.is_none() && stop_reason.as_deref() == Some("length") {
+        last_error = Some(format!("Pi stopped at its provider generation/context limit.\n\nWorker's last answer:\n{answer}"));
     }
     if last_error.is_none() {
         if answer.trim().is_empty() {
             last_error = Some(if stop_reason.as_deref() == Some("length") {
-                limit.map_or_else(
-                    || "Pi reached its generation limit before returning text".into(),
-                    |limit| format!("Pi reached its {limit}-token max_output_tokens budget before returning text"),
-                )
+"Pi reached its generation limit before returning text".into()
             } else {
                 "Pi returned no text".into()
             });
@@ -1028,10 +885,12 @@ pub(super) async fn run(
             log(Kind::Pi, "Pi", detail, Some("ok"));
         }
     }
-    work_progress.finish(&completion, generation_stop_reason, handoff_complete);
+    // A normal answer is only a received handoff, not proof that the task is done.
+    let handoff_complete = last_error.is_none() && stop_reason.as_deref() == Some("stop") && !truncated && !answer.trim().is_empty();
+    work_progress.finish(generation_stop_reason, handoff_complete);
     Ok(Reply {
         context_overflow,
-        work_progress: completion_required.then_some(work_progress),
+        work_progress: work_mode.then_some(work_progress),
         text: answer,
         stop_reason,
         truncated,
@@ -1137,12 +996,8 @@ async fn configure_pi(
     model: &str,
     name: &str,
     context_tokens: Option<u32>,
-    limit: Option<u32>,
 ) -> io::Result<()> {
     let mut entry = json!({ "id": model });
-    if let Some(limit) = limit {
-        entry["maxTokens"] = json!(limit);
-    }
     if let Some(tokens) = context_tokens {
         entry["name"] = serde_json::json!(name);
         entry["contextWindow"] = serde_json::json!(tokens);
@@ -1326,56 +1181,18 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn configures_a_pi_output_cap_only_when_requested() {
+    async fn pi_model_configuration_has_no_output_cap() {
         let directory = tempfile::tempdir().unwrap();
-        configure_pi(directory.path(), "worker", "worker", Some(8192), None)
-            .await
-            .unwrap();
-        let config = || {
-            let bytes = std::fs::read(directory.path().join("models.json")).unwrap();
-            let json: Value = serde_json::from_slice(&bytes).unwrap();
-            json["providers"]["ollama"]["models"][0].clone()
-        };
-        assert!(config().get("maxTokens").is_none());
-
-        configure_pi(directory.path(), "worker", "worker", Some(8192), Some(4096))
-            .await
-            .unwrap();
-        assert_eq!(config()["maxTokens"], 4096);
-        assert_eq!(config()["contextWindow"], 8192);
-    }
-}
-
-#[cfg(test)]
-mod completion_tests {
-    use super::*;
-
-    #[test]
-    fn promises_without_confirmation_do_not_complete() {
-        let mut state = Completion::default();
-        assert!(!state.confirmed("Now I will create the file", false));
-        assert!(state.retry());
-        assert!(state.retry());
-        assert!(!state.retry());
+        configure_pi(directory.path(), "worker", "worker", Some(8192)).await.unwrap();
+        let bytes = std::fs::read(directory.path().join("models.json")).unwrap();
+        let config: Value = serde_json::from_slice(&bytes).unwrap();
+        let model = &config["providers"]["ollama"]["models"][0];
+        assert!(model.get("maxTokens").is_none());
+        assert_eq!(model["contextWindow"], 8192);
     }
 
     #[test]
-    fn output_limit_can_continue_but_context_error_and_cancel_cannot() {
-        let mut state = Completion::default();
-        assert!(state.can_retry(Some("length"), false, true, false, "partial"));
-        assert!(state.can_retry(Some("length"), false, false, false, ""));
-        assert!(!state.can_retry(Some("length"), false, false, true, "partial"));
-        assert!(!state.can_retry(Some("error"), true, false, false, ""));
-        assert!(!state.can_retry(Some("aborted"), false, false, false, ""));
-        assert!(!state.can_retry(Some("stop"), false, true, false, "clipped"));
-        state.confirm(r#"{"status":"completed","summary":"Written"}"#).unwrap();
-        assert!(state.can_retry(Some("length"), false, false, false, "partial handoff"));
-        assert!(!state.can_retry(Some("stop"), false, false, false, "final handoff"));
-        assert!(state.retry());
-        assert!(state.retry());
-        assert!(!state.retry());
-        state.confirm(r#"{"status":"blocked","summary":"Missing dependency"}"#).unwrap();
-        assert!(!state.can_retry(Some("length"), false, false, false, ""));
+    fn context_exhaustion_is_still_detected() {
         assert!(input_window_exhausted(Some(4096), Some(4096)));
         assert!(!input_window_exhausted(Some(3000), Some(4096)));
         assert!(!input_window_exhausted(None, Some(4096)));
@@ -1387,9 +1204,7 @@ mod completion_tests {
         progress.record_guarded_success(r#"{"tool":"read","path":"a.txt"}"#);
         progress.record_guarded_success(r#"{"tool":"mkdir","path":"site"}"#);
         progress.record_guarded_success(r#"{"tool":"write","path":"site/index.html","content":"not retained"}"#);
-        let mut completion = Completion::default();
-        assert!(completion.retry());
-        progress.finish(&completion, Some("length".into()), false);
+        progress.finish(Some("length".into()), false);
         assert_eq!(progress.confirmed_mutation_count, 2);
         assert_eq!(progress.recent_mutations[1].path, "site/index.html");
         assert_eq!(progress.confirmation_status, "unconfirmed");
@@ -1401,16 +1216,30 @@ mod completion_tests {
     }
 
     #[test]
-    fn confirmation_requires_outcome_and_is_invalidated_by_more_work() {
-        let mut state = Completion::default();
-        assert!(state.confirm(r#"{"status":"completed","summary":" "}"#).is_err());
-        state.confirm(r#"{"status":"completed","summary":"Checked the result"}"#).unwrap();
-        assert!(state.confirmed("final handoff", false));
-        assert!(!state.confirmed("", false));
-        assert!(!state.confirmed("truncated", true));
-        state.invalidate();
-        assert!(!state.confirmed("done", false));
-        state.confirm(r#"{"status":"blocked","summary":"Required tool unavailable"}"#).unwrap();
-        assert!(matches!(state.confirmation, Some(Confirmation::Blocked(_))));
+    fn finish_task_records_outcome_without_continuation() {
+        let mut progress = WorkProgress::default();
+        assert!(progress.confirm(r#"{"status":"completed","summary":" "}"#).is_err());
+        assert!(progress.confirm(r#"{"status":"invalid","summary":"done"}"#).is_err());
+        progress.confirm(r#"{"status":"completed","summary":"Wrote file and ran tests"}"#).unwrap();
+        progress.finish(Some("stop".into()), true);
+        assert_eq!(progress.confirmation_status, "completed");
+        assert_eq!(progress.confirmation_summary.as_deref(), Some("Wrote file and ran tests"));
+        assert_eq!(progress.continuation_attempts, 0);
+        assert!(progress.reported_blocker().is_none());
+        progress.invalidate_confirmation();
+        assert_eq!(progress.confirmation_status, "unconfirmed");
+        assert!(progress.confirmation_summary.is_none());
+        progress.confirm(r#"{"status":"blocked","summary":"Missing dependency"}"#).unwrap();
+        assert_eq!(progress.reported_blocker(), Some("Missing dependency"));
+        assert_eq!(progress.continuation_attempts, 0);
+    }
+
+    #[test]
+    fn ordinary_handoff_is_not_a_completion_confirmation() {
+        let mut progress = WorkProgress::default();
+        progress.finish(Some("stop".into()), true);
+        assert!(progress.handoff_complete);
+        assert_eq!(progress.confirmation_status, "unconfirmed");
+        assert_eq!(progress.continuation_attempts, 0);
     }
 }

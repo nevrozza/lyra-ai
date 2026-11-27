@@ -82,16 +82,14 @@ impl ChatReply {
             .filter(|text| !text.is_empty())
     }
 
-    pub(crate) fn into_text(self, limit: u32) -> Result<(String, bool), String> {
+    pub(crate) fn into_text(self) -> Result<(String, bool), String> {
         if !self.done {
             return Err("Ollama returned an incomplete reply".into());
         }
         let truncated = self.done_reason.as_deref() == Some("length");
         if self.message.content.trim().is_empty() {
             if truncated && self.thinking().is_some() {
-                return Err(format!(
-                    "Thinking used the {limit}-token max_output_tokens budget before the model answered. Increase the budget or pass think=false if the model supports disabling thinking."
-                ));
+                return Err("The provider stopped at a generation/context limit before returning text after thinking.".into());
             }
             return Err(if truncated {
                 "The model reached its output limit before returning text"
@@ -107,7 +105,6 @@ impl ChatReply {
 pub(crate) fn chat(
     model: &str,
     prompt: &str,
-    max_output_tokens: u32,
     saved_context: Option<u32>,
     requested_context: Option<u32>,
     require_loaded: bool,
@@ -121,6 +118,14 @@ pub(crate) fn chat(
             && let Some(entry) = loaded_backend(entries, model, saved_context)
         {
             return Some(entry);
+        }
+        // Auto load/pin may have created a context profile rather than
+        // loaded the base tag. require_loaded must be able to reuse it.
+        if require_loaded && context_tokens.is_none() {
+            let base = context::alias(model);
+            return entries.iter()
+                .filter(|entry| context::profile_base(&entry.name) == Some(base.as_str()))
+                .max_by_key(|entry| entry.context_length.unwrap_or(0));
         }
         let tokens = u64::from(context_tokens?);
         let base = context::alias(model);
@@ -150,7 +155,7 @@ pub(crate) fn chat(
         "model": backend,
         "messages": [{"role": "user", "content": prompt}],
         "stream": false,
-        "options": {"num_predict": max_output_tokens}
+        "options": {"num_predict": -1}
     });
     if let Some(tokens) = context_tokens {
         request["options"]["num_ctx"] = json!(tokens);
