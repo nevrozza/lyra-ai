@@ -42,7 +42,7 @@ Use the Lyra tools already connected to this agent. Read only the schemas for th
 - For a task split into several chats, create a named group with `group_name` on the first `enqueue_project_tasks` or `create_project_session` call. Use the returned `group.id` as `group_id` on every later batch or direct chat belonging to that task, including independent review and fixes. Automatic follow-ups inherit the group. Do not use the display number as a task ID. Use `get_project_tasks(group_id: ...)` for the group's queue; use `batch_id` separately for submission retries. Ordinary standalone conversations do not need a group.
 
 - Split a task where the contract is already known and the results can be produced independently. You can batch several `implement` or `fix` steps from different tasks or from one larger task.
-- Batch independent steps in `enqueue_project_tasks`. Give each step a `key`. Set `parallel: true` only with a complete, disjoint `write_paths` list relative to the first working folder. Use forward slashes. Scoped steps can only edit reserved files and have no shell. Run work with an unknown write scope or a shell requirement exclusively.
+- Batch independent steps in `enqueue_project_tasks`. Give each step a `key`. Set `parallel: true` only with a complete, disjoint `write_paths` list relative to the first working folder. Use forward slashes. Scoped steps may write/edit only reserved files. Shell commands may read or check within the task but must not modify unreserved files. Run work with an unknown write scope exclusively.
 - Separate requirements into executable steps even when they share one output file. Queue same-file steps in distinct chats with `after`, so each writer starts from the saved result of the previous one. A detailed checklist inside one worker prompt still counts as one step. See [split work on a single file](references/project-pipelines.md#split-work-on-a-single-file).
 - Use `after` for real dependencies even when paths differ. Combine edits to the same file or order them. Put the assembled build and review after all contributing work. Read [project pipelines](references/project-pipelines.md) for the batch shape, automatic fixes, external steps, and polling.
 - If the request is too broad for one cycle, split it into groups with observable outcomes, then split each group into executable steps. Give each group an integration step with its own review and fix cycle. After all groups finish, require the same final review of the combined result. See [large tasks and group cycles](references/project-pipelines.md#large-tasks-and-group-cycles).
@@ -51,6 +51,11 @@ Use the Lyra tools already connected to this agent. Read only the schemas for th
 ## Plan separate chats before work starts
 
 Local context often fills during ordinary coding. Tool output, diffs, checks, and prior turns all take space, and compaction costs time. Split work proactively into focused chats whenever a handoff through files, a stable interface, or a short summary can avoid carrying unrelated history. Do this even when the original chat still looks viable. Each queue step gets a fresh chat. Give review its own chat by default, and use the user's named chat for the stage they explicitly assigned there. Keep tightly coupled edits together only while their working context remains manageable.
+
+## Honor user cancellation
+
+- A `run_pi` response with `stop_reason: cancelled_by_user`, a saved user-stop notice, or a queued task cancelled by the user is an intentional stop, not a failed worker. Stop scheduling that task and its dependent review/fix steps. Do not retry, create a replacement chat, change models, or silently complete the stopped work yourself. Resume only after a new explicit user request. Independent already-running work is not automatically stopped.
+- If a worker cannot find `write` or `edit`, check the chat's Work mode and whether its role is review. Review and Chat intentionally lack write tools. A tool configuration mismatch in Work is a runtime issue, not a reason to bypass write reservations with shell commands.
 
 ## Recover context
 

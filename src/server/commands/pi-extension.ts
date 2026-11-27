@@ -16,6 +16,7 @@ export default function (pi) {
     }
     let earlierMessages = [];
     let promptTimestamp;
+    const scopedDescriptions = new Map();
     if (scopedWrite) {
         const path = Type.String({ description: "Reserved file path relative to the primary working folder (use the exact reserved path)" });
         for (const [name, description, parameters] of [
@@ -25,8 +26,11 @@ export default function (pi) {
                 edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
             })],
         ]) {
+            scopedDescriptions.set(name, description);
             pi.registerTool({
                 name, label: name, description, parameters, executionMode: "sequential",
+                promptSnippet: name === "write" ? "Create or replace a reserved file using path and content." : "Edit a reserved file using path and exact oldText/newText pairs.",
+                promptGuidelines: [name + " can modify only a reserved path. Use the tool's advertised argument schema."],
                 async execute(_id, args, signal, _onUpdate, ctx) {
                     const request = JSON.stringify({ ...args, tool: name });
                     const value = await ctx.ui.input("lyra:write-scoped-file", request, { signal });
@@ -87,12 +91,32 @@ export default function (pi) {
             });
         }
     }
-    pi.on("session_start", (_event, ctx) => {
-        const tools = ["read", "grep", "find", "ls"];
-        tools.push("run_command");
-        pi.setActiveTools(textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit"]);
-        if (origin) earlierMessages = savedMessages(ctx.sessionManager);
-        ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");
+    const tools = ["read", "grep", "find", "ls", "run_command"];
+    const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit"];
+    async function verifyTools() {
+        await pi.setActiveTools(expected);
+        const active = pi.getActiveTools();
+        const missing = expected.filter(name => !active.includes(name));
+        const unexpected = active.filter(name => !expected.includes(name));
+        const all = pi.getAllTools();
+        const unguarded = [...scopedDescriptions].filter(([name, description]) =>
+            !all.some(tool => tool.name === name && tool.description === description)).map(([name]) => name);
+        if (missing.length || unexpected.length || unguarded.length) {
+            throw new Error("Pi tool configuration mismatch: missing=" + missing.join(",") +
+                "; unexpected=" + unexpected.join(",") + "; unverified scoped=" + unguarded.join(","));
+        }
+        return active;
+    }
+    pi.on("session_start", async (_event, ctx) => {
+        try {
+            const active = await verifyTools();
+            if (origin) earlierMessages = savedMessages(ctx.sessionManager);
+            ctx.ui.notify("lyra:active-tools:" + active.join(","));
+            ctx.ui.notify(ctx.mode === "rpc" ? "lyra:commands-ready" : "lyra:commands-ready-legacy");
+        } catch (error) {
+            ctx.ui.notify("lyra:tools-error:" + String(error));
+            ctx.shutdown();
+        }
     });
     if (origin) {
         pi.on("message_end", ({ message }) => {

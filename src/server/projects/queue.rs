@@ -252,10 +252,15 @@ impl Job {
         })
     }
 
+    pub(super) fn user_cancelled(&self) -> bool {
+        self.status == Status::Cancelled && self.result.as_ref()
+            .is_some_and(|result| result.stop_reason.as_deref() == Some(super::USER_STOP_REASON))
+    }
+
     pub(super) fn status_message(&self) -> Option<Message> {
         if !matches!(
             self.status,
-            Status::Failed | Status::Blocked | Status::ContextFull
+            Status::Failed | Status::Blocked | Status::ContextFull | Status::Cancelled
         ) && !(self.external && self.status == Status::Completed)
         {
             return None;
@@ -318,7 +323,7 @@ pub(super) async fn cancel_http(
     State(app): State<Arc<App>>,
     Json(key): Json<SessionKey>,
 ) -> Result<StatusCode> {
-    cancel(app, key).await.map(|()| StatusCode::NO_CONTENT)
+    cancel(app, key, true).await.map(|()| StatusCode::NO_CONTENT)
 }
 
 pub(in crate::server) async fn enqueue(
@@ -480,13 +485,18 @@ pub(in crate::server) async fn retry(app: Arc<App>, input: Retry) -> Result<Task
     .await
 }
 
-pub(in crate::server) async fn cancel(app: Arc<App>, key: SessionKey) -> Result<()> {
+pub(in crate::server) async fn cancel(app: Arc<App>, key: SessionKey, by_user: bool) -> Result<()> {
     work(app, move |app| {
         if !app.projects.set_job(
             &key,
             &[Status::Queued, Status::ContextFull],
             Status::Cancelled,
-            None,
+            Some(JobResult {
+                text: if by_user { super::USER_STOP_TEXT.into() } else { "Task intentionally cancelled by request. Do not automatically restart it.".into() },
+                stop_reason: Some(if by_user { super::USER_STOP_REASON } else { "cancelled_by_request" }.into()),
+                truncated: false,
+                context: None,
+            }),
         )? {
             return Err((
                 StatusCode::CONFLICT,
@@ -707,13 +717,16 @@ async fn run_task(app: Arc<App>, mut task: TaskView, delegation: u64, writes: Ve
 }
 
 fn fail_dispatch(app: &App, delegation: u64, text: String) -> (Status, JobResult) {
-    app.task
-        .send_modify(|state| state.finish_delegation(delegation, false));
+    let mut stopped = false;
+    app.task.send_modify(|state| {
+        stopped = state.delegation_stopping(delegation);
+        state.finish_delegation(delegation, false);
+    });
     (
-        Status::Failed,
+        if stopped { Status::Cancelled } else { Status::Failed },
         JobResult {
-            text,
-            stop_reason: None,
+            text: if stopped { super::USER_STOP_TEXT.into() } else { text },
+            stop_reason: stopped.then(|| super::USER_STOP_REASON.into()),
             truncated: false,
             context: None,
         },

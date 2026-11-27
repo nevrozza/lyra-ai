@@ -357,7 +357,7 @@ fn tools() -> Value {
         },
         {
             "name": "read_project_session",
-            "description": "Read recent user and assistant messages from a saved Pi chat.",
+            "description": "Read recent saved chat messages, including intentional user-stop notices. Never automatically resume a user-stopped task.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1}
@@ -614,7 +614,7 @@ async fn call(
             project_result(projects::queue::complete_external(app, arguments(args)?).await)
         }
         "cancel_project_task" => {
-            projects::queue::cancel(app, arguments(args)?)
+            projects::queue::cancel(app, arguments(args)?, false)
                 .await
                 .map_err(|(_, error)| error)?;
             Ok("Task cancelled".into())
@@ -943,7 +943,9 @@ async fn run_pi(
         Ok(Ok(selection)) => selection,
         result => {
             if reserved.is_none() {
-                finish_delegation(&app, delegation, false, false).await;
+                if finish_delegation(&app, delegation, false, false).await {
+                    return Ok(user_cancelled_output(trace, context_window, limit));
+                }
             }
             return Err(match result {
                 Ok(Err(error)) => error,
@@ -997,22 +999,7 @@ async fn run_pi(
     };
     let Some(result) = result else {
         finish_delegation(&app, delegation, false, false).await;
-        let text = "Генерация остановлена.";
-        trace.event(Kind::Pi, "Pi", text, Some("ok"));
-        return Ok(ToolOutput {
-            text: text.into(),
-            is_error: false,
-            generation: Some(GenerationInfo {
-                stop_reason: Some("aborted".into()),
-                truncated: false,
-                max_output_tokens: limit,
-                text_only: None,
-                context: Some(PiContext {
-                    context_tokens: context_window,
-                    notice: None,
-                }),
-            }),
-        });
+        return Ok(user_cancelled_output(trace, context_window, limit));
     };
     let error = match &result {
         Ok(reply) => reply.error.as_deref(),
@@ -1032,7 +1019,9 @@ async fn run_pi(
         context_tokens: context_window,
         notice: app.task.borrow().context_notice(delegation),
     });
-    finish_delegation(&app, delegation, !context_full && error.is_none(), false).await;
+    if finish_delegation(&app, delegation, !context_full && error.is_none(), false).await {
+        return Ok(user_cancelled_output(trace, context_window, limit));
+    }
     if context_full {
         return Ok(ToolOutput {
             text: format!(
@@ -1109,14 +1098,14 @@ pub(super) async fn run_queued(
 
     let trace = Call::untracked(app.clone());
     let result = run_pi(app.clone(), request, &trace, origin, Some(delegation)).await;
-    let pending = {
+    let mut pending = {
         let snapshot = app.task.borrow();
         snapshot
             .has_delegation(delegation)
             .then(|| snapshot.delegation_stopping(delegation))
     };
     if pending.is_some() {
-        finish_delegation(&app, delegation, false, false).await;
+        pending = Some(finish_delegation(&app, delegation, false, false).await);
     }
     match result {
         Ok(reply) => {
@@ -1125,7 +1114,7 @@ pub(super) async fn run_queued(
                     (details.stop_reason, details.truncated, details.context)
                 });
             let status = match stop_reason.as_deref() {
-                Some("aborted") => Status::Cancelled,
+                Some(projects::USER_STOP_REASON) => Status::Cancelled,
                 Some("context_full") => Status::ContextFull,
                 _ if reply.is_error => Status::Failed,
                 _ => Status::Completed,
@@ -1147,8 +1136,8 @@ pub(super) async fn run_queued(
                 Status::Failed
             },
             JobResult {
-                text,
-                stop_reason: None,
+                text: if pending == Some(true) { projects::USER_STOP_TEXT.into() } else { text },
+                stop_reason: (pending == Some(true)).then(|| projects::USER_STOP_REASON.into()),
                 truncated: false,
                 context: None,
             },
@@ -1203,6 +1192,14 @@ pub(super) async fn stop_project_chat(
     if app.task.send_if_modified(|snapshot| {
         snapshot.stop_project_delegation(request.delegation_id, request.project_session_id)
     }) {
+        let session_id = request.project_session_id;
+        if let Err((_, error)) = projects::work(app.clone(), move |app| {
+            app.projects.record_user_stop(session_id)
+        }).await {
+            eprintln!("Could not persist user stop: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        app.task.send_modify(crate::run::Snapshot::projects_changed);
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
@@ -1223,14 +1220,33 @@ fn begin_delegation(app: &App, model: &str, scope: DelegationScope<'_>) -> Resul
     })
 }
 
-async fn finish_delegation(app: &App, id: u64, succeeded: bool, context_changed: bool) {
+fn user_cancelled_output(trace: &Call, context_window: u32, limit: Option<u32>) -> ToolOutput {
+    let text = projects::USER_STOP_TEXT;
+    trace.event(Kind::Pi, "Остановлено пользователем", text, Some("ok"));
+    ToolOutput {
+        text: text.into(),
+        is_error: false,
+        generation: Some(GenerationInfo {
+            stop_reason: Some(projects::USER_STOP_REASON.into()),
+            truncated: false,
+            max_output_tokens: limit,
+            text_only: None,
+            context: Some(PiContext { context_tokens: context_window, notice: None }),
+        }),
+    }
+}
+
+async fn finish_delegation(app: &App, id: u64, succeeded: bool, context_changed: bool) -> bool {
     app.metrics.lock().await.invalidate();
+    let mut stopped = false;
     app.task.send_modify(|snapshot| {
-        snapshot.finish_delegation(id, succeeded);
+        stopped = snapshot.delegation_stopping(id);
+        snapshot.finish_delegation(id, succeeded && !stopped);
         if context_changed {
             snapshot.model_record_changed();
         }
     });
+    stopped
 }
 
 async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {

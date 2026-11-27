@@ -34,6 +34,8 @@ pub(super) struct Store {
 #[derive(Default, Deserialize, Serialize)]
 pub(super) struct Catalog {
     next_id: u64,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    user_stops: HashMap<u64, Vec<u64>>,
     pub(super) projects: Vec<Project>,
 }
 
@@ -641,6 +643,24 @@ impl Store {
         })
     }
 
+    // Record the UI stop independently of Pi's JSONL. Killing a child may prevent
+    // it from flushing an assistant message; the cancellation must still survive.
+    pub(super) fn record_user_stop(&self, owner_id: u64) -> Result<()> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.change(|catalog| {
+            let session = catalog.projects.iter().find_map(|project| project.session(owner_id).ok())
+                .ok_or_else(|| missing("Session"))?;
+            let chat_id = session.job.as_ref().and_then(|job| job.chat_session_id).unwrap_or(owner_id);
+            for id in std::iter::once(owner_id).chain((chat_id != owner_id).then_some(chat_id)) {
+                let stops = catalog.user_stops.entry(id).or_default();
+                stops.push(timestamp);
+                if stops.len() > 100 { stops.remove(0); }
+            }
+            Ok(())
+        })
+    }
+
     fn session_file(&self, id: u64) -> PathBuf {
         self.directory.join("sessions").join(format!("{id}.jsonl"))
     }
@@ -662,15 +682,22 @@ impl Store {
             .job
             .as_ref()
             .and_then(|job| job.initial_message(session.id));
-        let status_message = dashboard
-            .then(|| session.job.as_ref().and_then(queue::Job::status_message))
-            .flatten();
+        let mut stops = catalog.user_stops.get(&key.project_session_id)
+            .into_iter().flatten().copied().peekable();
+        let status_message = session.job.as_ref().and_then(|job| {
+            if dashboard || job.user_cancelled() { job.status_message() } else { None }
+        });
+        // Running cancellations have an independently persisted timestamped notice.
+        let status_message = status_message.filter(|message| {
+            !(stops.peek().is_some() && message.text == USER_STOP_TEXT)
+        });
         let mut saw_queued_prompt = false;
         let mut messages = VecDeque::new();
         let file = match fs::File::open(self.session_file(key.project_session_id)) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 messages.extend(queued_message);
+                for timestamp in stops { push_user_stop(&mut messages, timestamp); }
                 messages.extend(status_message);
                 return Ok(messages);
             }
@@ -685,6 +712,11 @@ impl Store {
             let Ok(entry) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            if let Some(timestamp) = entry_timestamp(&entry) {
+                while stops.peek().is_some_and(|stopped| *stopped < timestamp) {
+                    push_user_stop(&mut messages, stops.next().expect("peeked stop"));
+                }
+            }
             if entry["type"] == "custom" && entry["customType"] == "lyra-message-origin" {
                 pending_origin =
                     serde_json::from_value::<MessageOriginEntry>(entry["data"].clone()).ok();
@@ -801,7 +833,7 @@ impl Store {
                 messages.push_back(Message {
                     tool: None,
                     role,
-                    timestamp: dashboard.then(|| entry_timestamp(&entry)).flatten(),
+                    timestamp: entry_timestamp(&entry),
                     text: text[..text.floor_char_boundary(24_000)].to_owned(),
                     thinking: thinking.map(|mut text| {
                         text.truncate(text.floor_char_boundary(CHAT_THINKING_LIMIT));
@@ -822,6 +854,7 @@ impl Store {
         {
             messages.push_front(message);
         }
+        for timestamp in stops { push_user_stop(&mut messages, timestamp); }
         if let Some(message) = status_message {
             if messages.len() == 100 {
                 messages.pop_front();
@@ -830,6 +863,27 @@ impl Store {
         }
         Ok(messages)
     }
+}
+
+pub(super) const USER_STOP_REASON: &str = "cancelled_by_user";
+pub(super) const USER_STOP_TEXT: &str = "Остановлено пользователем. Работа намеренно прервана; не возобновляйте её автоматически без нового запроса пользователя.";
+
+fn push_user_stop(messages: &mut VecDeque<Message>, timestamp: u64) {
+    if messages.len() == 100 { messages.pop_front(); }
+    // A pending call at the time of the interruption is not a model failure.
+    for message in messages.iter_mut() {
+        if let Some(tool) = &mut message.tool
+            && tool.status == "pending"
+        {
+            tool.status = "cancelled";
+            tool.finished_at = Some(timestamp);
+        }
+    }
+    messages.push_back(Message {
+        role: "notice", tool: None, timestamp: Some(timestamp),
+        text: USER_STOP_TEXT.into(), thinking: None, model: None,
+        origin: None, request_id: None,
+    });
 }
 
 // Pi messages use Unix milliseconds; session entries also carry an ISO timestamp.
@@ -1182,6 +1236,47 @@ mod tests {
         }).unwrap();
         assert_eq!(renamed.name, "New chat name");
         assert_eq!(renamed.group.unwrap().id, group_id);
+    }
+
+    #[test]
+    fn user_stop_is_visible_in_both_history_views_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().join("data");
+        let store = Store::new(directory.clone());
+        let project = store.save(SaveProject {
+            id: None, name: "Project".into(), folders: vec![dir.path().to_path_buf()],
+        }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Chat"
+        })).unwrap()).unwrap();
+        store.record_user_stop(chat.id).unwrap();
+        let store = Store::new(directory);
+        let benchmarks = benchmark::Store::new(None);
+        for dashboard in [false, true] {
+            let messages = store.history(SessionKey {
+                project_id: project.id, project_session_id: chat.id,
+            }, &benchmarks, dashboard).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "notice");
+            assert_eq!(messages[0].text, USER_STOP_TEXT);
+            assert!(messages[0].timestamp.is_some());
+        }
+    }
+
+    #[test]
+    fn user_stop_marks_only_pending_tools_as_cancelled() {
+        let mut messages = VecDeque::new();
+        append_tool_calls(&mut messages, &serde_json::json!([
+            {"type":"toolCall","id":"a","name":"read","arguments":{}},
+            {"type":"toolCall","id":"b","name":"write","arguments":{}}
+        ]), Some(1000));
+        finish_tool(&mut messages, &serde_json::json!({
+            "toolCallId":"a","toolName":"read","content":"ok"
+        }), Some(2000));
+        push_user_stop(&mut messages, 3000);
+        assert_eq!(messages[0].tool.as_ref().unwrap().status, "ok");
+        assert_eq!(messages[1].tool.as_ref().unwrap().status, "cancelled");
+        assert_eq!(messages[2].text, USER_STOP_TEXT);
     }
 
     #[test]

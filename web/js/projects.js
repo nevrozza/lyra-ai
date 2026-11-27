@@ -88,7 +88,7 @@ export function createProjects() {
   const chatLabel = (chat, project = selectedProject()) => chat.group && project
     ? `${groupMembers(project, chat.group.id).findIndex(member => member.id === chat.id) + 1}. ${chat.name}`
     : chat.name;
-  const errorStatuses = new Set(['failed', 'blocked', 'interrupted', 'cancelled', 'context_full']);
+  const errorStatuses = new Set(['failed', 'blocked', 'interrupted', 'context_full']);
   function chatState(chat, project, activeChats) {
     const owner = chat.job ? chat : project.sessions.find(candidate => candidate.job?.chat_session_id === chat.id);
     const status = owner?.job?.status;
@@ -491,7 +491,7 @@ export function createProjects() {
           else expandedTools.delete(tool.id);
         });
         const summary = element('summary', '');
-        const status = { pending: 'Ожидает результата', ok: 'Готово', error: 'Ошибка' }[tool.status] ?? '';
+        const status = { pending: 'Ожидает результата', ok: 'Готово', error: 'Ошибка', cancelled: 'Остановлено' }[tool.status] ?? '';
         summary.append(element('span', tool.name), element('small', status));
         details.dataset.status = tool.status;
         details.append(summary, element('h4', 'Аргументы'), element('pre', tool.arguments || '{}'));
@@ -805,9 +805,9 @@ export function createProjects() {
         prompt: text,
         request_id: requestId,
       });
-      restoreDraft = reply.structuredContent?.stop_reason === 'aborted';
+      restoreDraft = reply.structuredContent?.stop_reason === 'cancelled_by_user';
       if (chatId === chat.id) {
-        if (restoreDraft) report('Генерация остановлена.');
+        if (restoreDraft) report('Остановлено пользователем.');
         else if (reply.structuredContent?.truncated) report('Ответ достиг лимита генерации.');
       }
     } catch (error) {

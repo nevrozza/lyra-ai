@@ -244,7 +244,7 @@ impl Snapshot {
         let Some(active) = self
             .delegations
             .get_mut(&id)
-            .filter(|active| active.project_session_id == Some(session_id))
+            .filter(|active| active.project_session_id == Some(session_id) && !active.stopping)
         else {
             return false;
         };
