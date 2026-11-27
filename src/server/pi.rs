@@ -18,7 +18,7 @@ use super::{
     sessions::{Call, Kind},
 };
 
-const WORK_HANDOFF_RULE: &str = "\n\n# Work result\nPerform the assigned work with the available tools. Before your final answer, call finish_task with completed or blocked and a concise factual summary of changes, checks actually run and any unmet requirements. Use completed only when you have finished the assigned work. Then return the requested final handoff or exact verdict format. Do not claim unperformed checks. If you perform more tool work, record the updated outcome before ending.\n";
+const WORK_HANDOFF_RULE: &str = "\n\n# Work result\nPerform the assigned work with the available tools. Use the project's existing checks when authorized, and choose a verification method that directly tests each property you claim to have verified. File inspection confirms what you observed in the file. Syntax, builds, and runtime behavior each require a check suited to that claim. Report each check you ran and its observed result, and identify any relevant checks that were denied, unavailable, or skipped. Before your final answer, call finish_task with completed or blocked and a concise factual summary of changes, checks actually run and any unmet requirements. Use completed only when you have finished the assigned work. Then return the requested final handoff or exact verdict format. If you perform more tool work, record the updated outcome before ending.\n";
 
 fn input_window_exhausted(input: Option<u64>, output: Option<u64>, window: Option<u32>) -> bool {
     input.zip(window).is_some_and(|(input, window)| input.saturating_add(output.unwrap_or(0)) >= u64::from(window))

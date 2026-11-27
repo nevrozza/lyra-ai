@@ -69,7 +69,7 @@ export function createTelemetry(session, { beginSample, onSample }) {
         : `целиком в ОЗУ (≈ ${memoryAmount(ram)})`;
       return [`${name} · ${placement}`];
     });
-    const message = placements.length ? ['Ollama использует ОЗУ для моделей.', ...placements].join('\n') : '';
+    const message = placements.length ? ['Память раннеров по отчёту Ollama', ...placements].join('\n') : '';
     if (ollamaMemoryWarning.textContent !== message) ollamaMemoryWarning.textContent = message;
     ollamaMemoryWarning.hidden = !message;
   }

@@ -110,7 +110,7 @@ pub(super) fn candidates(
                 .models
                 .as_ref()
                 .and_then(|models| models.iter().find(|entry| entry.name == *model));
-            let memory = mcp::memory_estimate(metrics, model, &record, &estimate, resident, None);
+            let memory = mcp::memory_estimate(metrics, model, &record, &estimate, resident, None, 0);
             Some(Candidate {
                 model: model.clone(),
                 pi_checked: pi_check == Some(true),
@@ -125,45 +125,6 @@ pub(super) fn candidates(
             })
         })
         .collect()
-}
-
-pub(super) fn release_reviewer(
-    app: &App,
-    metrics: &crate::telemetry::Metrics,
-    reviewer: &str,
-    successor: &str,
-) -> std::result::Result<(), String> {
-    let Some(loaded) = &metrics.models else {
-        return Ok(());
-    };
-    let review_models: Vec<_> = loaded
-        .iter()
-        .filter(|model| model.name == reviewer)
-        .collect();
-    if review_models.is_empty()
-        || review_models.iter().any(|model| model.is_pinned())
-        || !review_models
-            .iter()
-            .any(|model| model.size_vram.is_some_and(|bytes| bytes > 0))
-    {
-        return Ok(());
-    }
-    let resident = loaded.iter().find(|model| model.name == successor);
-    let record = crate::server::models::model_settings(app, successor)?;
-    let estimate = crate::context::estimate(successor).unwrap_or_default();
-    let memory = mcp::memory_estimate(metrics, successor, &record, &estimate, resident, None);
-    let fits = memory["total_bytes_excluding_unknown_kv"]
-        .as_u64()
-        .zip(memory["best_gpu_vram_available_bytes"].as_u64())
-        .map_or_else(
-            || resident.is_some(),
-            |(required, available)| required <= available,
-        );
-    if !fits {
-        crate::ollama::change_model(reviewer, crate::ollama::ModelAction::Unload, None)
-            .map_err(|error| format!("Не удалось выгрузить модель проверки {reviewer}: {error}"))?;
-    }
-    Ok(())
 }
 
 pub(super) fn add_candidates(
@@ -269,13 +230,6 @@ impl Workflow {
 
     pub(super) fn is_review(&self) -> bool {
         self.stage == Stage::Review
-    }
-
-    pub(super) fn reviewer_to_release(&self, successor: &str) -> Option<&str> {
-        let reviewer = self.config.as_ref()?.review.model.as_str();
-        (matches!(self.stage, Stage::Fix | Stage::BatchFix | Stage::Launch)
-            && reviewer != successor)
-            .then_some(reviewer)
     }
 
     pub(super) fn role(&self, requested: Role) -> Option<Role> {

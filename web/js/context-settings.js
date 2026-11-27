@@ -9,14 +9,15 @@ export function contextLabel(tokens) {
 }
 
 export function createContextSettings(session, {
-  displayedModel, getRecord, loadedModel, isMemoryChanging, refreshControls, requestMetrics,
+  displayedModel, getRecord, isMemoryChanging, refreshControls, requestMetrics,
 }) {
   const contextSize = get('context-size');
   const saveContext = get('save-context');
   let contextOptions = contextPresets;
   let contextSaving = false;
   let contextEstimateRequest = 0;
-  let contextBytesPerToken;
+  let contextMemory;
+  let autoMemory;
   let configuredAutoContext;
   let autoSource;
   let autoReason;
@@ -65,20 +66,25 @@ export function createContextSettings(session, {
 
   function renderContextChoice() {
     const tokens = contextOptions[contextSize.value];
-    const estimated = tokens && contextBytesPerToken ? tokens * contextBytesPerToken : null;
+    const memory = tokens == null ? autoMemory : contextMemory?.[tokens];
     const auto = tokens == null ? configuredAutoContext : null;
-    const label = contextLabel(tokens) + (auto ? ` ≈ ${whole.format(auto)} токенов` : '') +
-      (estimated ? ` ≈ ${memoryAmount(estimated)}` : '');
+    const label = contextLabel(tokens) + (auto ? ` · ${whole.format(auto)} токенов` : '');
     get('context-choice').textContent = label;
+    const profileAuto = get('benchmark-profile-auto');
+    profileAuto.hidden = configuredAutoContext == null;
+    profileAuto.textContent = profileAuto.hidden ? '' : `Auto для одной модели сейчас: ${contextLabel(configuredAutoContext)}`;
     contextSize.setAttribute('aria-valuetext', label);
-    get('context-note').textContent = tokens == null ?
-      (auto ? (autoSource === 'measured' ? 'По полному бенчмарку модели. ' : 'Оценка по доступной VRAM. ') + 'Размер уточняется при запуске.' :
-        autoReason ? `Авто недоступен: ${autoReason}. Запустите полный бенчмарк или выберите окно вручную.` : 'Ожидаем оценку Auto.') :
-      estimated ? 'Оценка для KV-кэша в FP16. Веса модели и рабочие буферы занимают память дополнительно.' :
-      contextBytesPerToken === null ? 'Для этой модели оценка памяти недоступна.' :
-      'Размер применяется при следующей загрузке.';
-    // Auto already accounts for weights, free VRAM and a workspace reserve.
-    renderContextMemoryWarning(estimated);
+    const required = memory?.total_bytes_excluding_unknown_kv;
+    const budget = memory?.best_gpu_vram_available_bytes;
+    const note = required == null ? '' :
+      `${memory.source === 'measured' ? 'Замер' : 'Оценка'} ≈ ${memoryAmount(required)} VRAM` +
+      (budget == null ? '' : ` · бюджет ${memoryAmount(budget)}`) +
+      (memory.kv_included ? '.' : ' · без учёта KV-кэша.');
+    get('context-note').textContent = tokens == null
+      ? (auto ? [autoSource === 'pinned' ? 'Закреплённое окно.' : 'Окно уточняется при запуске.', note].filter(Boolean).join(' ')
+        : autoReason ? `Авто недоступен: ${autoReason}.` : 'Ожидаем оценку Auto.')
+      : note || 'Размер применяется при следующей загрузке.';
+    renderContextMemoryWarning(memory);
   }
 
   function refreshMemoryWarning() {
@@ -87,25 +93,23 @@ export function createContextSettings(session, {
     requestMetrics();
   }
 
-  function renderContextMemoryWarning(contextBytes) {
+  function renderContextMemoryWarning(memory) {
     const warning = get('context-memory-warning');
     if (session.closed || isMemoryChanging() || waitingForMemorySample) {
       warning.hidden = true;
       return;
     }
-    const model = displayedModel();
-    const message = contextMemoryWarning(session.metrics, model, loadedModel(session.metrics?.models, model), contextBytes);
+    const message = contextMemoryWarning(memory);
     warning.hidden = !message;
     if (warning.textContent !== message) warning.textContent = message;
   }
 
-  async function readContextEstimate(model) {
+  async function readContextEstimate(model, reset = false) {
     const request = ++contextEstimateRequest;
-    contextBytesPerToken = undefined;
-    configuredAutoContext = undefined;
-    autoSource = undefined;
-    autoReason = undefined;
-    renderContextChoice();
+    if (reset) {
+      contextMemory = autoMemory = configuredAutoContext = autoSource = autoReason = undefined;
+      renderContextChoice();
+    }
     if (!model) return;
     let estimate;
     try {
@@ -115,7 +119,8 @@ export function createContextSettings(session, {
       // The slider still works if Ollama can't provide model metadata.
     }
     if (request !== contextEstimateRequest) return;
-    contextBytesPerToken = estimate?.bytes_per_token_f16 ?? null;
+    contextMemory = estimate?.memory_by_context;
+    autoMemory = estimate?.auto_memory;
     configuredAutoContext = estimate?.auto_context_tokens;
     autoSource = estimate?.auto_context_source;
     autoReason = estimate?.auto_context_reason;
@@ -144,7 +149,10 @@ export function createContextSettings(session, {
       return isMemoryChanging() ? undefined : memorySampleEpoch;
     },
     acceptSample(epoch) {
-      if (epoch === memorySampleEpoch && !isMemoryChanging()) waitingForMemorySample = false;
+      if (epoch === memorySampleEpoch && !isMemoryChanging()) {
+        waitingForMemorySample = false;
+        readContextEstimate(displayedModel());
+      }
     },
   };
 }

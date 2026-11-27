@@ -1,5 +1,5 @@
 use std::panic::AssertUnwindSafe;
-use std::{fmt::Write, num::NonZeroU32, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fmt::Write, num::NonZeroU32, path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -723,12 +723,14 @@ async fn installed_model(requested: &str) -> Result<String, String> {
 
 async fn manage_model(app: Arc<App>, request: ManageModel) -> Result<String, String> {
     let model = installed_model(&request.model).await?;
+    let admission = app.context_admission.lock().await;
     if !app
         .task
         .send_if_modified(|snapshot| snapshot.begin_model_action(model.clone(), request.action))
     {
         return Err("Lyra is busy or stopped".into());
     }
+    drop(admission);
     execute_model_action(
         app,
         model.clone(),
@@ -763,44 +765,48 @@ async fn run_model(
         return Err("think must be a boolean or a non-empty supported level".into());
     }
     let model = installed_model(&request.model).await?;
-    let delegation = begin_delegation(&app, &model, DelegationScope::Standalone)?;
-    let metrics = if request.context_tokens.is_none() && !request.require_loaded {
-        Some(fresh_metrics(&app).await)
-    } else { None };
-    let store = app.clone();
-    let source = model.clone();
-    let execution = tokio::task::spawn_blocking(move || {
-        let settings = model_settings(&store, &source)?;
-        let tokens = settings.context_tokens;
+    let delegation = {
+        let _admission = app.context_admission.lock().await;
+        begin_delegation(&app, &model, DelegationScope::Standalone)?
+    };
+    let execution: Result<_, String> = async {
+        let settings = model_settings(&app, &model)?;
         let requested = request.context_tokens.map(NonZeroU32::get);
-        let auto = if requested.is_none() && tokens.is_none() {
-            metrics.as_ref().and_then(|metrics| {
-                let estimate = context::estimate_auto(&source)?;
-                auto_context_estimate(metrics, &source, &settings, &estimate, 1, 1, true).tokens
-            })
-        } else { None };
-        let selected = requested.or(auto);
-        let reply = ollama::chat(
-            &source,
-            &request.prompt,
-            tokens,
-            selected,
-            request.require_loaded,
-            request.think.or(settings.think),
-        )?;
-        let saved = if requested.is_some() && requested != tokens && reply.completed() {
-            store
-                .benchmarks
-                .set_context(source, requested)
-                .map(|()| true)
+        let manual = requested.or(settings.context_tokens);
+        let auto = if request.require_loaded {
+            None
+        } else if manual.is_some() {
+            release_idle_profiles(&model, manual, false).await?;
+            None
         } else {
-            Ok(false)
+            select_idle_auto(&app, &model, 1, 1).await?.tokens
         };
-        Ok((reply, saved, selected.or(tokens)))
-    })
-    .await
-    .map_err(|_| "Ollama chat task failed".to_owned())
-    .and_then(|result| result);
+        let store = app.clone();
+        let source = model.clone();
+        tokio::task::spawn_blocking(move || {
+            let tokens = settings.context_tokens;
+            let selected = requested.or(auto);
+            let reply = ollama::chat(
+                &source,
+                &request.prompt,
+                tokens,
+                selected,
+                request.require_loaded,
+                request.think.or(settings.think),
+            )?;
+            let saved = if requested.is_some() && requested != tokens && reply.completed() {
+                store
+                    .benchmarks
+                    .set_context(source, requested)
+                    .map(|()| true)
+            } else {
+                Ok(false)
+            };
+            Ok((reply, saved, selected.or(tokens)))
+        })
+        .await
+        .map_err(|_| "Ollama chat task failed".to_owned())?
+    }.await;
     let context_changed = execution
         .as_ref()
         .is_ok_and(|(_, saved, _)| matches!(saved, Ok(true)));
@@ -967,13 +973,15 @@ async fn run_pi(
                 return Err("Lyra is busy, stopped, or the project chat is already active".into());
             }
             if tokens.is_none() {
-                let selected = plan_auto_context(&app, &model, 1, 1).await
+                let selected = plan_auto_context(&app, &model, 1, 1).await?
                     .ok_or("No safe automatic context available while other models are starting or running; wait or specify context_tokens explicitly")?;
                 selection = selected;
                 tokens = selected.tokens;
                 if tokens.is_none() {
                     return Err(format!("Auto context unavailable: {}. Run full benchmark or set context_tokens explicitly.", selected.reason));
                 }
+            } else if app.task.borrow().active_delegation_count() == 0 {
+                release_idle_profiles(&model, tokens, false).await?;
             }
             let id = begin_delegation(&app, &model, scope)?;
             app.task.send_modify(|state| state.set_delegation_context_tokens(id, tokens));
@@ -1384,16 +1392,19 @@ async fn inspect(app: Arc<App>, request: Inspect) -> Result<String, String> {
                 })
                 .copied()
         });
+        let idle = !app.task.borrow().busy();
+        let reclaimable = if idle { preview_reclaimable(&app, &metrics, &model, &record) } else { 0 };
+        let solo = auto_context_estimate(&metrics, &model, &record, &estimate, 1, 1, reclaimable);
+        let parallel = auto_context_estimate(&metrics, &model, &record, &estimate, AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models, reclaimable);
         let memory = memory_estimate(
             &metrics,
             &model,
             &record,
             &estimate,
             resident,
-            requested_tokens,
+            requested_tokens.or(record.context_tokens.map(u64::from)).or(solo.tokens.map(u64::from)),
+            reclaimable,
         );
-        let solo = auto_context_estimate(&metrics, &model, &record, &estimate, 1, 1, !app.task.borrow().busy());
-        let parallel = auto_context_estimate(&metrics, &model, &record, &estimate, AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models, !app.task.borrow().busy());
         let thinking_supported = if !estimate.thinking_options.is_empty() {
             Some(true)
         } else if estimate.thinking["values"].is_array() || estimate.capabilities.is_some() {
@@ -1543,7 +1554,7 @@ fn memory_pair(memory: Option<&telemetry::Memory>) -> String {
 }
 
 // A context recommendation is a conservative memory estimate, not a promise
-// from the Ollama scheduler. We never reclaim pinned or active runners.
+// from Ollama; runtime admission verifies the unload before it budgets VRAM.
 #[derive(Clone, Copy)]
 pub(super) struct AutoChoice {
     pub(super) tokens: Option<u32>,
@@ -1565,14 +1576,53 @@ impl AutoChoice {
     }
 }
 
+fn profiled_resident_bytes(
+    metrics: &telemetry::Metrics, entry: &ollama::Model, record: &benchmark::Record,
+) -> Option<u64> {
+    measured_profile(metrics, &entry.name, record)?
+        .resident_gpu_bytes(entry.context_length?, model_weights(metrics, &entry.name)?)
+}
+
+pub(super) fn preview_reclaimable(
+    app: &App, metrics: &telemetry::Metrics, model: &str, record: &benchmark::Record,
+) -> u64 {
+    metrics.models.as_deref().unwrap_or_default().iter()
+        .filter(|entry| entry.context_profile && !entry.is_pinned())
+        .map(|entry| {
+            let measured = if ollama::same_model(&entry.name, model) {
+                profiled_resident_bytes(metrics, entry, record)
+            } else {
+                app.benchmarks.get(&entry.name).ok()
+                    .and_then(|record| profiled_resident_bytes(metrics, entry, &record))
+            };
+            measured.or(entry.size_vram).unwrap_or(0)
+        }).fold(0u64, u64::saturating_add)
+}
+
+fn model_weights(metrics: &telemetry::Metrics, model: &str) -> Option<u64> {
+    metrics.model_sizes.as_ref()?.get(model).copied()
+}
+
+fn measured_profile<'a>(
+    metrics: &telemetry::Metrics, model: &str, record: &'a benchmark::Record,
+) -> Option<&'a benchmark::MemoryProfile> {
+    record.memory_profile.as_ref().filter(|profile| profile.matches(metrics, model))
+}
+
+fn gpu_available(metrics: &telemetry::Metrics, reclaimable: u64) -> Option<u64> {
+    let mut gpus = metrics.gpus.iter().filter_map(|gpu| gpu.vram.as_ref());
+    let first = gpus.next()?;
+    // Per-runner bytes are aggregate; never credit them to one of several GPUs.
+    Some(match gpus.next() {
+        None => room(first, Some(reclaimable)),
+        Some(second) => [first, second].into_iter().chain(gpus)
+            .map(|gpu| room(gpu, None)).max().unwrap_or(0),
+    })
+}
+
 pub(super) fn auto_context_estimate(
-    metrics: &telemetry::Metrics,
-    model: &str,
-    record: &benchmark::Record,
-    estimate: &context::Estimate,
-    slots: usize,
-    model_slots: usize,
-    reclaim_idle: bool,
+    metrics: &telemetry::Metrics, model: &str, record: &benchmark::Record,
+    estimate: &context::Estimate, slots: usize, model_slots: usize, reclaimable: u64,
 ) -> AutoChoice {
     let Some(maximum) = estimate.max_context_tokens else {
         return AutoChoice::unavailable("model context ceiling unknown");
@@ -1587,30 +1637,17 @@ pub(super) fn auto_context_estimate(
     {
         return AutoChoice::chosen(window, "pinned", "reuse pinned context profile");
     }
-    let Some(weights) = metrics.model_sizes.as_ref().and_then(|sizes| sizes.get(model)).copied() else {
+    let Some(weights) = model_weights(metrics, model) else {
         return AutoChoice::unavailable("model weights unavailable in catalog");
     };
-    let mut gpus = metrics.gpus.iter().filter_map(|gpu| gpu.vram.as_ref()).peekable();
-    let Some(first) = gpus.next() else {
+    let Some(available) = gpu_available(metrics, reclaimable) else {
         return AutoChoice::unavailable("GPU memory telemetry unavailable");
     };
-    let available = if gpus.peek().is_none() {
-        let reclaimable = if reclaim_idle {
-            // Ollama may evict unpinned idle runners when a new runner loads.
-            // Never count active/pinned runners or more than total used VRAM.
-            Some(loaded.iter().filter(|entry| !entry.is_pinned())
-                .filter_map(|entry| entry.size_vram).fold(0u64, u64::saturating_add))
-        } else { None };
-        room(first, reclaimable)
-    } else {
-        std::iter::once(first).chain(gpus).map(|gpu| room(gpu, None)).max().unwrap_or(0)
-    };
-    let daemon_slots = std::env::var("OLLAMA_NUM_PARALLEL").ok()
-        .and_then(|value| value.parse::<usize>().ok()).unwrap_or(1).max(1);
-    if let Some(profile) = record.memory_profile.as_ref().filter(|p| p.matches(metrics, model))
+    let daemon_slots = context::daemon_slots();
+    if let Some(profile) = measured_profile(metrics, model, record)
         && slots <= daemon_slots
     {
-        if let Some(tokens) = profile.fit(available / model_slots.max(1) as u64, weights, maximum) {
+        if let Some(tokens) = profile.fit(context::gpu_budget(available, model_slots), weights, maximum) {
             return AutoChoice::chosen(tokens, "measured", "largest verified cold full-GPU profile fitting current budget");
         }
         // A valid profile may establish that a larger context spills to CPU.
@@ -1640,51 +1677,109 @@ pub(super) async fn fresh_metrics(app: &App) -> telemetry::Metrics {
     cache.sample().await
 }
 
+// Call only while holding admission with no active delegations, or while
+// holding an exclusive model operation. Recheck raw names and pins in Ollama.
+pub(super) async fn release_idle_profiles(
+    model: &str, keep_tokens: Option<u32>, keep_all_target_profiles: bool,
+) -> Result<bool, String> {
+    let base = context::alias(model);
+    let exact = keep_tokens.map(|tokens| context::profile(model, tokens));
+    tokio::task::spawn_blocking(move || {
+        let loaded = ollama::running_models().ok_or("Не удалось проверить загруженные модели Ollama.")?;
+        ollama::unload_idle_profiles(&loaded, |entry| {
+            (keep_all_target_profiles && context::profile_base(&entry.name) == Some(base.as_str()))
+                || exact.as_ref().is_some_and(|name| entry.name == *name
+                    || entry.name == base && entry.context_length == keep_tokens.map(u64::from))
+        })
+    }).await.map_err(|error| error.to_string())?
+}
+
+pub(super) async fn select_idle_auto(
+    app: &App, model: &str, slots: usize, model_slots: usize,
+) -> Result<AutoChoice, String> {
+    let record = model_settings(app, model)?;
+    release_idle_profiles(model, None, true).await?;
+    let mut metrics = fresh_metrics(app).await;
+    let source = model.to_owned();
+    let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
+        .await.ok().flatten().unwrap_or_default();
+
+    let reclaimed = preview_reclaimable(app, &metrics, model, &record);
+    let preview = auto_context_estimate(&metrics, model, &record, &estimate, slots, model_slots, reclaimed);
+    let keep = preview.tokens.filter(|&tokens| {
+        preview.source == "pinned" || metrics.models.as_deref().unwrap_or_default().iter().any(|entry|
+                entry.context_profile && ollama::same_model(&entry.name, model)
+                && entry.context_length == Some(u64::from(tokens)))
+    });
+    if release_idle_profiles(model, keep, false).await? {
+        metrics = fresh_metrics(app).await;
+    }
+    let reusable = keep.map_or(0, |_| preview_reclaimable(app, &metrics, model, &record));
+    let actual = auto_context_estimate(&metrics, model, &record, &estimate, slots, model_slots, reusable);
+    if keep.is_some() && keep != actual.tokens {
+        release_idle_profiles(model, None, false).await?;
+        metrics = fresh_metrics(app).await;
+        return Ok(auto_context_estimate(&metrics, model, &record, &estimate, slots, model_slots, 0));
+    }
+    Ok(actual)
+}
+
 // The caller serializes plan + reservation through context_admission.
 // None = defer new automatic runner while other work is active.
 // An unavailable choice carries an explicit diagnostic; Pi never silently uses 4K.
 pub(super) async fn plan_auto_context(
     app: &App, model: &str, slots: usize, model_slots: usize,
-) -> Option<AutoChoice> {
+) -> Result<Option<AutoChoice>, String> {
     let (active, existing) = {
         let state = app.task.borrow();
         (state.active_context_profiles(), state.active_context_for_model(model))
     };
     if let Some(existing) = existing {
         // A shared active runner must keep exactly the same context profile.
-        return Some(existing.map_or_else(|| AutoChoice::unavailable("active runner context unknown"),
-            |tokens| AutoChoice::chosen(tokens, "active", "reuse existing active runner context")));
+        return Ok(Some(existing.map_or_else(|| AutoChoice::unavailable("active runner context unknown"),
+            |tokens| AutoChoice::chosen(tokens, "active", "reuse existing active runner context"))));
+    }
+    if active.is_empty() {
+        let choice = select_idle_auto(app, model, slots, model_slots).await?;
+        // Try the full budget if a shared start cannot fit. Later automatic
+        // runners still wait for real, sufficient headroom.
+        if choice.tokens.is_none() && (slots > 1 || model_slots > 1) {
+            return select_idle_auto(app, model, 1, 1).await.map(Some);
+        }
+        return Ok(Some(choice));
     }
     let metrics = fresh_metrics(app).await;
-    if !active.is_empty() {
-        // The other runner may have reserved its slot but not allocated VRAM
-        // yet. Don't spend the same free memory twice.
-        let loaded = metrics.models.as_deref()?;
-        if !active.iter().all(|(name, tokens)| loaded.iter().any(|entry|
-            ollama::same_model(&entry.name, name)
-            && tokens.is_none_or(|tokens| entry.context_length == Some(u64::from(tokens)))))
-        {
-            return None;
-        }
+    // Don't spend free memory that another reserved runner hasn't allocated yet.
+    let Some(loaded) = metrics.models.as_deref() else { return Ok(None); };
+    if !active.iter().all(|(name, tokens)| loaded.iter().any(|entry|
+        ollama::same_model(&entry.name, name)
+        && tokens.is_none_or(|tokens| entry.context_profile && entry.context_length == Some(u64::from(tokens)))))
+    {
+        return Ok(None);
     }
+    let occupied = active.iter().collect::<BTreeSet<_>>().len();
     let source = model.to_owned();
     let store = app.benchmarks.get(model).unwrap_or_default();
     let estimate = tokio::task::spawn_blocking(move || context::estimate_auto(&source))
         .await.ok().flatten().unwrap_or_default();
-    let selected = auto_context_estimate(&metrics, model, &store, &estimate, slots, model_slots, active.is_empty());
-    if selected.tokens.is_none() && !active.is_empty() { None } else { Some(selected) }
+    let selected = auto_context_estimate(&metrics, model, &store, &estimate, slots,
+        model_slots.saturating_sub(occupied).max(1), 0);
+    Ok(selected.tokens.map(|_| selected))
 }
 
 pub(super) async fn plan_queued_context(
-    app: &App, model: &str, requested: Option<u32>, parallel: bool,
+    app: &App, model: &str, requested: Option<u32>, slots: usize, models: usize,
 ) -> Result<Option<AutoChoice>, String> {
-    if requested.is_some() { return Ok(Some(AutoChoice::manual(requested))); }
-    let saved = model_settings(app, model)?.context_tokens;
-    if saved.is_some() { return Ok(Some(AutoChoice::manual(saved))); }
-    let (slots, models) = if parallel {
-        (AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models)
-    } else { (1, 1) };
-    Ok(plan_auto_context(app, model, slots, models).await)
+    let manual = match requested {
+        Some(_) => requested,
+        None => model_settings(app, model)?.context_tokens,
+    };
+    if let Some(tokens) = manual {
+        let idle = app.task.borrow().active_delegation_count() == 0;
+        if idle { release_idle_profiles(model, Some(tokens), false).await?; }
+        return Ok(Some(AutoChoice::manual(manual)));
+    }
+    plan_auto_context(app, model, slots, models).await
 }
 
 pub(super) fn memory_estimate(
@@ -1694,6 +1789,7 @@ pub(super) fn memory_estimate(
     estimate: &context::Estimate,
     resident: Option<&ollama::Model>,
     requested_tokens: Option<u64>,
+    reclaimable: u64,
 ) -> Value {
     let tokens = requested_tokens
         .or(record.context_tokens.map(u64::from))
@@ -1709,49 +1805,42 @@ pub(super) fn memory_estimate(
                 .as_ref()
                 .and_then(|latest| latest.auto_context_tokens())
         });
-    let weights = metrics
-        .model_sizes
-        .as_ref()
-        .and_then(|sizes| sizes.get(model))
-        .copied();
+    let weights = model_weights(metrics, model);
     let kv = estimate
         .bytes_per_token_f16
         .zip(tokens)
         .and_then(|(bytes, tokens)| bytes.checked_mul(tokens));
-    let base = weights.map(|weights| weights.saturating_add(kv.unwrap_or(0)));
-    let compute = base.map(|bytes| (512 << 20).max(bytes.div_ceil(10)));
-    let required = base
-        .zip(compute)
-        .map(|(base, compute)| base.saturating_add(compute));
+    let cache = estimate.auto_kv_bytes_per_token.or(estimate.bytes_per_token_f16).zip(tokens)
+        .map(|(bytes, tokens)| bytes.saturating_mul(tokens)
+            .saturating_add(estimate.auto_fixed_cache_bytes.unwrap_or(0)));
+    let measured = tokens.zip(weights).and_then(|(tokens, weights)|
+        measured_profile(metrics, model, record)?.gpu_bytes(tokens, weights));
+    let estimated = weights.map(|weights| context::estimated_runner_bytes(
+        weights, cache.unwrap_or(0), context::daemon_slots()));
+    let compute = if measured.is_some() { None } else { estimated.map(|(_, compute)| compute) };
+    let required = measured.or(estimated.map(|(required, _)| required));
     let ram = metrics
         .ram
         .as_ref()
         .map(|ram| room(ram, resident.and_then(ollama::Model::ram_bytes)));
-    let mut gpus = metrics
-        .gpus
-        .iter()
-        .filter_map(|gpu| gpu.vram.as_ref())
-        .peekable();
-    let first = gpus.next();
-    let vram = first.map(|first| {
-        if gpus.peek().is_none() {
-            room(first, resident.and_then(|entry| entry.size_vram))
-        } else {
-            std::iter::once(first)
-                .chain(gpus)
-                .map(|vram| room(vram, None))
-                .max()
-                .unwrap_or(0)
-        }
-    });
+    let exact_pinned = resident.filter(|entry| entry.context_profile && entry.is_pinned()
+        && entry.context_length == tokens && tokens.is_some())
+        .and_then(|entry| profiled_resident_bytes(metrics, entry, record).or(entry.size_vram))
+        .unwrap_or(0);
+    let free = gpu_available(metrics, reclaimable.saturating_add(exact_pinned));
+    let vram = free.map(|bytes| context::gpu_budget(bytes, 1));
     let ram_reserve = 1 << 30;
     let fallback_ram = required.map(|bytes| bytes.saturating_sub(vram.unwrap_or(0)));
     json!({
         "context_tokens": tokens, "kv_fp16_bytes_per_token": estimate.bytes_per_token_f16,
         "weights_bytes": weights, "kv_fp16_bytes": kv, "compute_buffer_bytes": compute,
-        "total_bytes_excluding_unknown_kv": required, "kv_included": kv.is_some(),
+        "total_bytes_excluding_unknown_kv": required, "kv_included": measured.is_some() || cache.is_some(),
+        "source": if measured.is_some() { "measured" } else { "estimated" },
         "ram_available_bytes": ram, "ram_reserve_bytes": ram_reserve,
-        "best_gpu_vram_available_bytes": vram, "fallback_ram_bytes": fallback_ram,
+        "best_gpu_vram_available_bytes": vram, "best_gpu_free_bytes": free,
+        "gpu_headroom_bytes": context::GPU_HEADROOM_BYTES,
+        "vram_shortfall_bytes": vram.zip(required).map(|(available, needed)| needed.saturating_sub(available)),
+        "fallback_ram_bytes": fallback_ram,
         "ram_shortfall_bytes": ram.zip(fallback_ram).map(|(ram, needed)| needed.saturating_add(ram_reserve).saturating_sub(ram))
     })
 }

@@ -202,14 +202,25 @@ impl MemoryProfile {
 
     // Only use measured windows; no extrapolation beyond a real successful
     // run and no partial CPU offload advertised as a GPU fit.
-    pub(crate) fn fit(&self, available: u64, weights: u64, maximum: u64) -> Option<u32> {
+    pub(crate) fn fit(&self, budget: u64, weights: u64, maximum: u64) -> Option<u32> {
         self.points.iter().filter_map(|point| {
             let tokens = point.context_tokens?;
             if u64::from(tokens) > maximum { return None; }
             let bytes = point.verified_gpu_bytes(weights)?;
-            let reserve = (512u64 << 20).max(bytes / 10);
-            (bytes.saturating_add(reserve) <= available).then_some(tokens)
+            (bytes <= budget).then_some(tokens)
         }).max()
+    }
+
+    pub(crate) fn gpu_bytes(&self, tokens: u64, weights: u64) -> Option<u64> {
+        self.points.iter().find(|point| point.context_tokens.map(u64::from) == Some(tokens))?
+            .verified_gpu_bytes(weights)
+    }
+
+    pub(crate) fn resident_gpu_bytes(&self, tokens: u64, weights: u64) -> Option<u64> {
+        let point = self.points.iter().find(|point| point.context_tokens.map(u64::from) == Some(tokens))?;
+        point.verified_gpu_bytes(weights)?;
+        let gpu = point.gpu_memory.first()?;
+        Some(gpu.final_bytes?.saturating_sub(gpu.baseline_bytes))
     }
 }
 
@@ -509,19 +520,21 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
     let identity = identity(digest, version, &gpu_snapshot())
         .ok_or("Full profiling currently requires exactly one measurable NVIDIA GPU")?;
     let loaded = ollama::running_models().ok_or("Cannot inspect loaded models")?;
-    let alias = context::alias(model);
-    let same = |entry: &ollama::Model| ollama::same_model(&entry.name, model)
-        || context::profile_base(&entry.name) == Some(alias.as_str());
-    if loaded.iter().any(|entry| !same(entry) || entry.is_pinned()) {
-        return Err("Unload other Ollama models and unpin this model before full profiling".into());
+    if loaded.iter().any(|entry| {
+        entry.is_pinned() || (!ollama::same_model(&entry.name, model) && !context::is_alias(&entry.name))
+    }) {
+        return Err("Unpin Ollama models and unload external runners before full profiling".into());
     }
-    if loaded.iter().any(same) { ollama::change_model(model, ollama::ModelAction::Unload, None)?; }
+    ollama::unload_idle_profiles(&loaded, |_| false)?;
+    if loaded.iter().any(|entry| ollama::same_model(&entry.name, model)) {
+        ollama::change_model(model, ollama::ModelAction::Unload, None)?;
+    }
     let mut profile = MemoryProfile { identity, points: Vec::new(), stopped_reason: None };
     let mut lower = None::<u32>;
     let mut upper = None::<u32>;
     let mut windows = profile_windows(maximum).into_iter();
-    // After the first unsuccessful doubling, test real intermediate windows
-    // instead of interpolating unobserved memory requirements.
+    // Refine the first interval that exceeds the same budget used by Auto,
+    // even if the upper bound ran entirely on GPU.
     loop {
         let tokens = match (lower, upper) {
             (Some(low), Some(high)) if high.saturating_sub(low) > 2048 => {
@@ -542,13 +555,21 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
         match measure(model, Some(tokens), &mut on_stage) {
             Ok(mut point) => {
                 point.profile_gpu_bytes = point.verified_gpu_bytes(weights);
-                let fits = point.profile_gpu_bytes.is_some();
+                let available = point.gpu_memory.first()
+                    .map(|gpu| gpu.total_bytes.saturating_sub(gpu.baseline_bytes));
+                let fits = point.profile_gpu_bytes.zip(available)
+                    .is_some_and(|(bytes, available)| bytes <= context::gpu_budget(available, 1));
+                let verified = point.profile_gpu_bytes.is_some();
                 profile.points.push(point);
                 if fits {
                     lower = Some(tokens);
                 } else {
                     upper = Some(tokens);
-                    profile.stopped_reason = Some(format!("At {tokens} tokens full GPU residency or physical sampling could not be verified; Auto uses only verified points"));
+                    profile.stopped_reason = Some(if verified {
+                        format!("At {tokens} tokens the measured peak exceeded the Auto VRAM budget")
+                    } else {
+                        format!("At {tokens} tokens full GPU residency or physical sampling could not be verified")
+                    });
                 }
             }
             Err(error) => {
@@ -556,6 +577,9 @@ pub fn measure_profile(model: &str, mut on_stage: impl FnMut(Stage)) -> Result<M
                 profile.stopped_reason = Some(format!("{tokens} tokens: {error}"));
             }
         }
+    }
+    if profile.points.is_empty() && let Some(reason) = profile.stopped_reason {
+        return Err(reason);
     }
     profile.points.sort_by_key(|point| point.context_tokens);
     Ok(profile)
@@ -622,7 +646,8 @@ pub fn measure(
     });
     let (gpu_memory, system_ram) = sampler.finish();
     if resident.is_none()
-        && let Err(error) = ollama::unload_profile(&backend)
+        && let Err(error) = ollama::unload_profile(&backend).and_then(|()|
+            ollama::wait_unloaded(|entry| ollama::same_model(&entry.name, &backend)))
     {
         eprintln!("Could not unload benchmark model {backend}: {error}");
     }
@@ -767,6 +792,10 @@ mod profile_tests {
         };
         assert_eq!(profile.fit(10*gib,8*gib,65536),Some(8192));
         assert_eq!(profile.fit(12*gib,8*gib,4096),Some(4096));
-        assert_eq!(profile.fit(8*gib,8*gib,65536),None);
+        assert_eq!(profile.fit(8*gib,8*gib,65536),Some(4096));
+        assert_eq!(profile.fit(8*gib - 1,8*gib,65536),None);
+        // A measured peak already includes compute; a second 10% reserve
+        // would make this usable window look too large.
+        assert_eq!(profile.fit(context::gpu_budget(9*gib + (256 << 20), 1),8*gib,65536),Some(8192));
     }
 }

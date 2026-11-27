@@ -14,7 +14,7 @@ export function duration(ms) {
 }
 
 export function memoryAmount(bytes) {
-  return bytes >= 2 ** 30 ? `${oneDecimal.format(bytes / 2 ** 30)} ГБ` : `${oneDecimal.format(bytes / 2 ** 20)} МБ`;
+  return bytes >= 2 ** 30 ? `${oneDecimal.format(bytes / 2 ** 30)} ГиБ` : `${oneDecimal.format(bytes / 2 ** 20)} МиБ`;
 }
 
 export function memoryLabel(value) {
@@ -22,7 +22,7 @@ export function memoryLabel(value) {
   const inGigabytes = value.total >= 2 ** 30;
   const unit = inGigabytes ? 2 ** 30 : 2 ** 20;
   const format = inGigabytes ? oneDecimal : whole;
-  return `${format.format(value.used / unit)} / ${format.format(value.total / unit)} ${inGigabytes ? 'ГБ' : 'МБ'}`;
+  return `${format.format(value.used / unit)} / ${format.format(value.total / unit)} ${inGigabytes ? 'ГиБ' : 'МиБ'}`;
 }
 
 export function memoryPercent(value) {

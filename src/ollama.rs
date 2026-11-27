@@ -370,23 +370,45 @@ pub fn change_model(
         set_keep_alive(&entry.name, keep_alive.clone(), Duration::from_secs(180))?;
     }
     if unload {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let remaining = running_models().ok_or("Не удалось подтвердить выгрузку модели.")?;
-            if !remaining.iter().any(matches_model) {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("Ollama ещё держит модель в памяти после команды выгрузки.".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        wait_unloaded(matches_model)?;
     }
     Ok(true)
 }
 
 pub(crate) fn unload_profile(model: &str) -> Result<(), String> {
     set_keep_alive(model, serde_json::json!(0), Duration::from_secs(4))
+}
+
+// Use the raw Ollama names: telemetry maps all context variants to their
+// display name, and unloading by that name could evict a pinned variant too.
+pub(crate) fn unload_idle_profiles(
+    loaded: &[Model], keep: impl Fn(&Model) -> bool,
+) -> Result<bool, String> {
+    let targets = idle_profile_names(loaded, keep);
+    if targets.is_empty() { return Ok(false); }
+    for name in &targets {
+        unload_profile(name)?;
+    }
+    wait_unloaded(|entry| targets.iter().any(|name| same_model(name, &entry.name)))?;
+    Ok(true)
+}
+
+fn idle_profile_names(loaded: &[Model], keep: impl Fn(&Model) -> bool) -> Vec<&str> {
+    loaded.iter()
+        .filter(|entry| context::is_alias(&entry.name) && !entry.is_pinned() && !keep(entry))
+        .map(|entry| entry.name.as_str()).collect()
+}
+
+pub(crate) fn wait_unloaded(matches: impl Fn(&Model) -> bool) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = running_models().ok_or("Не удалось подтвердить выгрузку модели.")?;
+        if !remaining.iter().any(&matches) { return Ok(()); }
+        if Instant::now() >= deadline {
+            return Err("Ollama ещё держит модель в памяти после команды выгрузки.".into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn set_keep_alive(
@@ -409,5 +431,27 @@ fn set_keep_alive(
         Ok(())
     } else {
         Err("Ollama ещё не завершила команду.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_only_removes_idle_lyra_context_profiles() {
+        let keep = context::profile("next", 65_536);
+        let pinned = context::profile("next", 32_768);
+        let previous = context::profile("previous", 65_536);
+        let runner = |name: &str, expires_at: Option<&str>| Model {
+            name: name.into(), size: None, size_vram: None, context_profile: false,
+            context_length: None, expires_at: expires_at.map(str::to_owned),
+        };
+        let loaded = [
+            runner(&keep, None), runner(&pinned, Some("9999-12-31T23:59:59Z")),
+            runner(&previous, None), runner("external", None),
+        ];
+        let targets = idle_profile_names(&loaded, |entry| entry.name == keep);
+        assert_eq!(targets, [previous]);
     }
 }
