@@ -23,7 +23,8 @@ export default function (pi) {
             ["read", "Read the current file and record its version. Optional 1-based offset and line limit.", Type.Object({
                 path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1 })),
             }), "Read current file contents before editing. Use offset and limit for large files."],
-            ["write", "Create a new file or replace an existing file after a complete current read. Acquires a dynamic file lock.", Type.Object({ path, content: Type.String() }), "Create a new file or replace a fully read file."],
+            ["write", "Create a new file (missing parent directories are created automatically) or replace an existing file after a complete current read. Acquires a dynamic file lock.", Type.Object({ path, content: Type.String() }), "Create a new file or replace a fully read file."],
+            ["mkdir", "Create a directory and missing parent directories within the registered workspace. Existing directories are accepted.", Type.Object({ path }), "Create an empty or nested directory; write already creates parents for files."],
             ["edit", "Replace exact, unique, non-overlapping text after reading the current file. Acquires a dynamic file lock.", Type.Object({
                 path,
                 edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
@@ -50,12 +51,35 @@ export default function (pi) {
                             : [{ type: "text", text: result.text }];
                         return { content, details: {} };
                     }
-                    return { content: [{ type: "text", text: `Updated ${args.path}` }], details: result };
+                    return { content: [{ type: "text", text: name === "mkdir" ? `Directory ready: ${args.path}` : `Updated ${args.path}` }], details: result };
                 },
             });
         }
     }
     if (!textOnly) {
+        const description = "Load the instructions of an available Lyra skill by exact name, without guessing its file path. Returns SKILL.md text and the real package directory for referenced resources.";
+        guardedDescriptions.set("load_skill", description);
+        pi.registerTool({
+            name: "load_skill", label: "Load skill", description,
+            parameters: Type.Object({
+                name: Type.String({ description: "Exact skill name from the available Lyra skills catalog, e.g. canvas-design" }),
+                offset: Type.Optional(Type.Integer({ minimum: 1 })),
+                limit: Type.Optional(Type.Integer({ minimum: 1 })),
+            }),
+            promptSnippet: "Load a relevant skill by name from the available catalog.",
+            promptGuidelines: ["When a requested or relevant skill is listed, call load_skill with its name, not a guessed path. Follow any read continuation marker; resolve referenced files relative to the returned package directory."],
+            executionMode: "sequential",
+            async execute(_id, args, signal, _onUpdate, ctx) {
+                const value = await ctx.ui.input("lyra:load-skill", JSON.stringify(args), { signal });
+                if (value === undefined) throw new Error("Lyra did not return a skill result");
+                const result = JSON.parse(value);
+                if (!result.ok) throw new Error(result.message);
+                return {
+                    content: [{ type: "text", text: `Skill: ${result.name}\nManifest: ${result.path}\nPackage directory: ${result.directory}\n\n${result.text}` }],
+                    details: { name: result.name, path: result.path, directory: result.directory },
+                };
+            },
+        });
         const shell = process.platform === "win32" ? "Windows PowerShell" : "/bin/sh";
         pi.registerTool({
             name: "run_command",
@@ -104,8 +128,8 @@ export default function (pi) {
             });
         }
     }
-    const tools = ["read", "grep", "find", "ls", "run_command"];
-    const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit"];
+    const tools = ["read", "grep", "find", "ls", "run_command", "load_skill"];
+    const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir"] : [])];
     async function verifyTools() {
         await pi.setActiveTools(expected);
         const active = pi.getActiveTools();
