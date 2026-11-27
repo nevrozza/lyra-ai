@@ -266,7 +266,12 @@ h2 { font-size: .96rem; font-weight: 650; }
 .benchmark-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .benchmark-model-name { min-width: 0; font-size: clamp(1.25rem, 7cqi, 1.75rem); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
 .model-actions.benchmark-actions { border-top: 0; padding-top: 0; margin-top: 12px; }
+.model-description-text { display: block; width: 100%; margin-top: 8px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font-size: .83rem; font-weight: 400; line-height: 1.5; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.model-description-text:hover:not(:disabled) { background: transparent; color: #edf0ea; }
+.model-description-text:disabled { background: transparent; color: var(--muted); }
+.model-description-text[data-empty="true"] { opacity: .75; }
 #model-description-form { display: grid; justify-items: start; gap: 6px; margin-top: 8px; }
+.description-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 #model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
 #benchmark-summary { margin-top: 8px; }
 #benchmark-results { margin: 20px 0 16px; }

@@ -207,9 +207,13 @@
             <p id="model-list-message" class="secondary">Получаем список моделей…</p>
             <div id="selected-model" hidden>
               <strong id="model-name" class="model-name">—</strong>
-              <form id="model-description-form">
-                <textarea id="model-description" rows="2" maxlength="2000" aria-label="Описание модели" placeholder="Добавить описание…" disabled></textarea>
-                <button id="save-description" class="unload" type="submit" disabled hidden>Сохранить описание</button>
+              <button id="edit-description" class="model-description-text" type="button" title="Нажмите, чтобы редактировать описание" aria-label="Редактировать описание модели" disabled>Добавить описание…</button>
+              <form id="model-description-form" hidden>
+                <textarea id="model-description" rows="3" maxlength="2000" aria-label="Описание модели" placeholder="Добавить описание…" disabled></textarea>
+                <div class="description-actions">
+                  <button id="save-description" class="unload" type="submit" disabled>Сохранить</button>
+                  <button id="cancel-description" class="unload" type="button">Отмена</button>
+                </div>
               </form>
               <dl id="model-details" class="facts" hidden>
                 <div><dt>Контекст</dt><dd id="context">—</dd></div>
