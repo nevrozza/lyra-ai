@@ -315,6 +315,7 @@ fn tools() -> Value {
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing group in this project."},
                 "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a named group; mutually exclusive with group_id."},
+                "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared Markdown goal and constraints for a new group; requires group_name."},
                 "mode": {"enum": ["chat", "work"], "default": "work", "description": "Initial saved mode."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
         },
@@ -335,6 +336,7 @@ fn tools() -> Value {
                 "batch_id": {"type": "string", "description": "Optional unique ID for this batch. Reuse it only to retry the same submission."},
                 "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing task group in this project across batches."},
                 "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a group named for the overall task. Mutually exclusive with group_id."},
+                "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared goal and constraints, saved atomically before any new group task starts. For an existing group use set_group_context instead."},
                 "tasks": {"type": "array", "minItems": 1, "maxItems": 16, "items": queue_task}
             }, "required": ["project_id", "tasks"], "additionalProperties": false}
         },
