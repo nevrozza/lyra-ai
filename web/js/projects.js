@@ -82,7 +82,37 @@ export function createProjects() {
   };
   const visibleChats = project => project.sessions.filter(chat => project.archived || chat.archived === archiveView);
   const pendingTask = chat => ['queued', 'running', 'context_full'].includes(chat?.job?.status);
-  const chatLabel = chat => chat.job ? `#${chat.id} · ${chat.name}` : chat.name;
+  const collapsedGroups = new Set();
+  const groupMembers = (project, id) => project.sessions.filter(chat => chat.group?.id === id).sort((a, b) => a.id - b.id);
+  const chatLabel = (chat, project = selectedProject()) => chat.group && project
+    ? `${groupMembers(project, chat.group.id).findIndex(member => member.id === chat.id) + 1}. ${chat.name}`
+    : chat.name;
+  const errorStatuses = new Set(['failed', 'blocked', 'interrupted', 'cancelled', 'context_full']);
+  function chatState(chat, project, activeChats) {
+    const owner = chat.job ? chat : project.sessions.find(candidate => candidate.job?.chat_session_id === chat.id);
+    const status = owner?.job?.status;
+    if (activeChats.has(chat.id) || status === 'running' || status === 'queued') return 'busy';
+    if (errorStatuses.has(status)) return 'error';
+    return '';
+  }
+  function stateIcon() {
+    const icon = element('span', '');
+    icon.className = 'project-tree-status';
+    icon.hidden = true;
+    return icon;
+  }
+  function setTreeState(icon, state) {
+    const label = state === 'busy' ? 'В работе или в очереди' : state === 'error' ? 'Ошибка или требуется действие' : '';
+    if (icon.dataset.state === state) return;
+    icon.dataset.state = state;
+    icon.hidden = !state;
+    icon.classList.toggle('project-spinner', state === 'busy');
+    icon.classList.toggle('project-tree-error', state === 'error');
+    icon.textContent = state === 'error' ? '×' : '';
+    icon.title = label;
+    icon.setAttribute('aria-label', label);
+    icon.setAttribute('role', 'img');
+  }
 
   function report(text = '', error = false) {
     const target = taskDialog.open ? 'project-task-form-message'
@@ -118,11 +148,22 @@ export function createProjects() {
     const activeChats = new Set(sending.keys());
     for (const entry of running) {
       activeChats.add(entry.project_session_id);
-      const child = project?.sessions.find(session => session.id === entry.project_session_id)?.job?.chat_session_id;
-      if (child != null) activeChats.add(child);
+      for (const p of catalog?.projects ?? []) {
+        const child = p.sessions.find(session => session.id === entry.project_session_id)?.job?.chat_session_id;
+        if (child != null) activeChats.add(child);
+      }
     }
-    for (const spinner of tree.querySelectorAll('[data-chat-progress]')) {
-      spinner.hidden = !activeChats.has(Number(spinner.dataset.chatProgress));
+    for (const icon of tree.querySelectorAll('[data-chat-progress], [data-group-progress]')) {
+      const p = catalog?.projects.find(candidate => candidate.id === Number(icon.dataset.projectId));
+      if (!p) continue;
+      if (icon.dataset.groupProgress != null) {
+        const members = groupMembers(p, Number(icon.dataset.groupProgress));
+        const states = members.map(chat => chatState(chat, p, activeChats));
+        setTreeState(icon, states.includes('busy') ? 'busy' : states.includes('error') ? 'error' : '');
+      } else {
+        const chat = p.sessions.find(candidate => candidate.id === Number(icon.dataset.chatProgress));
+        if (chat) setTreeState(icon, chatState(chat, p, activeChats));
+      }
     }
     get('project-progress').hidden = !active;
     const progressText = stopping ? 'Останавливаем…' : contextNotice === 'compacting'
@@ -202,24 +243,58 @@ export function createProjects() {
       const heading = treeButton(project.name, project.id, undefined);
       heading.classList.add('project-tree-heading');
       item.append(heading);
-      const chats = visibleChats(project);
-      const ordinary = chats.filter(chat => !chat.job);
-      const tasks = chats.filter(chat => chat.job);
-      for (const group of [ordinary, tasks]) {
-        if (!group.length) continue;
-        if (group === tasks) {
-          const label = element('p', 'Задачи');
-          label.className = 'secondary project-task-group';
-          item.append(label);
-        }
-        const list = element('ul', '');
-        list.append(...group.map(chat => {
+      const chats = visibleChats(project).sort((a, b) => a.id - b.id);
+      const list = element('ul', '');
+      const rendered = new Set();
+      for (const chat of chats) {
+        if (!chat.group) {
           const entry = element('li', '');
-          entry.append(treeButton(chatLabel(chat), project.id, chat.id, chat.job));
-          return entry;
-        }));
-        item.append(list);
+          entry.append(treeButton(chatLabel(chat, project), project.id, chat.id));
+          list.append(entry);
+          continue;
+        }
+        const group = chat.group;
+        if (rendered.has(group.id)) continue;
+        rendered.add(group.id);
+        const entry = element('li', '');
+        entry.className = 'project-chat-group';
+        const key = `${project.id}/group/${group.id}`;
+        const toggle = element('button', '');
+        toggle.type = 'button';
+        toggle.className = 'project-group-heading';
+        toggle.title = group.name;
+        toggle.dataset.projectEntry = key;
+        const label = element('span', group.name);
+        const chevron = element('span', '');
+        chevron.className = 'project-group-chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+        const icon = stateIcon();
+        icon.dataset.groupProgress = group.id;
+        icon.dataset.projectId = project.id;
+        toggle.append(label, chevron, icon);
+        const children = element('ul', '');
+        children.className = 'project-group-chats';
+        for (const member of chats.filter(candidate => candidate.group?.id === group.id)) {
+          const row = element('li', '');
+          row.append(treeButton(chatLabel(member, project), project.id, member.id));
+          children.append(row);
+        }
+        const applyCollapsed = () => {
+          const closed = collapsedGroups.has(key);
+          children.hidden = closed;
+          toggle.setAttribute('aria-expanded', String(!closed));
+          chevron.textContent = closed ? '▸' : '▾';
+        };
+        toggle.onclick = () => {
+          if (collapsedGroups.has(key)) collapsedGroups.delete(key);
+          else collapsedGroups.add(key);
+          applyCollapsed();
+        };
+        applyCollapsed();
+        entry.append(toggle, children);
+        list.append(entry);
       }
+      if (chats.length) item.append(list);
       return item;
     }));
     if (focused) [...tree.querySelectorAll('button')].find(button => button.dataset.projectEntry === focused)?.focus();
@@ -229,25 +304,18 @@ export function createProjects() {
       : archiveView ? 'Архив пуст.' : 'Рабочих проектов пока нет.';
   }
 
-  function treeButton(label, id, session, job) {
+  function treeButton(label, id, session) {
     const button = element('button', '');
     button.type = 'button';
     button.title = label;
     button.dataset.projectEntry = `${id}/${session ?? ''}`;
     button.setAttribute('aria-current', String(id === projectId && session === chatId));
     button.append(element('span', label));
-    if (job) {
-      const status = element('span', taskStatus(job));
-      status.className = 'project-task-state';
-      button.append(status);
-    } else if (session != null) {
-      const spinner = element('span', '');
-      spinner.className = 'project-spinner';
-      spinner.dataset.chatProgress = session;
-      spinner.setAttribute('role', 'img');
-      spinner.setAttribute('aria-label', 'Модель отвечает');
-      spinner.hidden = true;
-      button.append(spinner);
+    if (session != null) {
+      const icon = stateIcon();
+      icon.dataset.chatProgress = session;
+      icon.dataset.projectId = id;
+      button.append(icon);
     }
     button.onclick = () => {
       report();
@@ -276,15 +344,16 @@ export function createProjects() {
     get('project-selection').hidden = !project;
     const breadcrumb = get('project-breadcrumb');
     breadcrumb.hidden = !chat;
-    breadcrumb.textContent = chat ? project.name : '';
+    breadcrumb.textContent = chat ? [project.name, chat.group?.name].filter(Boolean).join(' · ') : '';
     get('current-project-title').textContent = chat ? chatLabel(chat) : project?.name ?? '';
     const jobStatus = get('project-job-status');
     jobStatus.hidden = !chat?.job;
-    const sourceTask = chat?.job?.workflow?.root_id;
-    const chain = sourceTask && sourceTask !== chat.id ? ` · Цепочка #${sourceTask}` : '';
-    const dependencies = chat?.job?.after?.map(id => `#${id}`).join(', ');
+    const dependencies = chat?.job?.after?.map(id => {
+      const dependency = project.sessions.find(candidate => candidate.id === id);
+      return dependency ? chatLabel(dependency, project) : `#${id}`;
+    }).join(', ');
     jobStatus.textContent = chat?.job
-      ? [taskStatus(chat.job), chat.job.model, dependencies && `После ${dependencies}`].filter(Boolean).join(' · ') + chain : '';
+      ? [taskStatus(chat.job), chat.job.model, dependencies && `После ${dependencies}`].filter(Boolean).join(' · ') : '';
     const workspace = get('project-chat-workspace');
     workspace.hidden = !chat;
     const workingFolders = chat ? chatFolders(project, chat) : [];
