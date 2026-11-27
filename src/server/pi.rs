@@ -18,7 +18,7 @@ use super::{
     sessions::{Call, Kind},
 };
 
-const WORK_HANDOFF_RULE: &str = "\n\n# Work result\nPerform the assigned work with the available tools. Return a concise final handoff with changes, checks actually run, and any unresolved blockers; use the requested verdict format when applicable. Do not claim unperformed checks.\n";
+const WORK_HANDOFF_RULE: &str = "\n\n# Work result\nPerform the assigned work with the available tools. Before your final answer, call finish_task with completed or blocked and a concise factual summary of changes, checks actually run and any unmet requirements. Use completed only when you have finished the assigned work. Then return the requested final handoff or exact verdict format. Do not claim unperformed checks. If you perform more tool work, record the updated outcome before ending.\n";
 
 fn input_window_exhausted(input: Option<u64>, window: Option<u32>) -> bool {
     input.zip(window).is_some_and(|(input, window)| input >= u64::from(window))
@@ -61,6 +61,33 @@ impl Default for WorkProgress {
 }
 
 impl WorkProgress {
+    fn invalidate_confirmation(&mut self) {
+        self.confirmation_status = "unconfirmed".into();
+        self.confirmation_summary = None;
+    }
+
+    fn confirm(&mut self, request: &str) -> Result<(), String> {
+        self.invalidate_confirmation();
+        let value: Value = serde_json::from_str(request).map_err(|error| error.to_string())?;
+        let status = value["status"].as_str()
+            .filter(|status| matches!(*status, "completed" | "blocked"))
+            .ok_or("Use status completed or blocked")?;
+        let summary = value["summary"].as_str().map(str::trim)
+            .filter(|summary| !summary.is_empty() && summary.chars().count() <= 2000)
+            .ok_or("Provide a concrete outcome or blocker in summary (1–2000 characters)")?;
+        self.confirmation_status = status.into();
+        self.confirmation_summary = Some(summary.into());
+        Ok(())
+    }
+
+    fn reported_blocker(&self) -> Option<&str> {
+        if self.confirmation_status == "blocked" {
+            self.confirmation_summary.as_deref()
+        } else {
+            None
+        }
+    }
+
     fn record_guarded_success(&mut self, request: &str) {
         let Ok(request) = serde_json::from_str::<Value>(request) else { return };
         let (Some(tool), Some(path)) = (request["tool"].as_str(), request["path"].as_str()) else { return };
@@ -75,7 +102,7 @@ impl WorkProgress {
     fn finish(&mut self, reason: Option<String>, handoff_complete: bool) {
         self.generation_stop_reason = reason;
         self.handoff_complete = handoff_complete;
-        // Legacy fields remain readable for old saved results. New runs do not request confirmation.
+        // continuation_attempts stays zero: a missing confirmation never resumes generation.
     }
 
     pub(super) fn recovery_note(&self) -> String {
@@ -510,6 +537,22 @@ pub(super) async fn run(
                         ready = true;
                     }
                     Some("input")
+                        if ready && work_mode && event["title"] == "lyra:finish-task" =>
+                    {
+                        let id = event["id"].as_str().ok_or("Missing Pi completion request ID")?;
+                        let request = event["placeholder"].as_str().ok_or("Missing Pi completion request")?;
+                        let result = match work_progress.confirm(request) {
+                            Ok(()) => {
+                                log(Kind::Tool, "finish_task", work_progress.confirmation_summary.as_deref().unwrap_or_default(), Some("ok"));
+                                json!({"ok": true, "status": work_progress.confirmation_status})
+                            }
+                            Err(error) => json!({"ok": false, "message": error}),
+                        };
+                        rpc_send(stdin, json!({
+                            "type": "extension_ui_response", "id": id, "value": result.to_string()
+                        })).await?;
+                    }
+                    Some("input")
                         if ready && !text_only && event["title"] == "lyra:load-skill" =>
                     {
                         let id = event["id"].as_str().ok_or("Missing Pi skill request ID")?;
@@ -702,6 +745,10 @@ pub(super) async fn run(
             }
             Some("tool_execution_start") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
+                // A previous report no longer describes the final state after more tools.
+                if work_mode {
+                    work_progress.invalidate_confirmation();
+                }
                 if commands.is_some() && name == "run_command" {
                     continue;
                 }
@@ -812,6 +859,12 @@ pub(super) async fn run(
         stop_reason = Some("file_conflict".into());
         last_error = Some(format!("{conflicts}\n\nWorker's final answer:\n{answer}"));
         log(Kind::Pi, "File conflict", &conflicts, Some("error"));
+    }
+    if work_mode && last_error.is_none() && stop_reason.as_deref() == Some("stop")
+        && let Some(summary) = work_progress.reported_blocker()
+    {
+        stop_reason = Some("task_blocked".into());
+        last_error = Some(format!("Task blocked: {summary}\n\nWorker's final answer:\n{answer}"));
     }
     if work_mode && last_error.is_none() && stop_reason.as_deref() == Some("length") {
         last_error = Some(format!("Pi stopped at its provider generation/context limit.\n\nWorker's last answer:\n{answer}"));
@@ -1046,12 +1099,12 @@ fn spawn_pi(
             command.env("LYRA_PI_TEXT_ONLY", "1").arg("--no-tools");
         } else {
             let tools = if reviewing {
-                "read,grep,find,ls,run_command,load_skill,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
+                "read,grep,find,ls,run_command,load_skill,finish_task,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
             } else if extension.is_some() {
                 // Pi's --tools is an allowlist for extension tools as well as built-ins.
                 // For Work runs the extension overrides read/write/edit with guarded tools
                 // and verifies the overrides before accepting the prompt.
-                "read,grep,find,ls,write,edit,mkdir,load_skill,run_command"
+                "read,grep,find,ls,write,edit,mkdir,load_skill,finish_task,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
             };
@@ -1160,6 +1213,25 @@ mod tests {
         for _ in 0..40 { progress.record_guarded_success(r#"{"tool":"edit","path":"site/index.html"}"#); }
         assert_eq!(progress.confirmed_mutation_count, 42);
         assert_eq!(progress.recent_mutations.len(), RECENT_MUTATION_LIMIT);
+    }
+
+    #[test]
+    fn finish_task_records_outcome_without_continuation() {
+        let mut progress = WorkProgress::default();
+        assert!(progress.confirm(r#"{"status":"completed","summary":" "}"#).is_err());
+        assert!(progress.confirm(r#"{"status":"invalid","summary":"done"}"#).is_err());
+        progress.confirm(r#"{"status":"completed","summary":"Wrote file and ran tests"}"#).unwrap();
+        progress.finish(Some("stop".into()), true);
+        assert_eq!(progress.confirmation_status, "completed");
+        assert_eq!(progress.confirmation_summary.as_deref(), Some("Wrote file and ran tests"));
+        assert_eq!(progress.continuation_attempts, 0);
+        assert!(progress.reported_blocker().is_none());
+        progress.invalidate_confirmation();
+        assert_eq!(progress.confirmation_status, "unconfirmed");
+        assert!(progress.confirmation_summary.is_none());
+        progress.confirm(r#"{"status":"blocked","summary":"Missing dependency"}"#).unwrap();
+        assert_eq!(progress.reported_blocker(), Some("Missing dependency"));
+        assert_eq!(progress.continuation_attempts, 0);
     }
 
     #[test]
