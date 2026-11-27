@@ -81,7 +81,10 @@ h2 { font-size: .96rem; font-weight: 650; }
 #project-tree, #project-tree ul, #project-tree li { min-width: 0; }
 #project-tree button { min-width: 0; box-sizing: border-box; }
 #project-tree button > span:first-child { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-#project-tree .project-tree-status { flex-shrink: 0; margin-left: auto; }
+#project-tree .project-entry-row { display: flex; align-items: center; min-width: 0; gap: 3px; }
+#project-tree .project-entry-row > button:first-child { flex: 1 1 0; min-width: 0; }
+#project-tree .project-entry-more { flex: 0 0 25px; width: 25px; padding: 3px 0; justify-content: center; color: var(--muted); font-size: 1rem; }
+#project-tree .project-tree-status { flex-shrink: 0; margin-left: 2px; margin-right: 4px; }
 #project-tree .project-tree-error { flex: 0 0 13px; width: 13px; text-align: center; color: #b0807c; font-size: 1rem; line-height: 13px; }
 #project-tree .project-tree-done { flex: 0 0 13px; width: 13px; text-align: center; color: #829987; font-size: .84rem; line-height: 13px; }
 #project-tree .project-group-chevron { flex: 0 0 10px; text-align: center; }
@@ -100,11 +103,8 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-heading h3, .project-dialog h3 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
 #project-chat-workspace { margin-top: 4px; font: .74rem/1.5 var(--mono); }
 .project-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .84rem; }
-.project-actions { position: relative; }
-.project-actions summary { cursor: pointer; list-style: none; padding: 6px 10px; border: 1px solid #536453; border-radius: 8px; color: #d7e9cf; font-size: .78rem; font-weight: 700; }
-.project-actions summary::-webkit-details-marker { display: none; }
-.project-actions[open] summary, .project-actions summary:hover { background: #27362b; }
-.project-action-menu { position: absolute; z-index: 2; inset: calc(100% + 5px) 0 auto auto; display: grid; min-width: max-content; gap: 2px; padding: 5px; border: 1px solid #536453; border-radius: 8px; background: #202b24; box-shadow: 0 8px 20px #0005; }
+.project-action-menu { position: fixed; inset: auto; margin: 0; min-width: 156px; max-width: calc(100vw - 16px); padding: 5px; border: 1px solid #536453; border-radius: 8px; background: #202b24; color: inherit; box-shadow: 0 8px 20px #0005; }
+.project-action-menu:popover-open { display: grid; gap: 2px; }
 .project-action-menu button { padding: 7px 9px; border-radius: 5px; background: transparent; color: #e5ecdf; font-size: .8rem; text-align: left; }
 .project-action-menu button:hover:not(:disabled) { background: #314438; }
 .project-reading { flex: 1; display: grid; align-items: start; max-height: 520px; min-height: 185px; overflow: auto; padding: 18px 20px; }
