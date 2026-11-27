@@ -287,10 +287,11 @@ fn tools() -> Value {
         },
         {
             "name": "archive_project",
-            "description": "Archive or restore a project or saved chat.",
+            "description": "Archive or restore a project, a group with all its chats, or one saved chat.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
-                "project_session_id": {"type": "integer", "minimum": 1, "description": "Omit to change the entire project."},
+                "project_session_id": {"type": "integer", "minimum": 1, "description": "Target one chat; omit both this and group_id to target the project."},
+                "group_id": {"type": "integer", "minimum": 1, "description": "Target all chats in a group; mutually exclusive with project_session_id."},
                 "archived": {"type": "boolean"}
             }, "required": ["project_id", "archived"], "additionalProperties": false},
             "annotations": {"idempotentHint": true, "destructiveHint": false}
@@ -301,8 +302,6 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
-                "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing group in this project."},
-                "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a named group; mutually exclusive with group_id."},
                 "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default."},
                 "search_skill": {"type": ["string", "null"], "description": "Installed Lyra skill to prefer for project searches, such as ast-index."}
             }, "required": ["name", "folders"], "additionalProperties": false}
@@ -313,6 +312,8 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
+                "group_id": {"type": "integer", "minimum": 1, "description": "Join an existing group in this project."},
+                "group_name": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Create a named group; mutually exclusive with group_id."},
                 "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}, "description": "Registered working folders for this chat. The first is the working directory. Omit to use all project folders."},
                 "folder": {"type": "string", "description": "Legacy primary working directory."},
                 "mode": {"enum": ["chat", "work"], "default": "work", "description": "Initial saved mode."}
@@ -324,6 +325,7 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1},
+                "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "folders": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}}
             }, "required": ["project_id", "project_session_id", "folders"], "additionalProperties": false}
         },
