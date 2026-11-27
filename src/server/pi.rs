@@ -688,6 +688,16 @@ pub(super) async fn run(
             stop_reason.as_deref(),
             Some("length" | "aborted" | "toolUse" | "deferred")
         );
+    if last_error.is_none()
+        && !matches!(stop_reason.as_deref(), Some("aborted" | "length"))
+        && let Some(conflicts) = file_versions.unresolved_conflicts()
+    {
+        // A worker's final "done" is not sufficient evidence if a mutation
+        // was refused and never resolved by a successful guarded change.
+        stop_reason = Some("file_conflict".into());
+        last_error = Some(format!("{conflicts}\n\nWorker's final answer:\n{answer}"));
+        log(Kind::Pi, "File conflict", &conflicts, Some("error"));
+    }
     if last_error.is_none() {
         if answer.trim().is_empty() {
             last_error = Some(if stop_reason.as_deref() == Some("length") {
