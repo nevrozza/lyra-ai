@@ -179,7 +179,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-thinking { padding: 5px 8px; color: var(--muted); min-width: 0; }
 .project-thinking summary { cursor: pointer; font-size: .78rem; overflow-wrap: anywhere; }
 .project-thinking > p, #project-messages .project-thinking > p { margin: 7px 0 0; padding: 8px 10px; border-left: 2px solid var(--line); font-size: .8rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
-#project-messages > li[data-role="activity"] { justify-self: start; width: min(100%, 680px); max-width: 100%; gap: 3px; }
+#project-messages > li:is([data-role="activity"], [data-role="tool"], [data-role="thinking"]) { justify-self: start; width: min(100%, 680px); max-width: 100%; gap: 3px; }
 .project-activity { min-width: 0; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: #171f1a; }
 .project-activity > summary, .project-tool > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; min-width: 0; }
 .project-activity > summary::-webkit-details-marker, .project-tool > summary::-webkit-details-marker { display: none; }
@@ -204,7 +204,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-tool-body .project-message-time { display: block; text-align: right; opacity: 1 !important; }
 .project-tool h4 { margin: 8px 0 4px; font-size: .72rem; font-weight: 500; }
 .project-tool pre { margin: 0; padding: 8px; border-radius: 5px; background: #111613; font: .75rem/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
-.project-activity-skill { padding: 5px 9px; font-size: .75rem; color: var(--muted); overflow-wrap: anywhere; }
+
 #project-live-thinking { box-sizing: border-box; width: min(100%, 740px); margin: 0 auto; }
 #project-messages > li[data-role="notice"] { justify-self: center; }
 #project-messages > li[data-role="notice"] p { padding: 4px 0; font-size: .78rem; color: var(--muted); text-align: center; }
