@@ -35,7 +35,7 @@ function updateControls() {
   models.updateControls();
   telemetry.updateControls();
   commands.setOnline(session.online && !session.closed);
-  skills.setOnline(session.online && !session.closed);
+  skills.setOnline(session.online && !session.closed, Boolean(session.run?.delegated_model || session.run?.model_action || session.run?.benchmark_running));
   projects.update(session.online && !session.closed, session.run, session.metrics?.installed_models);
 }
 
@@ -51,6 +51,7 @@ function receiveRun(next) {
   const sessionsUpdated = session.run?.sessions_revision !== next.sessions_revision;
   const commandsUpdated = session.run?.commands_revision !== next.commands_revision;
   const projectsUpdated = session.run?.projects_revision !== next.projects_revision;
+  const skillsUpdated = session.run?.skills_revision !== next.skills_revision;
   const benchmarkUpdated = session.run?.benchmark_revision !== next.benchmark_revision;
   const metricsUpdated = session.run?.metrics_revision !== next.metrics_revision;
   const delegationChanged = session.run?.delegated_model !== next.delegated_model;
@@ -65,6 +66,7 @@ function receiveRun(next) {
   if (sessionsUpdated) sessions.refresh();
   if (commandsUpdated) commands.refresh();
   if (projectsUpdated) projects.refresh();
+  if (skillsUpdated) skills.refreshCatalog();
   models.render(session.metrics?.models, benchmarkUpdated);
 }
 

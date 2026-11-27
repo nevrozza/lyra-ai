@@ -304,7 +304,11 @@
             </form>
             <p id="skill-result" class="secondary" role="status"></p>
             <p id="skill-catalog-message" class="secondary"></p>
-            <ul id="skill-catalog" aria-label="Установленные скиллы"></ul>
+            <ul id="skill-catalog" aria-label="Обычные скиллы"></ul>
+            <details id="role-skills" class="role-skills" hidden>
+              <summary>Ролевые скиллы Lyra <span id="role-skill-count" class="secondary"></span></summary>
+              <ul id="role-skill-catalog" aria-label="Ролевые скиллы Lyra"></ul>
+            </details>
             <form id="agents-form">
               <label for="agents-content">Глобальный <code>AGENTS.md</code></label>
               <p id="agents-help" class="secondary">Общие инструкции для агентов Pi. При перезапуске Lyra загружает встроенную версию.</p>
