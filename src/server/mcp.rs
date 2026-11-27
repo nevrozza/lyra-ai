@@ -191,7 +191,6 @@ fn tools() -> Value {
         "required": ["review"],
         "additionalProperties": false
     });
-    let write_paths = json!({"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string"}, "description": "Allowed write paths relative to the primary folder. Disables shell access."});
     let pi_output_limit = json!({"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional Pi generation cap. Omit to use Pi's default."});
     let worker_role = json!({"enum": ["implement", "fix", "review"], "description": "Local worker role. Review uses read-only file tools."});
     let mut queue_task = json!({"type": "object", "properties": {
@@ -199,8 +198,7 @@ fn tools() -> Value {
         "key": {"type": "string", "description": "Unique key for this task within the batch."},
         "after": {"type": "array", "maxItems": 16, "items": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 1}]}, "description": "Earlier task keys in this batch or existing task chat IDs in the same project."},
         "external": {"type": "boolean", "default": false, "description": "Step completed outside Lyra with complete_project_step."},
-        "parallel": {"type": "boolean", "default": false, "description": "Allow this step to overlap other steps. Requires write_paths."},
-        "write_paths": write_paths,
+        "parallel": {"type": "boolean", "default": false, "description": "Allow independent steps to overlap; Lyra locks files on mutation and checks read versions. Declare dependencies via after."},
         "role": worker_role,
         "workspace": {"type": "string", "description": "Optional registered project folder to use as the step execution root. Defaults to the first project folder."},
         "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional enabled skill names. Omit for enabled non-role skills; disabled or removed names are rejected."},
@@ -401,7 +399,6 @@ fn tools() -> Value {
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to enabled Lyra skill names. Omit for enabled non-role skills, or pass [] to run without optional skills. Disabled or removed names are rejected."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Ollama context window for this run. Uses a separate model profile of this size without changing the saved default."},
                 "role": worker_role,
-                "write_paths": write_paths,
                 "max_output_tokens": pi_output_limit
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
@@ -503,9 +500,6 @@ pub(super) struct RunPi {
     #[serde(rename = "allow_commands")]
     _allow_commands: Option<bool>,
     role: Option<pi::Role>,
-    write_paths: Option<Vec<PathBuf>>,
-    #[serde(skip)]
-    writes: Vec<PathBuf>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -890,21 +884,9 @@ async fn run_pi(
     let store = app.clone();
     let source = model.clone();
     let text_only = mode == ChatMode::Chat;
-    if text_only && (request.write_paths.is_some() || request.role.is_some()) {
-        return Err("role and write_paths require Work mode".into());
+    if text_only && request.role.is_some() {
+        return Err("role requires Work mode".into());
     }
-    let writes = if let Some(paths) = request.write_paths {
-        if matches!(request.role, Some(pi::Role::Review)) {
-            return Err("Review runs do not accept write_paths".into());
-        }
-        let root = workspace.clone();
-        tokio::task::spawn_blocking(move || projects::write_scope::resolve_paths(&root, &paths))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?
-    } else {
-        request.writes
-    };
     let requested_context = request.context_tokens.map(NonZeroU32::get);
     let (tokens, context_window, think) = tokio::task::spawn_blocking(move || {
         let estimate = context::estimate(&source);
@@ -1003,7 +985,6 @@ async fn run_pi(
             think: think.as_ref(),
             role: request.role,
             role_skill_enabled,
-            writes: &writes,
             request_id: (dashboard || reserved.is_some())
                 .then_some(request.request_id.as_deref())
                 .flatten(),
@@ -1115,7 +1096,6 @@ pub(super) fn queued_request(
     model: String,
     input: projects::queue::Prompt,
     role: Option<pi::Role>,
-    writes: Vec<PathBuf>,
     chat_session_id: Option<u64>,
 ) -> RunPi {
     RunPi {
@@ -1132,8 +1112,6 @@ pub(super) fn queued_request(
         mode: Some(ChatMode::Work),
         _allow_commands: None,
         role,
-        write_paths: None,
-        writes,
     }
 }
 
@@ -1165,6 +1143,7 @@ pub(super) async fn run_queued(
             let status = match stop_reason.as_deref() {
                 Some(projects::USER_STOP_REASON) => Status::Cancelled,
                 Some("context_full") => Status::ContextFull,
+                Some("file_conflict") => Status::Blocked,
                 _ if reply.is_error => Status::Failed,
                 _ => Status::Completed,
             };
@@ -1255,7 +1234,7 @@ pub(super) async fn stop_project_chat(
     }
 }
 
-fn begin_delegation(app: &App, model: &str, scope: DelegationScope<'_>) -> Result<u64, String> {
+fn begin_delegation(app: &App, model: &str, scope: DelegationScope) -> Result<u64, String> {
     let mut id = None;
     app.task.send_if_modified(|snapshot| {
         id = snapshot.begin_delegation(model, scope);

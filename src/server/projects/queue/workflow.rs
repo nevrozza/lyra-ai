@@ -1,15 +1,13 @@
 use std::{
     collections::VecDeque,
-    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
 use super::{
-    App, Job, JobResult, MessageOrigin, Prompt, Result, Status, invalid, mcp, write_scope,
+    App, Job, JobResult, MessageOrigin, Prompt, Result, Status, invalid, mcp,
 };
 use crate::{
-    run::{path_key, paths_overlap},
     server::{ai_settings::AI_SETTINGS, pi::Role},
 };
 
@@ -182,7 +180,7 @@ pub(super) fn add_candidates(
     });
     let _ = write!(
         prompt,
-        "\n\nLyra can run up to {} scoped fixes with up to {} distinct models at once. Reuse one model for independent fixes when equally suitable.\nLocal hardware snapshot before starting this review (bytes, null means unknown): {system}\nUse inspect_review_resources for current headroom before deciding to overlap a build with diff review. Treat unknown estimates conservatively. Lyra may unload this reviewer before loading a different successor.\nInstalled models eligible for a fix (weights are estimates):\n{models}",
+        "\n\nLyra can run up to {} independent fixes with up to {} distinct models at once. Reuse one model for independent fixes when equally suitable.\nLocal hardware snapshot before starting this review (bytes, null means unknown): {system}\nUse inspect_review_resources for current headroom before deciding to overlap a build with diff review. Treat unknown estimates conservatively. Lyra may unload this reviewer before loading a different successor.\nInstalled models eligible for a fix (weights are estimates):\n{models}",
         AI_SETTINGS.parallel_project_tasks, AI_SETTINGS.parallel_project_models,
     );
 }
@@ -214,15 +212,13 @@ fn first_round() -> u8 {
     1
 }
 
+// Ignore legacy reservation metadata in persisted pending findings.
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct Finding {
     location: String,
     issue: String,
     check: String,
     model: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    write_paths: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     after: Vec<usize>,
 }
@@ -291,7 +287,6 @@ impl Workflow {
         &self,
         result: &JobResult,
         candidates: &[Candidate],
-        workspace: &Path,
     ) -> std::result::Result<Vec<NextStep>, String> {
         let config = self
             .config
@@ -366,7 +361,7 @@ impl Workflow {
                             ));
                         }
                     }
-                    return follow_up.fix_batch(&config.review, workspace, findings);
+                    return follow_up.fix_batch(&config.review, findings);
                 }
                 Review::Blocked { reason } if short(&reason, 360) => {
                     return Err(format!("Локальный этап заблокирован: {reason}"));
@@ -380,11 +375,9 @@ impl Workflow {
     fn fix_batch(
         &mut self,
         review: &Step,
-        workspace: &Path,
         findings: VecDeque<Finding>,
     ) -> std::result::Result<Vec<NextStep>, String> {
         let mut steps = Vec::with_capacity(findings.len() + 1);
-        let mut scopes: Vec<Vec<PathBuf>> = Vec::with_capacity(findings.len());
         for (index, finding) in findings.into_iter().enumerate() {
             let mut after = Vec::new();
             for position in &finding.after {
@@ -395,32 +388,11 @@ impl Workflow {
                 }
                 after.push(position - 1);
             }
-            let scope = if finding.write_paths.is_empty() {
-                Vec::new()
-            } else {
-                write_scope::resolve_paths(workspace, &finding.write_paths)
-                    .map_err(|error| error.to_string())?
-                    .iter()
-                    .map(|path| path_key(path))
-                    .collect()
-            };
-            for (other_index, other) in scopes.iter().enumerate() {
-                if scope.is_empty()
-                    || other.is_empty()
-                    || scope
-                        .iter()
-                        .any(|left| other.iter().any(|right| paths_overlap(left, right)))
-                {
-                    after.push(other_index);
-                }
-            }
             after.sort_unstable();
             after.dedup();
             let mut step = self.fix_step(&finding, Stage::BatchFix);
-            step.job.parallel = !scope.is_empty();
-            step.job.write_paths = finding.write_paths;
+            step.job.parallel = true;
             step.after = after;
-            scopes.push(scope);
             steps.push(step);
         }
         self.round += 1;
@@ -474,7 +446,6 @@ Return one JSON verdict. Use {"status":"pass","summary":"change made or confirme
             job: Job {
                 model: model.to_owned(),
                 parallel: false,
-                write_paths: Vec::new(),
                 role: None,
                 chat_session_id: None,
                 origin: MessageOrigin::Lyra,
@@ -527,9 +498,9 @@ fn review_prompt(scope: &str, round: u8) -> String {
 
 Return only one JSON object as the final answer:
 {{"status":"pass","summary":"checks passed, at most 360 characters"}}
-{{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"one concrete problem, at most 360 characters","check":"one focused acceptance check, at most 240 characters","model":"exact installed model tag","write_paths":["src/file.ext"],"after":[]}}]}}
+{{"status":"fixes","findings":[{{"location":"file and line or symbol, at most 160 characters","issue":"one concrete problem, at most 360 characters","check":"one focused acceptance check, at most 240 characters","model":"exact installed model tag","after":[]}}]}}
 {{"status":"blocked","reason":"why the check cannot be completed, at most 360 characters"}}
-For each finding, list every file it may edit in write_paths, using forward-slash paths relative to the primary working folder. Lyra can run fixes with independent files in parallel and reviews the combined result only after all fixes succeed. Use after for findings whose results are prerequisites, referring to earlier findings by one-based position. When the scope is unknown or the fix requires shell writes, omit write_paths so that fix runs exclusively. Scoped fix steps use write and edit and leave command checks to the next review.
+Use after for findings touching the same file or requiring earlier results, referring to earlier findings by one-based position. Independent fixes can run in parallel using dynamic file locks and version checks; review runs after all fixes succeed. Never bypass file tools via run_command. Report a blocked verdict if an essential file is locked.
 Use pass only after covering the full task diff and confirming the acceptance criteria. For each fix, choose from the provided list and honor any model restrictions in the review scope. Low is only for trivial, fully specified mechanical fixes (typos, literal replacements, formatting); never delegate implementation or fixes requiring reasoning to Low. Medium is the minimum for writing code, debugging and refactoring. High is preferred for complex implementation, architectural or subtle behavioral fixes and review. Escalate after a failed attempt; never downgrade merely to save memory. Unclassified models require evidence of sufficient capability. Prefer a model with a passed Pi check when available. Use blocked if you cannot cover the full change or complete a necessary check. Keep the whole report compact, without source excerpts.
 
 Review scope and acceptance criteria:

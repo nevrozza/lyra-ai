@@ -87,7 +87,6 @@ pub(super) struct Task<'a> {
     pub(super) think: Option<&'a ollama::Think>,
     pub(super) role: Option<Role>,
     pub(super) role_skill_enabled: bool,
-    pub(super) writes: &'a [PathBuf],
 }
 
 pub(super) struct Reply {
@@ -225,7 +224,7 @@ pub(super) async fn run(
     let trace = task.as_ref().map(|task| task.trace);
     let commands = trace;
     let text_only = task.as_ref().is_some_and(|task| task.text_only);
-    let writes = task.as_ref().map_or(&[][..], |task| task.writes);
+    let mut file_versions = projects::write_scope::FileVersions::default();
     let reviewing = task
         .as_ref()
         .is_some_and(|task| matches!(task.role, Some(Role::Review)));
@@ -420,18 +419,34 @@ pub(super) async fn run(
                         ready = true;
                     }
                     Some("input")
-                        if ready
-                            && !writes.is_empty()
-                            && event["title"] == "lyra:write-scoped-file" =>
+                        if ready && !text_only && !reviewing
+                            && event["title"] == "lyra:guarded-file" =>
                     {
                         let id = event["id"].as_str().ok_or("Missing Pi file request ID")?;
-                        let request = event["placeholder"]
-                            .as_str()
-                            .ok_or("Missing Pi file request")?;
-                        // Finish the filesystem mutation before yielding to cancellation.
-                        let result = projects::write_scope::mutate(workspace, writes, request);
+                        let request = event["placeholder"].as_str().ok_or("Missing Pi file request")?;
+                        let task = task.as_ref().ok_or("Missing file delegation")?;
+                        let app = task.trace.app();
+                        let result = if serde_json::from_str::<Value>(request)
+                            .is_ok_and(|value| value["tool"] == "read")
+                        {
+                            file_versions.read(workspace, request)
+                        } else {
+                            let roots = project.map_or(&[][..], |project| project.folders.as_slice());
+                            projects::write_scope::mutate(
+                                workspace, roots, &mut file_versions, request,
+                                |path| {
+                                    let mut result = Err("FILE_LOCKED: delegation unavailable".to_owned());
+                                    app.task.send_if_modified(|snapshot| {
+                                        result = snapshot.claim_file(task.delegation, path);
+                                        matches!(result, Ok(true))
+                                    });
+                                    result.map_err(io::Error::other)
+                                },
+                                |path| { app.task.send_if_modified(|snapshot| snapshot.release_file(task.delegation, path)); },
+                            ).map(|()| json!({}))
+                        };
                         let result = match result {
-                            Ok(()) => json!({"ok": true}),
+                            Ok(mut data) => { data["ok"] = json!(true); data },
                             Err(error) => json!({"ok": false, "message": error.to_string()}),
                         };
                         rpc_send(stdin, json!({
@@ -673,6 +688,16 @@ pub(super) async fn run(
             stop_reason.as_deref(),
             Some("length" | "aborted" | "toolUse" | "deferred")
         );
+    if last_error.is_none()
+        && !matches!(stop_reason.as_deref(), Some("aborted" | "length"))
+        && let Some(conflicts) = file_versions.unresolved_conflicts()
+    {
+        // A worker's final "done" is not sufficient evidence if a mutation
+        // was refused and never resolved by a successful guarded change.
+        stop_reason = Some("file_conflict".into());
+        last_error = Some(format!("{conflicts}\n\nWorker's final answer:\n{answer}"));
+        log(Kind::Pi, "File conflict", &conflicts, Some("error"));
+    }
     if last_error.is_none() {
         if answer.trim().is_empty() {
             last_error = Some(if stop_reason.as_deref() == Some("length") {
@@ -774,34 +799,12 @@ async fn write_project_instructions(
             );
         }
     }
-    if !task.writes.is_empty() {
-        let root = tokio::fs::canonicalize(&project.workspace).await?;
-        let paths: Vec<_> = task
-            .writes
-            .iter()
-            .filter_map(|path| path.strip_prefix(&root).ok())
-            .map(|path| {
-                path.to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/")
-            })
-            .collect();
-        if paths.len() != task.writes.len() {
-            return Err(io::Error::other(
-                "The primary working directory changed after reservation",
-            ));
-        }
-        let _ = writeln!(
-            text,
-            "\nUse write and edit only on these reserved paths, relative to the primary working directory: {}. Shell commands are available for reading, testing and other tasks, but never use them (including scripts, subprocesses or generated outputs) to modify files outside the reserved paths. Use write/edit for source changes. If a command would modify unreserved files, do not run it. The list can include new files. If another path is needed, report its exact relative path.",
-            json!(paths),
-        );
-    }
     if task.text_only {
         text.push_str("\nAnswer normally using the conversation and instructions. File and shell tools are unavailable for this turn. Mention that only if needed for the user's request.\n");
     } else if matches!(task.role, Some(Role::Review)) {
         text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write and edit tools are intentionally unavailable. Report fixes instead of editing.\n");
     } else {
-        text.push_str("\nWork mode: use the write tool to create or replace files and the edit tool for targeted edits. Use the exact path and the tool's advertised argument schema.\n");
+        text.push_str("\nWork mode: use read before editing existing files, write for creating new files or replacing fully read files, and edit for targeted changes. Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
@@ -919,10 +922,10 @@ fn spawn_pi(
         ]);
         command.env_remove("LYRA_PI_TEXT_ONLY");
         command.env_remove("LYRA_PI_REVIEW");
-        command.env_remove("LYRA_PI_SCOPED_WRITE");
-        let scoped_write = task.is_some_and(|task| !task.writes.is_empty());
-        if scoped_write {
-            command.env("LYRA_PI_SCOPED_WRITE", "1");
+        command.env_remove("LYRA_PI_GUARDED_WRITE");
+        let guarded_write = task.is_some_and(|task| !task.text_only && !matches!(task.role, Some(Role::Review)));
+        if guarded_write {
+            command.env("LYRA_PI_GUARDED_WRITE", "1");
         }
         let reviewing = task.is_some_and(|task| matches!(task.role, Some(Role::Review)));
         if reviewing {
@@ -935,7 +938,7 @@ fn spawn_pi(
                 "read,grep,find,ls,run_command,inspect_review_resources,start_background_command,wait_background_command,read_review_diff"
             } else if extension.is_some() {
                 // Pi's --tools is an allowlist for extension tools as well as built-ins.
-                // For scoped runs the extension overrides write/edit with guarded tools
+                // For Work runs the extension overrides read/write/edit with guarded tools
                 // and verifies the overrides before accepting the prompt.
                 "read,grep,find,ls,write,edit,run_command"
             } else {
