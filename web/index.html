@@ -258,33 +258,33 @@
               <button id="benchmark-stop" class="unload" type="button" title="Завершить текущий замер и сохранить результаты" hidden disabled>Остановить</button>
             </div>
             <p id="benchmark-summary" class="secondary" role="status"></p>
-            <dl id="benchmark-results" class="facts" hidden></dl>
+            <div id="benchmark-results" class="benchmark-metric" hidden>
+              <p class="benchmark-metric-label">Среднее время запуска</p>
+              <output id="benchmark-launch-time">—</output>
+              <p id="benchmark-count"></p>
+            </div>
             <section id="benchmark-profile" aria-labelledby="benchmark-profile-title" hidden>
-              <h3 id="benchmark-profile-title">Профиль VRAM по контексту</h3>
-              <p id="benchmark-profile-auto" class="secondary" hidden></p>
-              <p id="benchmark-profile-note" class="secondary"></p>
+              <h3 id="benchmark-profile-title" class="visually-hidden">Результаты бенчмарка</h3>
               <div class="benchmark-table-scroll" role="region" aria-label="Результаты замеров" tabindex="0">
                 <table aria-labelledby="benchmark-profile-title" aria-describedby="benchmark-profile-note">
                   <thead><tr>
-                    <th scope="col">Токены</th>
-                    <th scope="col">VRAM для Auto</th>
+                    <th scope="col">Контекст</th>
+                    <th scope="col" title="Подтверждённая VRAM для Auto">VRAM</th>
                     <th scope="col" title="Обработка входных токенов / генерация выходных токенов">Скорость, ток/с</th>
                     <th scope="col" title="Время холодной загрузки модели">Запуск</th>
-                    <th scope="col">Результат</th>
+                    <th scope="col"><span class="visually-hidden">Результат</span><span aria-hidden="true">✓</span></th>
                   </tr></thead>
                   <tbody id="benchmark-profile-results"></tbody>
                 </table>
               </div>
+              <p id="benchmark-profile-note" class="secondary"></p>
+              <p id="benchmark-profile-auto" class="secondary" hidden></p>
               <details id="benchmark-profile-diagnostics" hidden>
                 <summary>Диагностика прогона</summary>
                 <p id="benchmark-profile-reason" class="secondary"></p>
               </details>
             </section>
-            <div class="model-actions">
-              <label class="pin"><input id="pi-support" type="checkbox" aria-describedby="pi-check-status" disabled> Поддерживает Pi</label>
-              <button id="pi-benchmark-run" class="unload" type="button" disabled>Проверить Pi</button>
-            </div>
-            <p id="pi-check-status" class="secondary" role="status"></p>
+            <p id="pi-check-status" class="benchmark-pi-status secondary" role="status"></p>
           </div>
         </section>
       </div>

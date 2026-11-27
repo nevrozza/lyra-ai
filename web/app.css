@@ -268,20 +268,27 @@ h2 { font-size: .96rem; font-weight: 650; }
 #model-description-form { display: grid; justify-items: start; gap: 6px; margin-top: 8px; }
 #model-description { width: 100%; resize: vertical; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: inherit; font-size: .85rem; }
 #benchmark-summary { margin-top: 8px; }
-#benchmark-results > div { align-items: baseline; gap: 8px; }
-#benchmark-results dd { overflow-wrap: anywhere; text-align: right; }
-#benchmark-profile { margin-top: 16px; }
-#benchmark-profile h3 { margin: 0 0 6px; font-size: .9rem; }
+#benchmark-results { margin: 20px 0 16px; }
+.benchmark-metric-label { color: var(--muted); font-size: .85rem; }
+#benchmark-launch-time { display: block; margin: 3px 0 4px; font: 650 clamp(2rem, 11cqi, 3rem)/1.1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+#benchmark-count { color: var(--muted); opacity: .75; font-size: .72rem; }
+#benchmark-profile { margin-top: 12px; }
+#benchmark-profile-note, #benchmark-profile-auto { font-size: .76rem; line-height: 1.45; }
+#benchmark-profile-auto { margin-top: 3px; }
+.benchmark-pi-status { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.benchmark-pi-status[data-state="passed"] { color: var(--accent); }
+.benchmark-pi-status[data-state="failed"] { color: #eaa49b; }
 .benchmark-table-scroll { overflow-x: auto; margin: 8px 0; }
 #benchmark-profile table { width: 100%; border-collapse: collapse; font-size: .78rem; font-variant-numeric: tabular-nums; }
 #benchmark-profile th, #benchmark-profile td { padding: 6px 5px; border-bottom: 1px solid var(--line); text-align: left; }
 #benchmark-profile thead th { color: var(--muted); font-weight: 500; }
 #benchmark-profile th small { display: block; color: var(--muted); font-weight: 400; }
 #benchmark-profile td:nth-child(2), #benchmark-profile td:nth-child(3) { white-space: nowrap; }
-#benchmark-profile td[data-verified="true"] { color: var(--accent); }
-#benchmark-profile td[data-verified="false"] { color: var(--muted); }
-#benchmark-profile td[data-slowdown="true"] { color: #f0cd91; }
-#benchmark-profile .benchmark-auto-choice:not([hidden]) { display: block; font-weight: 700; }
+#benchmark-profile th:last-child, #benchmark-profile td:last-child { text-align: center; }
+.benchmark-status-icon { display: inline-block; font-size: 1.05rem; font-weight: 700; cursor: help; }
+.benchmark-status-icon[data-passed="true"] { color: var(--accent); }
+.benchmark-status-icon[data-passed="false"] { color: #eaa49b; }
+.benchmark-status-icon:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
 #benchmark-profile tr:has(.benchmark-auto-choice:not([hidden])) { background: #27372a; }
 #benchmark-profile-diagnostics summary { color: var(--muted); cursor: pointer; font-size: .78rem; }
 .model-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #708075; }
@@ -348,11 +355,6 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 .gpu-heading strong { font-size: .85rem; font-weight: 600; overflow-wrap: anywhere; }
 .gpu-heading output { color: var(--muted); font-size: .78rem; white-space: nowrap; }
 .gpu-empty { line-height: 1.45; }
-
-@container benchmark (width < 320px) {
-  #benchmark-results > div { display: grid; justify-content: stretch; gap: 3px; }
-  #benchmark-results dd { text-align: left; }
-}
 
 @container hardware (width < 395px) {
   .gpu { grid-template-columns: 1fr; }

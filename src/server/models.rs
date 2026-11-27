@@ -20,7 +20,6 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/model/benchmark/profile", post(start_profile))
         .route("/model/benchmark/stop", post(stop_profile))
         .route("/model/description", post(describe_model))
-        .route("/model/benchmark/pi", post(start_pi_benchmark))
         .route("/model/context", post(set_model_context))
         .route("/model/context/estimate", get(context_estimate))
         .route(
@@ -72,57 +71,46 @@ struct DescriptionRequest {
     description: String,
 }
 
-async fn start_pi_benchmark(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
-    let model = match control_model(&app, &headers).await {
-        Ok(model) => model,
-        Err(status) => return status,
+async fn check_pi(app: &Arc<App>, model: &str) -> Result<bool, String> {
+    let store = app.clone();
+    let source = model.to_owned();
+    let (tokens, advertised) = tokio::task::spawn_blocking(move || {
+        let tokens = model_context(&store, &source)?;
+        let advertised = context::estimate(&source).and_then(|details| details.supports_agent_tools());
+        Ok::<_, String>((tokens, advertised))
+    }).await.map_err(|error| error.to_string())??;
+    if advertised == Some(false) { return Ok(false); }
+    let tokens = if tokens.is_some() {
+        mcp::release_idle_profiles(model, tokens, false).await?;
+        tokens
+    } else {
+        mcp::select_idle_auto(app, model, 1, 1).await?.tokens
     };
-    let admission = app.context_admission.lock().await;
-    if !app.task.send_if_modified(|snapshot| {
-        if !matches_selection(snapshot, &headers) || !snapshot.begin_benchmark(model.clone()) {
-            return false;
-        }
-        snapshot.set_benchmark_stage(benchmark::Stage::CheckingPi);
-        true
-    }) {
-        return StatusCode::CONFLICT;
-    }
-    drop(admission);
-    tokio::spawn(async move {
-        let result = run_pi_benchmark(&app, model).await;
-        app.metrics.lock().await.invalidate();
-        app.task.send_modify(|snapshot| snapshot.finish_benchmark(result));
-    });
-    StatusCode::ACCEPTED
+    pi::check(model, tokens).await
 }
 
 async fn run_pi_benchmark(app: &Arc<App>, model: String) -> Result<(), String> {
+    let result = check_pi(app, &model).await;
     let store = app.clone();
     let source = model.clone();
-    let (tokens, advertised) = tokio::task::spawn_blocking(move || {
-        let tokens = model_context(&store, &source)?;
-        let advertised =
-            context::estimate(&source).and_then(|details| details.supports_agent_tools());
-        Ok::<_, String>((tokens, advertised))
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    let passed = if advertised == Some(false) {
-        false
-    } else {
-        let tokens = if tokens.is_some() {
-            mcp::release_idle_profiles(&model, tokens, false).await?;
-            tokens
-        } else {
-            mcp::select_idle_auto(app, &model, 1, 1).await?.tokens
-        };
-        pi::check(&model, tokens).await?
-    };
-    let store = app.clone();
-    tokio::task::spawn_blocking(move || store.benchmarks.save_pi_check(model, passed))
+    // The full profile has unloaded its runners. Release only unpinned
+    // runners of this model after Pi, including when the check fails.
+    let cleanup = tokio::task::spawn_blocking(move || {
+        let loaded = ollama::running_models().ok_or("Не удалось проверить память Ollama после Pi.")?;
+        let base = context::alias(&source);
+        let matches = |entry: &ollama::Model| !entry.is_pinned() &&
+            (ollama::same_model(&entry.name, &source) ||
+                context::profile_base(&entry.name) == Some(base.as_str()));
+        for entry in loaded.iter().filter(|entry| matches(entry)) {
+            ollama::unload_profile(&entry.name)?;
+        }
+        ollama::wait_unloaded(matches)
+    }).await.map_err(|error| error.to_string()).and_then(|result| result);
+    tokio::task::spawn_blocking(move || store.benchmarks.save_pi_check(model, result))
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| format!("Не удалось сохранить результат проверки Pi: {error}"))
+        .map_err(|error| format!("Не удалось сохранить результат проверки Pi: {error}"))?;
+    cleanup
 }
 
 async fn describe_model(
@@ -329,16 +317,30 @@ async fn start_profile(State(app): State<Arc<App>>, headers: HeaderMap) -> Statu
     drop(admission);
     tokio::spawn(async move {
         let store = app.clone();
+        let source = model.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let profile = benchmark::measure_profile(&model, |stage| {
+            let profile = benchmark::measure_profile(&source, |stage| {
                 store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(stage));
             }, || store.task.borrow().benchmark_stop_requested())?;
             store.task.send_modify(|snapshot| snapshot.set_benchmark_stage(benchmark::Stage::Saving));
-            store.benchmarks.save_profile(model, profile)
+            store.benchmarks.save_profile(source, profile)
                 .map_err(|error| format!("Не удалось сохранить профиль: {error}"))
         })
         .await
         .unwrap_or_else(|error| Err(error.to_string()));
+        let result = match result {
+            Ok(()) => {
+                app.task.send_modify(run::Snapshot::model_record_changed);
+                if app.task.send_if_modified(run::Snapshot::begin_benchmark_pi_stage) {
+                    let result = run_pi_benchmark(&app, model).await;
+                    app.task.send_modify(run::Snapshot::model_record_changed);
+                    result
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => Err(error),
+        };
         app.metrics.lock().await.invalidate();
         app.task.send_modify(|snapshot| snapshot.finish_benchmark(result));
     });

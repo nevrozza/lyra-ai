@@ -34,6 +34,7 @@ pub enum Stage {
 pub struct Record {
     description: String,
     pub(crate) pi_check: Option<bool>,
+    pi_check_error: Option<String>,
     pub context_tokens: Option<u32>,
     pub(crate) think: Option<ollama::Think>,
     pub latest: Option<Measurement>,
@@ -115,6 +116,8 @@ pub struct Measurement {
     profile_gpu_bytes: Option<u64>,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     generation_slowdown_percent: Option<u8>,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    profile_failure_reason: Option<String>,
     #[serde(default)]
     token_memory_bytes_f16: Option<u64>,
     #[serde(default)]
@@ -234,6 +237,7 @@ impl MemoryProfile {
         let slowdowns: Vec<_> = self.points.iter().map(|point| self.generation_slowdown(point)).collect();
         for (point, slowdown) in self.points.iter_mut().zip(slowdowns) {
             point.generation_slowdown_percent = slowdown;
+            point.profile_failure_reason = point.failure_reason();
         }
     }
 
@@ -269,19 +273,45 @@ impl Measurement {
     }
 
     fn verified_gpu_bytes(&self, weights: u64) -> Option<u64> {
-        if !self.cold_isolated || self.was_loaded || weights == 0 || self.context_tokens.map(u64::from) != self.measured_context_tokens
-            || self.measured_context_tokens.is_none() { return None; }
-        let total = self.ollama_total_bytes?;
-        let vram = self.model_vram_bytes?;
-        // Ollama can underreport both total and VRAM for hybrid runners.
-        // Require its full-GPU signal AND independent physical memory evidence.
-        if total == 0 || vram.saturating_mul(100) < total.saturating_mul(95) { return None; }
-        let [gpu] = self.gpu_memory.as_slice() else { return None };
+        self.verify_gpu(weights).ok()
+    }
+
+    fn verify_gpu(&self, weights: u64) -> Result<u64, &'static str> {
+        if !self.cold_isolated || self.was_loaded { return Err("Не удалось подтвердить холодный изолированный запуск."); }
+        if self.measured_context_tokens.is_none() || self.context_tokens.map(u64::from) != self.measured_context_tokens {
+            return Err("Фактический контекст не совпадает с запрошенным или неизвестен.");
+        }
+        if weights == 0 { return Err("Размер весов модели неизвестен."); }
+        let total = self.ollama_total_bytes.ok_or("Ollama не сообщила общий объём памяти runner.")?;
+        let vram = self.model_vram_bytes.ok_or("Ollama не сообщила объём VRAM runner.")?;
+        // Require both Ollama's full-GPU signal and independent physical evidence.
+        if total == 0 || vram.saturating_mul(100) < total.saturating_mul(95) {
+            return Err("Ollama не подтвердила почти полное размещение на GPU.");
+        }
+        let [gpu] = self.gpu_memory.as_slice() else { return Err("Нет замера единственного GPU."); };
         let physical = gpu.sampled_peak_bytes.saturating_sub(gpu.baseline_bytes);
-        let final_delta = gpu.final_bytes?.saturating_sub(gpu.baseline_bytes);
-        if gpu.samples < 2 || physical < weights.saturating_mul(95) / 100
-            || final_delta < weights.saturating_mul(90) / 100 { return None; }
-        Some(physical.max(vram))
+        let final_delta = gpu.final_bytes.ok_or("Нет финального замера VRAM.")?.saturating_sub(gpu.baseline_bytes);
+        if gpu.samples < 2 { return Err("Недостаточно замеров VRAM."); }
+        if physical < weights.saturating_mul(95) / 100 || final_delta < weights.saturating_mul(90) / 100 {
+            return Err("Физические замеры VRAM не подтверждают размещение весов модели на GPU.");
+        }
+        Ok(physical.max(vram))
+    }
+
+    fn failure_reason(&self) -> Option<String> {
+        if let Some(percent) = self.generation_slowdown_percent {
+            return Some(format!("Скорость генерации снизилась на {percent}% относительно меньшего контекста."));
+        }
+        if self.profile_gpu_bytes.is_none() {
+            return Some(self.verify_gpu(self.model_weight_bytes.unwrap_or_default()).err()
+                .unwrap_or("Замер VRAM не подтверждён.").into());
+        }
+        if let (Some(bytes), Some(gpu)) = (self.profile_gpu_bytes, self.gpu_memory.first()) {
+            if bytes > context::gpu_budget(gpu.total_bytes.saturating_sub(gpu.baseline_bytes), 1) {
+                return Some("Пиковая VRAM превысила доступный бюджет Auto на момент замера.".into());
+            }
+        }
+        None
     }
 
     pub fn auto_context_tokens(&self) -> Option<u64> {
@@ -381,9 +411,19 @@ impl Store {
         })
     }
 
-    pub fn save_pi_check(&self, model: String, passed: bool) -> io::Result<()> {
+    pub fn save_pi_check(&self, model: String, result: Result<bool, String>) -> io::Result<()> {
         self.update(|records| {
-            records.entry(model).or_default().pi_check = Some(passed);
+            let record = records.entry(model).or_default();
+            match result {
+                Ok(passed) => {
+                    record.pi_check = Some(passed);
+                    record.pi_check_error = None;
+                }
+                Err(error) => {
+                    record.pi_check = None;
+                    record.pi_check_error = Some(error);
+                }
+            }
             true
         })
     }
@@ -724,6 +764,7 @@ fn measure(
         cold_isolated,
         profile_gpu_bytes: None,
         generation_slowdown_percent: None,
+        profile_failure_reason: None,
         token_memory_bytes_f16: bytes_per_token
             .and_then(|bytes| bytes.checked_mul(occupied_tokens)),
         context_memory_bytes_f16: context_capacity
@@ -830,6 +871,21 @@ mod profile_tests {
         assert_eq!(average.mean_ms, 2000.0);
         profile.points.clear();
         assert!(profile.average_launch().is_none());
+    }
+
+    #[test]
+    fn profile_failure_reason_explains_rejected_points() {
+        let gib = 1u64 << 30;
+        let mut measured = point(4096, 9*gib, gib, gib);
+        measured.model_weight_bytes = Some(8*gib);
+        measured.profile_gpu_bytes = measured.verified_gpu_bytes(8*gib);
+        assert!(measured.failure_reason().is_none());
+        measured.generation_slowdown_percent = Some(40);
+        assert!(measured.failure_reason().unwrap().contains("40%"));
+        measured.generation_slowdown_percent = None;
+        measured.profile_gpu_bytes = None;
+        measured.measured_context_tokens = Some(2048);
+        assert!(measured.failure_reason().unwrap().contains("контекст"));
     }
 
     #[test]

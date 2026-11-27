@@ -80,7 +80,7 @@ export function createContextSettings(session, {
     get('context-choice').textContent = label;
     const profileAuto = get('benchmark-profile-auto');
     profileAuto.hidden = configuredAutoContext == null;
-    profileAuto.textContent = profileAuto.hidden ? '' : `Auto для одной модели сейчас: ${contextLabel(configuredAutoContext)}`;
+    profileAuto.textContent = profileAuto.hidden ? '' : `Auto сейчас: ${whole.format(configuredAutoContext)} токенов.`;
     get('benchmark-profile-results').dataset.autoContext = autoSource === 'measured' && configuredAutoContext != null
       ? String(configuredAutoContext) : '';
     markBenchmarkSelection();
