@@ -89,7 +89,7 @@ export function createSkills() {
         heading.append(name, controls);
         entry.append(heading, description);
         if (skill.role_template) {
-          const note = element('small', 'Встроенные инструкции роли работают независимо от пакета скилла.');
+          const note = element('small', 'При отключении расширенные инструкции не загружаются. Базовая роль сохраняется.');
           note.className = 'secondary';
           entry.append(note);
         }
