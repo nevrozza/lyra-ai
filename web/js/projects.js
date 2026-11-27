@@ -29,7 +29,6 @@ export function createProjects() {
   taskParallel.onchange = updateTaskWriteScope;
   const folderList = get('project-folders');
   const pickFolder = get('pick-project-folder');
-  const skill = get('project-skill');
   const prompt = get('project-prompt');
   const composer = get('project-prompt-form');
   const messages = get('project-messages');
@@ -43,7 +42,6 @@ export function createProjects() {
   const stopButton = get('stop-project-prompt');
   const modelSelect = get('project-chat-model');
   const thinking = createThinkingControl();
-  const chatFolderSelect = get('project-chat-folder');
   const drafts = new Map();
   const chatModels = new Map();
   const chatMode = () => selectedChat()?.mode ?? 'work';
@@ -55,7 +53,6 @@ export function createProjects() {
   let chatId;
   let editing;
   let folders = [];
-  let installedSkills = [];
   let online = false;
   let run;
   let installedModels = [];
@@ -447,8 +444,10 @@ export function createProjects() {
       ? [taskStatus(chat.job), chat.job.model, dependencies && `После ${dependencies}`].filter(Boolean).join(' · ') : '';
     const workspace = get('project-chat-workspace');
     workspace.hidden = !chat;
-    const workingFolders = chat ? chatFolders(project, chat) : [];
-    workspace.textContent = chat ? [chat.folder, ...(workingFolders.length > 1 ? [`+${workingFolders.length - 1}`] : [])].join(' · ') : '';
+    const owner = taskChat(chat);
+    const primary = pendingTask(owner) ? owner.folder : project?.folders[0];
+    const workingFolders = chat ? [primary, ...project.folders.filter(folder => folder !== primary)].filter(Boolean) : [];
+    workspace.textContent = chat ? [primary, ...(workingFolders.length > 1 ? [`+${workingFolders.length - 1}`] : [])].filter(Boolean).join(' · ') : '';
     workspace.title = workingFolders.join('\n');
     const notice = get('project-archive-notice');
     notice.hidden = !project?.archived && !chat?.archived;
@@ -578,14 +577,8 @@ export function createProjects() {
     get('project-name').value = project?.name ?? '';
     folders = [...(project?.folders ?? [])];
     renderFolders();
-    const selectedSkill = project?.search_skill ?? '';
-    renderSkills(selectedSkill);
     projectDialog.showModal();
     report();
-    request('/skills').then(skills => {
-      installedSkills = skills.map(skill => skill.name);
-      renderSkills(skill.value);
-    }).catch(error => report(error.message, true));
   }
 
   function renderFolders() {
@@ -605,11 +598,6 @@ export function createProjects() {
       return row;
     }));
     updateControls();
-  }
-
-  function renderSkills(selected) {
-    const names = [...new Set([...installedSkills, ...(selected ? [selected] : [])])];
-    setOptions(skill, [['', 'По умолчанию'], ...names.map(name => [name, name])], selected);
   }
 
   async function save(path, data, success) {
@@ -675,7 +663,6 @@ export function createProjects() {
       id: editing,
       name: get('project-name').value,
       folders,
-      search_skill: skill.value || null,
     }, async project => {
       projectDialog.close();
       archiveView = false;
@@ -685,42 +672,15 @@ export function createProjects() {
 
   let chatEditor;
   function openChatForm(chat, project = selectedProject()) {
-    chatEditor = { project, chat, folders: new Set(chat ? chatFolders(project, chat) : project.folders) };
+    chatEditor = { project, chat };
     const name = get('project-chat-name');
     name.value = chat?.name ?? '';
     name.readOnly = false;
-    const folders = [...new Set([...(chat ? [chat.folder] : []), ...project.folders])];
-    setOptions(chatFolderSelect, folders.map(path => [path, path]), chat?.folder);
-    chatFolderSelect.disabled = Boolean(chat);
     get('project-chat-dialog-title').textContent = chat ? 'Настройки чата' : 'Новый чат';
     get('save-project-chat').textContent = chat ? 'Сохранить' : 'Создать чат';
-    renderChatFolders();
     closeEntryMenu();
     chatDialog.showModal();
     report();
-  }
-
-  function chatFolders(project, chat) {
-    return chat.folders ?? [chat.folder, ...project.folders.filter(path => path !== chat.folder)];
-  }
-
-  function renderChatFolders() {
-    const primary = chatFolderSelect.value;
-    chatEditor.folders.add(primary);
-    get('project-chat-folder-list').replaceChildren(...chatEditor.project.folders.map(path => {
-      const label = element('label', '');
-      label.className = 'pin';
-      const checkbox = element('input', '');
-      checkbox.type = 'checkbox';
-      checkbox.checked = chatEditor.folders.has(path);
-      checkbox.disabled = path === primary;
-      checkbox.onchange = () => {
-        if (checkbox.checked) chatEditor.folders.add(path);
-        else chatEditor.folders.delete(path);
-      };
-      label.append(checkbox, element('span', path));
-      return label;
-    }));
   }
 
   get('new-project-chat').onclick = () => openChatForm();
@@ -758,17 +718,13 @@ export function createProjects() {
       await refresh({ project: project.id, chat: task.project_session_id });
     });
   };
-  chatFolderSelect.onchange = renderChatFolders;
   chatForm.onsubmit = event => {
     event.preventDefault();
-    const { project, chat, folders } = chatEditor;
-    const primary = chatFolderSelect.value;
-    const selected = [primary, ...project.folders.filter(path => path !== primary && folders.has(path))];
-    save(chat ? '/projects/sessions/folders' : '/projects/sessions', {
+    const { project, chat } = chatEditor;
+    save(chat ? '/projects/sessions/settings' : '/projects/sessions', {
       project_id: project.id,
       ...(chat ? { project_session_id: chat.id } : {}),
       name: get('project-chat-name').value,
-      folders: selected,
     }, async chat => {
       chatDialog.close();
       await refresh({ project: project.id, chat: chat.id });
