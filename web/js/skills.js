@@ -13,6 +13,9 @@ export function createSkills() {
   const result = get('skill-result');
   const message = get('skill-catalog-message');
   const list = get('skill-catalog');
+  const builtinDetails = get('builtin-skills');
+  const builtinList = get('builtin-skill-catalog');
+  const builtinCount = get('builtin-skill-count');
   let saving = false;
   let online = false;
   let running = false;
@@ -22,7 +25,7 @@ export function createSkills() {
   function updateControls() {
     pickFolder.disabled = pickFile.disabled = saving || !online;
     button.disabled = saving || !online || !files.length;
-    for (const control of list.querySelectorAll('button, input')) {
+    for (const control of [...list.querySelectorAll('button, input'), ...builtinList.querySelectorAll('button, input')]) {
       control.disabled = saving || !online || (running && control.dataset.remove === 'true');
     }
   }
@@ -58,8 +61,12 @@ export function createSkills() {
       if (!response.ok) throw new Error();
       const skills = await response.json();
       if (request !== revision) return;
-      message.textContent = skills.length ? '' : 'Пока нет установленных скиллов.';
-      list.replaceChildren(...skills.map(skill => {
+      const custom = skills.filter(skill => !skill.builtin);
+      const builtins = skills.filter(skill => skill.builtin);
+      message.textContent = custom.length ? '' : 'Пока нет пользовательских скиллов.';
+      builtinDetails.hidden = !builtins.length;
+      builtinCount.textContent = '· ' + builtins.length;
+      const renderSkill = skill => {
         const entry = element('li', '');
         const description = element('p', skill.description);
         description.className = 'secondary';
@@ -97,7 +104,9 @@ export function createSkills() {
           entry.append(note);
         }
         return entry;
-      }));
+      };
+      list.replaceChildren(...custom.map(renderSkill));
+      builtinList.replaceChildren(...builtins.map(renderSkill));
       updateControls();
     } catch {
       if (request === revision) message.textContent = 'Не удалось загрузить список скиллов.';
