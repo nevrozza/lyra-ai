@@ -1,7 +1,7 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -16,12 +16,15 @@ use super::App;
 const SESSION_LIMIT: usize = 24;
 const EVENT_LIMIT: usize = 120;
 const DETAIL_LIMIT: usize = 4_000;
+const CALL_LIMIT: usize = 120;
+const RECENT_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Default)]
 pub(super) struct History {
     next_session: u64,
     next_call: u64,
     sessions: VecDeque<Session>,
+    recent_calls: VecDeque<(Instant, String)>,
 }
 
 struct Session {
@@ -30,6 +33,27 @@ struct Session {
     started: Instant,
     next_event: u64,
     events: VecDeque<Event>,
+    calls: VecDeque<CallSummary>,
+}
+
+#[derive(Clone, Serialize)]
+struct CallSummary {
+    id: u64,
+    tool: String,
+    model: Option<String>,
+    started_at: u64,
+    duration_ms: Option<u64>,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct RecentCalls {
+    total: usize,
+    by_tool: BTreeMap<String, usize>,
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
 #[derive(Clone, Serialize)]
@@ -74,6 +98,9 @@ struct View {
     selected: Option<u64>,
     events: VecDeque<Event>,
     omitted_events: bool,
+    calls: Vec<CallSummary>,
+    omitted_calls: bool,
+    recent: RecentCalls,
 }
 
 pub(super) fn routes() -> Router<Arc<App>> {
@@ -81,7 +108,8 @@ pub(super) fn routes() -> Router<Arc<App>> {
 }
 
 async fn view(State(app): State<Arc<App>>, Query(query): Query<Selection>) -> Json<View> {
-    let history = app.sessions.lock().expect("session history lock");
+    let mut history = app.sessions.lock().expect("session history lock");
+    let recent = history.recent_counts(Instant::now());
     let selected = query
         .selected
         .and_then(|id| {
@@ -104,6 +132,9 @@ async fn view(State(app): State<Arc<App>>, Query(query): Query<Selection>) -> Js
             .unwrap_or_default(),
         omitted_events: selected
             .is_some_and(|session| session.events.front().is_some_and(|event| event.id > 1)),
+        calls: selected.map(|session| session.calls.iter().rev().cloned().collect()).unwrap_or_default(),
+        omitted_calls: selected.is_some_and(|session| session.summary.calls > session.calls.len() as u64),
+        recent,
     })
 }
 
@@ -185,6 +216,9 @@ impl Call {
             let mut history = app.sessions.lock().expect("session history lock");
             history.next_call += 1;
             let call = history.next_call;
+            let started = Instant::now();
+            let started_at = unix_ms();
+            history.record_call(started, tool);
             let existing = group.as_ref().and_then(|group| {
                 history
                     .sessions
@@ -201,10 +235,7 @@ impl Call {
                         summary: Summary {
                             id: history.next_session,
                             title: title.clone(),
-                            started_at: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
+                            started_at,
                             calls: 0,
                             active: 0,
                             errors: 0,
@@ -212,6 +243,7 @@ impl Call {
                         started: Instant::now(),
                         next_event: 0,
                         events: VecDeque::new(),
+                        calls: VecDeque::new(),
                     }
                 });
             session.summary.calls += 1;
@@ -219,6 +251,15 @@ impl Call {
             if matches!(tool, "run_model" | "run_pi") {
                 session.summary.title = title;
             }
+            session.calls.push_back(CallSummary {
+                id: call,
+                tool: tool[..tool.floor_char_boundary(180)].to_owned(),
+                model: model.map(|model| model[..model.floor_char_boundary(180)].to_owned()),
+                started_at,
+                duration_ms: None,
+                status: "running",
+            });
+            session.trim_calls();
             session.push(call, Kind::Mcp, tool, detail, Some("running"));
             let id = session.summary.id;
             history.sessions.push_back(session);
@@ -277,6 +318,11 @@ impl Call {
                 detail.insert(0, '\n');
                 detail.insert_str(0, usage);
             }
+            if let Some(summary) = session.calls.iter_mut().find(|summary| summary.id == call.id) {
+                summary.status = status;
+                summary.duration_ms = Some(call.started.elapsed().as_millis() as u64);
+            }
+            session.trim_calls();
             session.push(call.id, Kind::Mcp, &call.tool, &detail, Some(status))
         });
     }
@@ -301,7 +347,38 @@ impl Call {
     }
 }
 
+impl Session {
+    fn trim_calls(&mut self) {
+        while self.calls.len() > CALL_LIMIT {
+            let Some(index) = self.calls.iter().position(|call| call.status != "running") else {
+                break;
+            };
+            self.calls.remove(index);
+        }
+    }
+}
+
 impl History {
+    fn prune_recent(&mut self, now: Instant) {
+        while self.recent_calls.front().is_some_and(|(started, _)| now.saturating_duration_since(*started) >= RECENT_WINDOW) {
+            self.recent_calls.pop_front();
+        }
+    }
+
+    fn record_call(&mut self, now: Instant, tool: &str) {
+        self.prune_recent(now);
+        self.recent_calls.push_back((now, tool[..tool.floor_char_boundary(180)].to_owned()));
+    }
+
+    fn recent_counts(&mut self, now: Instant) -> RecentCalls {
+        self.prune_recent(now);
+        let mut by_tool = BTreeMap::new();
+        for (_, tool) in &self.recent_calls {
+            *by_tool.entry(tool.clone()).or_insert(0) += 1;
+        }
+        RecentCalls { total: self.recent_calls.len(), by_tool }
+    }
+
     fn trim(&mut self) {
         while self.sessions.len() > SESSION_LIMIT {
             let Some(index) = self
@@ -313,5 +390,29 @@ impl History {
             };
             self.sessions.remove(index);
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_counts_count_starts_once_and_expire_independently_of_session_history() {
+        let mut history = History::default();
+        let start = Instant::now();
+        history.record_call(start, "run_pi");
+        history.record_call(start + Duration::from_secs(60), "run_pi");
+        history.record_call(start + Duration::from_secs(120), "list_projects");
+        let counts = history.recent_counts(start + Duration::from_secs(120));
+        assert_eq!(counts.total, 3);
+        assert_eq!(counts.by_tool["run_pi"], 2);
+        assert_eq!(counts.by_tool["list_projects"], 1);
+        history.trim();
+        let counts = history.recent_counts(start + RECENT_WINDOW);
+        assert_eq!(counts.total, 2);
+        assert_eq!(counts.by_tool["run_pi"], 1);
+        assert_eq!(history.recent_counts(start + RECENT_WINDOW + Duration::from_secs(120)).total, 0);
     }
 }

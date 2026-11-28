@@ -364,11 +364,17 @@
         <section class="panel" aria-labelledby="sessions-title">
           <header class="panel-header"><h2 id="sessions-title">MCP-вызовы оркестратора</h2></header>
           <div class="panel-body sessions-body">
+            <details id="session-recent" class="session-recent">
+              <summary><strong id="session-recent-total">—</strong><span>вызовов за 15 мин</span></summary>
+              <ul id="session-recent-tools" aria-label="Вызовы по инструментам"></ul>
+              <p class="secondary">Все MCP-вызовы оркестратора с момента запуска Lyra в пределах окна.</p>
+            </details>
             <p id="session-message" class="secondary">Пока нет MCP-вызовов оркестратора.</p>
             <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов оркестратора"></ul>
             <div id="session-detail" hidden>
-              <p id="session-omitted" class="secondary" hidden>Показаны последние события.</p>
-              <ol id="session-events" class="session-events" aria-label="Хронология MCP-вызовов"></ol>
+              <div class="session-log-heading"><span>Вызовы группы</span><span class="secondary">Новые сверху</span></div>
+              <p id="session-omitted" class="secondary" hidden></p>
+              <ol id="session-events" class="session-events" aria-label="MCP-вызовы от новых к старым"></ol>
             </div>
           </div>
         </section>
