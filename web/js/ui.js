@@ -186,3 +186,38 @@ export function settingsSwitch(name, enabled) {
   toggle.title = enabled ? 'Выключить' : 'Включить';
   return toggle;
 }
+
+
+// Reconcile settings rows by name. Keep the real switch and action buttons
+// mounted so confirmed state changes animate and focus survives a refresh.
+export function reconcileSettingsRows(list, rows) {
+  const previous = new Map([...list.children].map(row => [row.dataset.setting, row]));
+  const initial = list.dataset.rendered !== 'true';
+  const next = rows.map(row => {
+    const old = previous.get(row.dataset.setting);
+    if (!old || old.lastElementChild.children.length !== row.lastElementChild.children.length) {
+      if (!initial && !old) row.classList.add('settings-row-enter');
+      return row;
+    }
+    const info = row.firstElementChild;
+    if (!old.firstElementChild.isEqualNode(info)) old.firstElementChild.replaceWith(info);
+    if (row.dataset.enabled != null) old.dataset.enabled = row.dataset.enabled;
+    const controls = [...old.lastElementChild.children];
+    for (const [index, fresh] of [...row.lastElementChild.children].entries()) {
+      const control = controls[index];
+      for (const attribute of ['aria-checked', 'aria-label', 'title']) {
+        const value = fresh.getAttribute(attribute);
+        if (value == null) control.removeAttribute(attribute);
+        else if (control.getAttribute(attribute) !== value) control.setAttribute(attribute, value);
+      }
+      control.onclick = fresh.onclick;
+    }
+    return old;
+  });
+  const retained = new Set(next);
+  for (const child of [...list.children]) if (!retained.has(child)) child.remove();
+  for (const [index, row] of next.entries()) {
+    if (list.children[index] !== row) list.insertBefore(row, list.children[index] ?? null);
+  }
+  list.dataset.rendered = 'true';
+}

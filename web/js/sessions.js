@@ -96,7 +96,7 @@ export function createSessions() {
     details.append(summary);
     const open = new Set([...oldRow?.querySelectorAll('.session-call-event[open]') ?? []].map(node => node.dataset.event));
     function populate() {
-      if (!details.open || details.querySelector('.session-call-body')) return;
+      if (details.querySelector('.session-call-body')) return;
       const body = element('div', '');
       body.className = 'session-call-body';
       const hasStart = events.some(event => event.kind === 'mcp' && event.status === 'running');
@@ -118,7 +118,8 @@ export function createSessions() {
       }
       details.append(body);
     }
-    details.addEventListener('toggle', populate);
+    // Build the bounded event list before opening so native disclosure
+    // transitions can measure its full height on the first click.
     populate();
     row.append(details);
     return row;
@@ -169,7 +170,12 @@ export function createSessions() {
     const previous = sameSession ? new Map([...timeline.children].map(row => [row.dataset.call, row])) : new Map();
     const grouped = groupCallEvents(view.events);
     const startedAt = view.sessions.find(session => session.id === view.selected)?.started_at ?? 0;
-    const rows = view.calls.map(call => renderCall(call, grouped.get(call.id) ?? [], startedAt, previous.get(String(call.id))));
+    const rows = view.calls.map(call => {
+      const old = previous.get(String(call.id));
+      const row = renderCall(call, grouped.get(call.id) ?? [], startedAt, old);
+      if (sameSession && !old && timeline.scrollTop <= 8) row.classList.add('settings-row-enter');
+      return row;
+    });
     preserveScroll(timeline, 'call', () => {
       for (const [index, row] of rows.entries()) {
         if (timeline.children[index] !== row) timeline.insertBefore(row, timeline.children[index] ?? null);
