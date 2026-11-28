@@ -276,6 +276,14 @@ h2 { min-width: 0; font-size: 1rem; font-weight: 650; line-height: 1.35; letter-
 .live-tool > .live-tool-body { display: grid; gap: 5px; border-top: 1px solid var(--line); padding: 8px 10px; }
 .live-tool-body > pre { margin: 0; max-height: 180px; overflow: auto; overscroll-behavior: contain; padding: 8px; background: #111613; border-radius: 5px; font: .74rem/1.5 var(--mono); color: #d7e9cf; white-space: pre-wrap; overflow-wrap: anywhere; }
 .live-tool-body > p { color: var(--muted); font-size: .7rem; }
+.tool-code-block { min-width: 0; margin: 5px 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: #101713; }
+.tool-code-header { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: #1c261f; font: .73rem/1.4 var(--mono); }
+.tool-code-filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d7e2d3; }
+.tool-code-language { flex-shrink: 0; color: var(--muted); }
+.tool-code-block > pre, .project-tool .tool-code-block > pre { margin: 0; padding: 10px; border-radius: 0; max-height: min(340px, 45vh); overflow: auto; overscroll-behavior: contain; background: transparent; color: #d7e9cf; font: .76rem/1.55 var(--mono); white-space: pre; overflow-wrap: normal; tab-size: 4; }
+.tool-code-block pre code { font: inherit; white-space: inherit; }
+.tool-code-note { margin: 0; padding: 6px 10px; color: var(--muted); font-size: .72rem; border-top: 1px solid var(--line); }
+.live-tool-body .tool-code-block { margin: 0; }
 .live-tool .disclosure-chevron { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) {
   .live-tool[data-phase] .live-tool-icon::before { animation: none; }
