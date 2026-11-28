@@ -59,6 +59,191 @@ export function savedWritePreview(tool) {
   };
 }
 
+const clippedMarker = '\n… (вывод сокращён)';
+
+export function savedToolView(tool) {
+  let args = {};
+  let invalid = false;
+  try {
+    const parsed = JSON.parse(tool.arguments || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed;
+    else invalid = true;
+  } catch { invalid = true; }
+  const target = typeof args.path === 'string' ? args.path : tool.target || '';
+  const result = typeof tool.result === 'string' ? tool.result : null;
+  const clipped = result?.endsWith(clippedMarker) ?? false;
+  const output = clipped ? result.slice(0, -clippedMarker.length) : result;
+  const fields = [];
+  const field = (label, value) => { if (value != null && value !== '') fields.push([label, String(value)]); };
+  const positive = n => Number.isSafeInteger(n) && n > 0;
+  const view = { target, fields, output, clipped, invalid, kind: 'generic', status: null, write: null, edit: null };
+  const success = tool.status === 'ok';
+  switch (tool.name) {
+    case 'read':
+      view.kind = 'read';
+      if (positive(args.limit)) {
+        const from = positive(args.offset) ? args.offset : 1;
+        field('Запрошено', 'Строки ' + from + '–' + (from + args.limit - 1));
+      } else if (positive(args.offset)) field('Запрошено', 'С строки ' + args.offset);
+      break;
+    case 'write':
+      view.kind = 'write';
+      view.write = savedWritePreview(tool);
+      if (success && /^Updated [^\n]+$/.test(output || '')) view.status = 'Файл записан';
+      break;
+    case 'edit':
+      view.kind = 'edit';
+      view.edit = tool.edit_preview ?? (Array.isArray(args.edits) ? {
+        total: args.edits.length,
+        replacements: args.edits.filter(edit => typeof edit?.oldText === 'string' && typeof edit?.newText === 'string').map(edit => ({before:edit.oldText,after:edit.newText,truncated:false}))
+      } : null);
+      if (success && /^Updated [^\n]+$/.test(output || '')) view.status = 'Изменения сохранены';
+      break;
+    case 'mkdir':
+      view.kind = 'directory';
+      if (success && /^Directory ready: [^\n]+$/.test(output || '')) view.status = 'Каталог готов';
+      break;
+    case 'copy_skill_resource':
+      view.kind = 'copy';
+      field('Скилл', args.skill);
+      field('Источник', args.source);
+      if (success && /^Updated [^\n]+$/.test(output || '')) view.status = 'Ресурс скопирован';
+      break;
+    case 'ls':
+      view.kind = 'list';
+      field('Лимит', args.limit);
+      break;
+    case 'find':
+    case 'grep':
+      view.kind = 'search';
+      field('Запрос', args.pattern);
+      field('Папка', args.path);
+      field('Фильтр', args.glob);
+      if (args.ignoreCase === true) field('Регистр', 'Не учитывать');
+      if (args.literal === true) field('Поиск', 'Точное совпадение');
+      field('Контекст', args.context);
+      field('Лимит', args.limit);
+      break;
+    case 'run_command':
+    case 'start_background_command':
+    case 'bash':
+      view.kind = 'command';
+      view.command = typeof args.command === 'string' ? args.command : target;
+      break;
+    case 'finish_task':
+      view.kind = 'finish';
+      field('Итог', args.status === 'completed' ? 'Завершено' : args.status === 'blocked' ? 'Заблокировано' : args.status);
+      view.summary = typeof args.summary === 'string' ? args.summary : '';
+      if (success && output === 'Outcome recorded.') view.status = 'Итог сохранён';
+      break;
+    default:
+      for (const [key, value] of Object.entries(args)) {
+        if (['string','number','boolean'].includes(typeof value)) field(key, value);
+      }
+  }
+  return view;
+}
+
+function appendFields(body, fields) {
+  if (!fields.length) return;
+  const list = element('dl', '');
+  list.className = 'tool-fields';
+  for (const [label, value] of fields) list.append(element('dt', label), element('dd', value));
+  body.append(list);
+}
+
+function appendOutput(body, title, output, clipped = false, error = false) {
+  if (output == null) return;
+  const block = element('div', '');
+  block.className = 'tool-output';
+  block.dataset.error = String(error);
+  block.append(element('h4', title), element('pre', output || '(пусто)'));
+  if (clipped) {
+    const note = element('p', 'Показана часть результата.');
+    note.className = 'tool-code-note';
+    block.append(note);
+  }
+  body.append(block);
+}
+
+function appendReplacement(body, replacement, index) {
+  const diff = element('div', '');
+  diff.className = 'tool-diff';
+  diff.append(element('h4', 'Замена ' + (index + 1)));
+  for (const [side, title, text] of [['before','Было',replacement.before],['after','Стало',replacement.after]]) {
+    const part = element('div', '');
+    part.className = 'tool-diff-part';
+    part.dataset.side = side;
+    part.append(element('span', title));
+    const pre = element('pre', '');
+    pre.append(element('code', text || ''));
+    part.append(pre);
+    diff.append(part);
+  }
+  if (replacement.truncated) diff.append(element('p', 'Показана часть замены.'));
+  body.append(diff);
+}
+
+export function renderSavedTool(body, tool, technicalDetail) {
+  const view = savedToolView(tool);
+  const error = tool.status === 'error';
+  if (view.target && ['directory','copy','list'].includes(view.kind)) {
+    const path = element('p', view.target);
+    path.className = 'tool-path';
+    body.append(path);
+  }
+  appendFields(body, view.fields);
+  if (view.write) {
+    const block = createToolCodeBlock();
+    block.update(view.write);
+    body.append(block.node);
+  } else if (view.kind === 'read' && !error && tool.status === 'ok' && view.output != null &&
+      view.output !== '[изображение]' && view.output !== '[нетекстовый результат]') {
+    const block = createToolCodeBlock();
+    block.update({target:view.target,text:view.output,truncated:view.clipped});
+    body.append(block.node);
+  } else if (view.edit) {
+    const count = element('p', 'Замен: ' + view.edit.total);
+    count.className = 'tool-inline-status';
+    body.append(count);
+    view.edit.replacements.forEach((replacement, index) => appendReplacement(body, replacement, index));
+    if (view.edit.total > view.edit.replacements.length) body.append(element('p', 'Остальные замены сохранены в журнале.'));
+  } else if (view.command) {
+    appendOutput(body, 'Команда', view.command);
+  }
+  if (view.summary) appendOutput(body, 'Отчёт', view.summary);
+  if (error) appendOutput(body, 'Ошибка', view.output, view.clipped, true);
+  else if (view.status) {
+    const status = element('p', view.status);
+    status.className = 'tool-inline-status';
+    status.dataset.success = 'true';
+    body.append(status);
+  } else if (!(view.kind === 'read' && tool.status === 'ok' && view.output != null &&
+      view.output !== '[изображение]' && view.output !== '[нетекстовый результат]')) {
+    const titles = {list:'Содержимое каталога',search:'Совпадения',command:'Вывод команды'};
+    appendOutput(body, titles[view.kind] || 'Результат', view.output, view.clipped);
+  }
+  if (tool.status === 'pending') {
+    const pending = element('p', 'Ожидает результата…');
+    pending.className = 'tool-inline-status';
+    body.append(pending);
+  }
+  const summary = element('summary', 'Технические детали');
+  const technical = technicalDetail(summary);
+  const populate = () => {
+    if (!technical.open || technical.querySelector('.tool-technical-content')) return;
+    const raw = element('div', '');
+    raw.className = 'tool-technical-content';
+    appendOutput(raw, 'Аргументы (сохранённый предпросмотр)', tool.arguments || '{}');
+    if (tool.write_preview) appendOutput(raw, 'Содержимое (предпросмотр)', tool.write_preview.text, tool.write_preview.truncated);
+    if (tool.result != null) appendOutput(raw, 'Результат (предпросмотр)', tool.result);
+    technical.append(raw);
+  };
+  technical.addEventListener('toggle', populate);
+  populate();
+  body.append(technical);
+}
+
 export function codeLanguage(path) {
   const name = path.split(/[\\/]/).pop().toLowerCase();
   if (name === 'dockerfile') return 'Dockerfile';

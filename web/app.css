@@ -256,6 +256,30 @@ h2 { min-width: 0; font-size: 1rem; font-weight: 650; line-height: 1.35; letter-
 .project-tool[data-status="pending"] .project-tool-indicator { color: #e0bf83; }
 .project-tool-body { padding: 3px 8px 8px 25px; min-width: 0; }
 .project-tool-body .project-message-time { display: block; text-align: right; opacity: 1 !important; }
+.project-tool-body { display: grid; gap: 6px; }
+.tool-fields { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 4px 12px; margin: 0; padding: 3px 0; font-size: .75rem; }
+.tool-fields dt { color: var(--muted); }
+.tool-fields dd { margin: 0; color: #d7e2d3; font: .75rem/1.45 var(--mono); overflow-wrap: anywhere; }
+.tool-path { margin: 0; color: #d7e2d3; font: .76rem/1.5 var(--mono); overflow-wrap: anywhere; }
+.tool-inline-status { margin: 0; font-size: .75rem; color: var(--muted); }
+.tool-inline-status[data-success="true"] { color: #a6bc9d; }
+.tool-inline-status[data-success="true"]::before { content: '✓'; margin-right: 6px; }
+.tool-output { min-width: 0; }
+.tool-output h4, .tool-diff h4 { margin: 0 0 5px; }
+.tool-output[data-error="true"] h4 { color: #f0a09a; }
+.tool-output[data-error="true"] pre { border: 1px solid #65413d; color: #f0a09a; }
+.tool-diff { border: 1px solid var(--line); border-radius: 7px; overflow: hidden; min-width: 0; }
+.tool-diff > h4 { padding: 7px 10px; margin: 0; background: #1c261f; }
+.tool-diff-part { min-width: 0; border-top: 1px solid var(--line); }
+.tool-diff-part > span { display: block; padding: 5px 9px 0; font-size: .7rem; }
+.tool-diff-part[data-side="before"] { background: #342422; color: #e9b0a9; }
+.tool-diff-part[data-side="after"] { background: #223326; color: #bddcb2; }
+.project-tool .tool-diff-part pre { background: transparent; color: inherit; white-space: pre; overflow-wrap: normal; max-height: 220px; tab-size: 4; }
+.tool-diff > p { margin: 0; padding: 5px 9px; font-size: .72rem; }
+.tool-technical { border-top: 1px solid var(--line); padding-top: 5px; min-width: 0; }
+.tool-technical > summary { cursor: pointer; color: var(--muted); font-size: .71rem; }
+.tool-technical > summary:hover { color: #d7e2d3; }
+.tool-technical-content { display: grid; gap: 8px; margin-top: 7px; }
 .project-tool h4 { margin: 8px 0 4px; font-size: .72rem; font-weight: 500; }
 .project-tool pre { margin: 0; padding: 8px; border-radius: 5px; background: #111613; font: .75rem/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
 

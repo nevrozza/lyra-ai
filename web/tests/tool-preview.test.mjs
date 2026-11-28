@@ -39,3 +39,31 @@ test('language is derived from filename, and pending writes do not show JSON', (
   assert.equal(context.codeLanguage('src/main.rs'),'Rust');
   assert.equal(context.toolPreview({name:'write',preview:'{"path":"a.js"'}).text,'');
 });
+
+test('saved read displays only meaningful range and decoded output', () => {
+  const view = context.savedToolView({name:'read',status:'ok',arguments:'{"path":"style.css","offset":10,"limit":5}',result:':root {}'});
+  assert.equal(view.target,'style.css');
+  assert.equal(view.fields[0][0],'Запрошено');
+  assert.equal(view.fields[0][1],'Строки 10–14');
+  assert.equal(view.output,':root {}');
+  assert.equal(context.savedToolView({name:'read',arguments:'{"path":"style.css"}'}).fields.length,0);
+});
+test('directory readiness does not imply a new directory was created', () => {
+  const call = {name:'mkdir',arguments:'{"path":"assets"}',result:'Directory ready: assets'};
+  assert.equal(context.savedToolView({...call,status:'ok'}).status,'Каталог готов');
+  assert.equal(context.savedToolView({...call,status:'error'}).status,null);
+});
+test('edit preview preserves changes and failure output', () => {
+  const view = context.savedToolView({name:'edit',status:'error',arguments:'clipped',target:'app.js',result:'FILE_CHANGED',edit_preview:{total:2,replacements:[{before:'old',after:'new',truncated:false}]}});
+  assert.equal(view.edit.total,2);
+  assert.equal(view.edit.replacements[0].after,'new');
+  assert.equal(view.output,'FILE_CHANGED');
+  assert.equal(view.status,null);
+});
+test('unknown tools retain fields and clipped result, malformed arguments fall back to details', () => {
+  const view = context.savedToolView({name:'mcp__example',arguments:'{"query":"find","limit":5}',result:'data\n… (вывод сокращён)'});
+  assert.equal(view.fields.length,2);
+  assert.equal(view.output,'data');
+  assert.equal(view.clipped,true);
+  assert.equal(context.savedToolView({name:'mcp__example',arguments:'{"broken"'}).invalid,true);
+});
