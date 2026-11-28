@@ -409,13 +409,13 @@
               <ul id="skill-catalog" class="settings-list" aria-label="Кастомные скиллы"></ul>
               <p id="custom-skills-empty" class="secondary" hidden>Нет кастомных скиллов. Добавь папку или SKILL.md.</p>
             </section>
-            <section class="skill-group" aria-labelledby="builtin-skills-title">
-              <div class="skill-group-heading"><h3 id="builtin-skills-title">Встроенные скиллы</h3><span id="builtin-skill-count" class="secondary"></span></div>
+            <details id="builtin-skills" class="skill-group skill-group-disclosure" open>
+              <summary class="skill-group-heading"><h3 id="builtin-skills-title">Встроенные скиллы</h3><span id="builtin-skill-count" class="secondary"></span></summary>
               <ul id="builtin-skill-catalog" class="settings-list" aria-label="Встроенные скиллы"></ul>
               <p id="builtin-skills-empty" class="secondary" hidden>Нет встроенных скиллов.</p>
-            </section>
-            <details id="role-skills" class="role-skills" hidden>
-              <summary>Ролевые скиллы <span id="role-skill-count" class="secondary"></span></summary>
+            </details>
+            <details id="role-skills" class="skill-group skill-group-disclosure" hidden>
+              <summary class="skill-group-heading"><h3 id="role-skills-title">Ролевые скиллы</h3><span id="role-skill-count" class="secondary"></span></summary>
               <ul id="role-skill-catalog" class="settings-list" aria-label="Ролевые скиллы Lyra"></ul>
               <p class="secondary skill-role-note">При отключении расширенные инструкции не загружаются. Базовая роль сохраняется.</p>
             </details>

@@ -84,7 +84,7 @@ export function createSkills() {
       get('custom-skill-count').textContent = count(custom);
       get('builtin-skill-count').textContent = count(builtin);
       roleDetails.hidden = !roles.length;
-      roleCount.textContent = '· ' + count(roles);
+      roleCount.textContent = count(roles);
       const renderSkill = skill => {
         const entry = element('li', '');
         entry.className = 'settings-row';
