@@ -16,7 +16,7 @@ tool_timeout_sec = 3600
 
 If Lyra is already configured with another server name, URL, or headers, keep those settings and add only `tool_timeout_sec = 3600` to that server's existing table. If Codex has an explicit `enabled_tools` allowlist, include `enqueue_and_wait` and `await_project_tasks`.
 
-Restart/reconnect Codex after the change and verify the server with `codex mcp list` or the MCP tool list in the client. Use the Lyra orchestrator skill at [.agents/skills/lyra/SKILL.md](.agents/skills/lyra/SKILL.md); open this repository as the Codex workspace or install/copy the updated skill into the skill directory of the workspace you use.
+Restart/reconnect Codex after the change and verify the server with `codex mcp list` or the MCP tool list in the client. Lyra now serves the current orchestrator guide through MCP. The server's initialize instructions tell the client to call `get_orchestrator_skill` before delegating a new task; omit `path` for SKILL.md and read references by their relative path as needed. The same files are available via standard `resources/list` and `resources/read` with `lyra://orchestrator/...` URIs. The guide and references are embedded from [.agents/skills/lyra/](.agents/skills/lyra/) at build time, so there is one source of truth per running Lyra version. This is on-demand instructions delivery, not automatic installation of a native Codex skill. Clients that do not honor server instructions may need a short local AGENTS.md rule: "When delegating through Lyra, call get_orchestrator_skill and follow the current guide." The local skill remains available as a fallback. If using a tool allowlist, include `get_orchestrator_skill`. Restart/reconnect after upgrading Lyra.
 
 ### Connect MCP servers to Lyra Work
 
