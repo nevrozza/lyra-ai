@@ -47,6 +47,18 @@ pub struct Snapshot {
     mcp_servers_revision: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct LiveTool {
+    pub id: String,
+    pub name: String,
+    pub phase: &'static str,
+    pub target: String,
+    pub argument_bytes: u64,
+    pub generation_ms: Option<u64>,
+    pub preview: String,
+    pub preview_truncated: bool,
+}
+
 #[derive(Serialize)]
 struct Delegation {
     model: String,
@@ -56,6 +68,8 @@ struct Delegation {
     context_notice: Option<ContextNotice>,
     #[serde(skip_serializing_if = "String::is_empty")]
     thinking: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    live_tools: Vec<LiveTool>,
     history_revision: u64,
     #[serde(skip)]
     project: bool,
@@ -261,6 +275,7 @@ impl Snapshot {
                 stopping: false,
                 context_notice: None,
                 thinking: String::new(),
+                live_tools: Vec::new(),
                 history_revision: 0,
                 project,
                 exclusive,
@@ -384,6 +399,15 @@ impl Snapshot {
             return false;
         };
         active.history_revision += 1;
+        true
+    }
+
+    pub(crate) fn set_chat_tools(&mut self, id: u64, tools: Vec<LiveTool>) -> bool {
+        let Some(active) = self.delegations.get_mut(&id).filter(|active| active.project_session_id.is_some()) else {
+            return false;
+        };
+        if active.live_tools == tools { return false; }
+        active.live_tools = tools;
         true
     }
 
