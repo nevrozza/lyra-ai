@@ -396,6 +396,7 @@ pub(super) async fn run(
     let commands = trace;
     let text_only = task.as_ref().is_some_and(|task| task.text_only);
     let mut file_versions = projects::write_scope::FileVersions::default();
+    let mut workspace_rebound = false;
     let reviewing = task
         .as_ref()
         .is_some_and(|task| matches!(task.role, Some(Role::Review)));
@@ -720,9 +721,9 @@ pub(super) async fn run(
                         {
                             file_versions.read(workspace, request)
                         } else {
-                            let roots = project.map_or(&[][..], |project| project.folders.as_slice());
-                            projects::write_scope::mutate_with_skills(
-                                workspace, roots, skills, &mut file_versions, request,
+                            let project = project.ok_or("Saved project required for guarded mutation")?;
+                            app.projects.guarded_mutation(
+                                project, skills, &mut file_versions, request,
                                 |path| {
                                     let mut result = Err("FILE_LOCKED: delegation unavailable".to_owned());
                                     app.task.send_if_modified(|snapshot| {
@@ -732,7 +733,13 @@ pub(super) async fn run(
                                     result.map_err(io::Error::other)
                                 },
                                 |path| { app.task.send_if_modified(|snapshot| snapshot.release_file(task.delegation, path)); },
-                            ).map(|()| json!({}))
+                            ).map(|bound| {
+                                if let Some(folder) = bound {
+                                    workspace_rebound = true;
+                                    app.task.send_modify(crate::run::Snapshot::projects_changed);
+                                    json!({"workspace_bound": folder})
+                                } else { json!({}) }
+                            })
                         };
                         let result = match result {
                             Ok(mut data) => {
@@ -758,7 +765,9 @@ pub(super) async fn run(
                             .as_str()
                             .ok_or("Missing Pi command request ID")?;
                         let command = event["placeholder"].as_str().ok_or("Missing Pi command")?;
-                        let result = if background.is_some() {
+                        let result = if workspace_rebound {
+                            json!({"status": "error", "message": "WORKSPACE_CHANGED: finish this run and continue with the new project workspace."})
+                        } else if background.is_some() {
                             json!({"status": "busy", "message": "Collect the background command first, or use read_review_diff."})
                         } else {
                             serde_json::to_value(
@@ -1144,6 +1153,9 @@ async fn write_project_instructions(
     if let Some(role) = task.role {
         text.push_str("\n\n");
         text.push_str(role.instructions(task.role_skill_enabled)?);
+    }
+    if !task.text_only && !matches!(task.role, Some(Role::Review)) && project.project.folders.is_empty() {
+        text.push_str("\nWorkspace bootstrap: for a fresh project with no registered folders, no queued work and an empty internal workspace, the first explicit mkdir may create a new folder at the user-authorized absolute path (or a relative child). Its parent must exist. This first folder automatically becomes the project's only registered workspace. Use mkdir only for the requested destination, never shell creation. After a successful workspace-bound result, report the absolute folder, finish_task and end the turn; the next run starts in the new root. Do not attempt further writes or commands in this run. Existing folders must be registered explicitly; existing project contents are not relocated. To resolve a named host location, use authorized read-only inspection if needed; never guess a username/path.\n");
     }
     if project.session_file.is_some() {
         text.push_str("\nEarlier turns and saved summaries, when present, belong to this same local Lyra chat even if the user switched models. Use the conversation you actually received to answer questions about earlier turns. Say if a specific detail is missing. Identify yourself by your model name or as Lyra.\n");

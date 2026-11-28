@@ -100,7 +100,6 @@ async fn handle(
                     | "run_pi"
                     | "list_projects"
                     | "save_project"
-                    | "get_desktop_path"
                     | "create_project_session"
                     | "set_project_session_settings"
                     | "get_project_session_mode"
@@ -394,14 +393,8 @@ fn tools() -> Value {
             "annotations": {"idempotentHint": true, "destructiveHint": false}
         }),
         json!({
-            "name": "get_desktop_path",
-            "description": "Resolve the actual existing Desktop directory on the Lyra host, including redirected Windows desktops. Read-only OS lookup, no model run or folder creation. Use for an explicitly requested Desktop destination, then register the returned parent, create the requested child through a saved Work chat and narrow the project folders.",
-            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
-            "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false}
-        }),
-        json!({
             "name": "save_project",
-            "description": "Create a project or update its registered folders and metadata. For a new directory, first register its existing authorized parent, create the child using mkdir in a saved Work chat, then update the project to the child only. For Desktop, resolve the actual parent with get_desktop_path.",
+            "description": "Create a project or update its registered folders and metadata. For a new destination, create a project without folders, then create a Work chat to perform the first guarded mkdir and bind the newly created directory automatically. Register existing destinations directly.",
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
@@ -686,10 +679,6 @@ async fn call(
         "list_projects" => {
             let _: NoArguments = arguments(args)?;
             project_result(projects::work(app, |app| app.projects.catalog_summary()).await)
-        }
-        "get_desktop_path" => {
-            let _: NoArguments = arguments(args)?;
-            project_result(projects::desktop_path().await.map(|path| json!({"path": path})))
         }
         "save_project" => {
             let input = arguments(args)?;
