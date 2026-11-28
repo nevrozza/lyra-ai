@@ -3,15 +3,20 @@ use std::{
     io,
     path::PathBuf,
     sync::Arc,
+    hash::{Hash, Hasher},
 };
 
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
-    http::{StatusCode, Uri, header::HeaderName},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header::{self, HeaderName}},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::sync::Mutex;
+
+mod probe;
 
 use super::App;
 
@@ -21,7 +26,7 @@ pub(super) struct Config {
     mcp_servers: BTreeMap<String, Server>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Server {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -58,7 +63,7 @@ enum Transport {
     StreamableHttp,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Exposure {
     #[default]
@@ -154,11 +159,11 @@ impl Server {
     }
 }
 
-pub(super) struct Store(PathBuf);
+pub(super) struct Store(PathBuf, Mutex<()>);
 
 impl Store {
     pub(super) fn new(path: PathBuf) -> Self {
-        Self(path)
+        Self(path, Mutex::new(()))
     }
 
     async fn load(&self) -> io::Result<Config> {
@@ -198,6 +203,15 @@ impl Store {
             .map(Some)
             .map_err(io::Error::other)
     }
+
+    async fn update(&self, operation: impl FnOnce(&mut Config) -> Result<Value, Error>) -> Result<Value, Error> {
+        let _guard = self.1.lock().await;
+        let mut config = self.load().await.map_err(storage_error)?;
+        let result = operation(&mut config)?;
+        config.validate().map_err(bad_request)?;
+        self.save(config).await.map_err(storage_error)?;
+        Ok(result)
+    }
 }
 
 type Error = (StatusCode, String);
@@ -221,6 +235,22 @@ fn require_local(app: &App) -> Result<(), Error> {
     ))
 }
 
+fn bad_request(message: String) -> Error { (StatusCode::BAD_REQUEST, message) }
+
+fn missing_server(name: &str) -> Error { (StatusCode::NOT_FOUND, format!("MCP server not found: {name}")) }
+
+fn revision(config: &Config) -> String {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(config).expect("serializable MCP settings").hash(&mut hash);
+    format!("\"{:016x}\"", hash.finish())
+}
+
+fn response(config: Config) -> (HeaderMap, Json<Config>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ETAG, HeaderValue::from_str(&revision(&config)).expect("valid ETag"));
+    (headers, Json(config))
+}
+
 fn storage_error(_: io::Error) -> Error {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -228,28 +258,130 @@ fn storage_error(_: io::Error) -> Error {
     )
 }
 
-async fn get_settings(State(app): State<Arc<App>>) -> Result<Json<Config>, Error> {
+async fn get_settings(State(app): State<Arc<App>>) -> Result<(HeaderMap, Json<Config>), Error> {
     require_local(&app)?;
-    app.mcp_servers
-        .load()
-        .await
-        .map(Json)
-        .map_err(storage_error)
+    app.mcp_servers.load().await.map(response).map_err(storage_error)
 }
 
 async fn save_settings(
     State(app): State<Arc<App>>,
+    headers: HeaderMap,
     Json(config): Json<Config>,
-) -> Result<Json<Config>, Error> {
+) -> Result<(HeaderMap, Json<Config>), Error> {
     require_local(&app)?;
-    config
-        .validate()
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    app.mcp_servers
-        .save(config)
-        .await
-        .map(Json)
-        .map_err(storage_error)
+    config.validate().map_err(bad_request)?;
+    let _guard = app.mcp_servers.1.lock().await;
+    if let Some(expected) = headers.get(header::IF_MATCH) {
+        let current = app.mcp_servers.load().await.map_err(storage_error)?;
+        if expected.to_str().ok() != Some(revision(&current).as_str()) {
+            return Err((StatusCode::CONFLICT, "Настройки MCP изменились. Обновите список и повторите изменения.".into()));
+        }
+    }
+    let config = app.mcp_servers.save(config).await.map_err(storage_error)?;
+    app.task.send_modify(crate::run::Snapshot::mcp_servers_changed);
+    Ok(response(config))
+}
+
+// The orchestrator sees configuration metadata only, not credential values,
+// arguments, URLs (which may contain tokens), or arbitrary environment data.
+fn summary(name: &str, server: &Server) -> Value {
+    json!({
+        "name": name,
+        "type": if server.url.is_some() { "streamable-http" } else { "stdio" },
+        "enabled": server.enabled,
+        "exposure": server.exposure,
+        "toolExposure": server.tool_exposure,
+        "timeout": server.timeout,
+        "has_env": !server.env.is_empty(),
+        "has_headers": !server.headers.is_empty(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SaveServer {
+    name: String,
+    server: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NamedServer {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EnableServer {
+    name: String,
+    enabled: bool,
+}
+
+fn upsert(config: &mut Config, input: SaveServer) -> Result<Value, Error> {
+    let patch = input.server.as_object().ok_or_else(|| bad_request("server must be an object".into()))?;
+    let previous = config.mcp_servers.get(&input.name);
+    let mut value = previous.map(|server| serde_json::to_value(server).expect("serializable MCP server"))
+        .unwrap_or_else(|| json!({}));
+    let fields = value.as_object_mut().expect("server object");
+    // Switching transport removes only fields incompatible with the new transport.
+    if previous.is_some_and(|server| server.command.is_some()) && patch.get("url").is_some_and(|url| !url.is_null()) && !patch.contains_key("command") {
+        for key in ["command", "args", "env", "cwd", "type"] { fields.remove(key); }
+    }
+    if previous.is_some_and(|server| server.url.is_some()) && patch.get("command").is_some_and(|command| !command.is_null()) && !patch.contains_key("url") {
+        for key in ["url", "headers", "type"] { fields.remove(key); }
+    }
+    for (key, value) in patch {
+        // Keep required/defaulted fields valid; optional nulls clear them.
+        fields.insert(key.clone(), value.clone());
+    }
+    let server: Server = serde_json::from_value(value).map_err(|error| bad_request(format!("Invalid MCP server: {error}")))?;
+    let result = summary(&input.name, &server);
+    config.mcp_servers.insert(input.name, server);
+    Ok(result)
+}
+
+pub(super) async fn list_for_orchestrator(app: &App) -> Result<Value, Error> {
+    require_local(app)?;
+    let config = app.mcp_servers.load().await.map_err(storage_error)?;
+    Ok(json!({"servers": config.mcp_servers.iter().map(|(name, server)| summary(name, server)).collect::<Vec<_>>(),
+        "applies_to": "next Work run"}))
+}
+
+pub(super) async fn save_for_orchestrator(app: &App, input: SaveServer) -> Result<Value, Error> {
+    require_local(app)?;
+    let result = app.mcp_servers.update(|config| upsert(config, input)).await?;
+    app.task.send_modify(crate::run::Snapshot::mcp_servers_changed);
+    Ok(result)
+}
+
+pub(super) async fn enable_for_orchestrator(app: &App, input: EnableServer) -> Result<Value, Error> {
+    require_local(app)?;
+    let result = app.mcp_servers.update(|config| {
+        let server = config.mcp_servers.get_mut(&input.name).ok_or_else(|| missing_server(&input.name))?;
+        server.enabled = input.enabled;
+        Ok(summary(&input.name, server))
+    }).await?;
+    app.task.send_modify(crate::run::Snapshot::mcp_servers_changed);
+    Ok(result)
+}
+
+pub(super) async fn remove_for_orchestrator(app: &App, input: NamedServer) -> Result<Value, Error> {
+    require_local(app)?;
+    let result = app.mcp_servers.update(|config| {
+        let removed = config.mcp_servers.remove(&input.name).is_some();
+        Ok(json!({"name": input.name, "removed": removed}))
+    }).await?;
+    app.task.send_modify(crate::run::Snapshot::mcp_servers_changed);
+    Ok(result)
+}
+
+pub(super) async fn test_for_orchestrator(app: &App, input: NamedServer) -> Result<Value, Error> {
+    require_local(app)?;
+    let config = app.mcp_servers.load().await.map_err(storage_error)?;
+    let server = config.mcp_servers.get(&input.name).ok_or_else(|| missing_server(&input.name))?;
+    let tools = probe::test(server).await.map_err(|message| (StatusCode::BAD_GATEWAY, message))?;
+    Ok(json!({"name": input.name, "connected": true, "enabled": server.enabled, "tools": tools,
+        "note": "MCP handshake and tools/list succeeded; no tool invoked. Work uses its own Pi connection."}))
 }
 
 #[cfg(test)]
@@ -277,6 +409,23 @@ mod tests {
         assert_eq!(servers["local"]["exposure"], "direct");
         assert_eq!(servers["remote"]["toolExposure"]["write"], "hidden");
         assert!(!store.load().await.unwrap().mcp_servers["off"].enabled);
+    }
+
+    #[test]
+    fn orchestrator_patch_preserves_secrets_and_other_servers() {
+        let mut config: Config = serde_json::from_value(json!({"mcpServers": {
+            "docs": {"url":"https://example.com/mcp", "headers":{"Authorization":"secret"}, "enabled":false},
+            "local": {"command":"node"}
+        }})).unwrap();
+        let result = upsert(&mut config, SaveServer { name:"docs".into(), server:json!({"enabled":true}) }).unwrap();
+        assert!(!result.to_string().contains("secret"));
+        assert_eq!(config.mcp_servers["docs"].headers["Authorization"], "secret");
+        assert!(config.mcp_servers["docs"].enabled);
+        assert!(config.mcp_servers.contains_key("local"));
+        upsert(&mut config, SaveServer { name:"docs".into(), server:json!({"command":"uvx"}) }).unwrap();
+        config.validate().unwrap();
+        assert!(config.mcp_servers["docs"].headers.is_empty());
+        assert!(config.mcp_servers["docs"].url.is_none());
     }
 
     #[test]
