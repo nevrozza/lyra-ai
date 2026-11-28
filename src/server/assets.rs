@@ -103,6 +103,11 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../../web/js/projects.js"),
     ),
     (
+        "/js/tool-preview.js",
+        JAVASCRIPT,
+        include_str!("../../web/js/tool-preview.js"),
+    ),
+    (
         "/js/chat-thinking.js",
         JAVASCRIPT,
         include_str!("../../web/js/chat-thinking.js"),

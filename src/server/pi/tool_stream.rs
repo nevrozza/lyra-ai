@@ -193,6 +193,26 @@ mod tests {
     }
 
     #[test]
+    fn preview_is_bounded_and_calls_are_correlated_by_id() {
+        let mut stream = Stream::default();
+        for (index, id) in [(0, "first"), (1, "second")] {
+            stream.update(&json!({"type":"toolcall_start","contentIndex":index,"id":id,"toolName":"write"}), &Value::Null);
+        }
+        let delta = "я".repeat(PREVIEW_LIMIT);
+        stream.update(&json!({"type":"toolcall_delta","contentIndex":0,"delta":delta}), &Value::Null);
+        let live = stream.live();
+        assert_eq!(live[0].argument_bytes, (2 * PREVIEW_LIMIT) as u64);
+        assert!(live[0].preview.len() <= PREVIEW_LIMIT);
+        assert!(live[0].preview_truncated);
+        assert_eq!(live[1].argument_bytes, 0);
+        stream.execution_start(&json!({"toolCallId":"second","toolName":"write","args":{"path":"b"}}));
+        stream.execution_start(&json!({"toolCallId":"first","toolName":"write","args":{"path":"a"}}));
+        stream.record_bridge("second", Duration::from_millis(7));
+        assert_eq!(stream.execution_end(&json!({"toolCallId":"second"})).unwrap().bridge_ms, Some(7));
+        assert_eq!(stream.live()[0].id, "first");
+    }
+
+    #[test]
     fn legacy_partial_and_non_file_arguments_are_safe() {
         let mut stream = Stream::default();
         stream.update(&json!({"type":"toolcall_start","contentIndex":0,"partial":{"content":[{"id":"x","name":"mcp__secret","arguments":{}}]}}), &Value::Null);
