@@ -172,7 +172,8 @@ export function createCommands({ openChat }) {
     settingsPopover.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
     settingsPopover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
   }
-  terminalButton.addEventListener('click', () => {
+  terminalButton.addEventListener('click', event => {
+    event.preventDefault();
     if (settingsPopover.matches(':popover-open')) {
       settingsPopover.hidePopover();
       return;

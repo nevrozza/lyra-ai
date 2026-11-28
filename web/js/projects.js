@@ -478,7 +478,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
     workspacePopover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
   }
 
-  workspaceButton.onclick = () => {
+  workspaceButton.onclick = event => {
+    event.preventDefault();
     if (workspacePopover.matches(':popover-open')) closeWorkspacePopover();
     else {
       workspacePopover.showPopover({ source: workspaceButton });
@@ -507,8 +508,13 @@ export function createProjects({ onSelection = () => {} } = {}) {
     more.dataset.projectEntry = primary.dataset.projectEntry + '/menu';
     more.setAttribute('aria-label', 'Действия: ' + (chat?.name ?? group?.name ?? project.name));
     more.setAttribute('aria-haspopup', 'true');
+    more.setAttribute('aria-controls', entryMenu.id);
+    more.setAttribute('popovertarget', entryMenu.id);
     more.title = more.getAttribute('aria-label');
-    more.onclick = () => openEntryMenu(more, project, chat, group);
+    more.onclick = event => {
+      event.preventDefault();
+      openEntryMenu(more, project, chat, group);
+    };
     const icon = primary.querySelector('.project-tree-status');
     row.append(primary, more);
     if (icon) row.append(icon);
@@ -557,7 +563,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     }
     if (!entryMenu.childElementCount) add('Сначала восстановите проект', () => {}, true);
     const rect = anchor.getBoundingClientRect();
-    entryMenu.showPopover();
+    entryMenu.showPopover({ source: anchor });
     const width = entryMenu.offsetWidth;
     const height = entryMenu.offsetHeight;
     entryMenu.style.left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) + 'px';
@@ -1230,7 +1236,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
     modelPopover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
   }
 
-  modelSelect.onclick = () => {
+  modelSelect.onclick = event => {
+    event.preventDefault();
     if (modelSelect.disabled) return;
     if (modelPopover.matches(':popover-open')) closeModelPopover();
     else {
