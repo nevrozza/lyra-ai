@@ -410,10 +410,44 @@ h2 { font-size: .96rem; font-weight: 650; }
 .pin input:disabled { opacity: .65; }
 .unload { background: transparent; border: 1px solid #536453; color: #d7e9cf; padding: 6px 10px; font-size: .78rem; }
 .unload:hover:not(:disabled) { background: #2c382e; }
-.mcp-servers-form { display: grid; gap: 8px; }
-.mcp-servers-form textarea { width: 100%; min-height: 9rem; resize: vertical; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #111613; color: inherit; font: .8rem/1.45 var(--mono); }
-.mcp-servers-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mcp-servers-header { flex-wrap: wrap; gap: 8px; }
+.mcp-servers-body { display: grid; gap: 8px; }
+#mcp-servers-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.mcp-server-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.mcp-server-info { min-width: 0; display: grid; gap: 3px; }
+.mcp-server-info strong { font: 600 .82rem/1.4 var(--mono); overflow-wrap: anywhere; }
+.mcp-server-info p { color: var(--muted); font-size: .73rem; line-height: 1.4; overflow-wrap: anywhere; }
+.mcp-server-info code { color: var(--muted); font-size: .71rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mcp-server-info .mcp-server-type { color: var(--muted); font-size: .7rem; font-weight: 400; }
+.mcp-server-actions { display: flex; align-items: center; gap: 3px; }
+.mcp-server-actions button { padding: 5px; background: transparent; color: var(--muted); border-radius: 5px; }
+.mcp-server-actions button:hover:not(:disabled) { color: #edf0ea; background: #27362b; }
+.mcp-server-actions button:disabled { opacity: .5; }
+.mcp-server-actions button[data-delete]:hover:not(:disabled) { color: #f0ac9c; }
+.mcp-server-actions .mcp-switch { display: inline-flex; padding: 2px; width: 31px; height: 18px; border-radius: 10px; background: #3b4940; align-items: center; border: 1px solid #536453; margin-right: 4px; }
+.mcp-switch::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #b2bdb1; transition: transform var(--motion-fast); }
+.mcp-server-actions .mcp-switch[aria-checked="true"] { background: #597a49; }
+.mcp-switch[aria-checked="true"]::before { transform: translateX(12px); background: #d4efb9; }
+.mcp-servers-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-servers-note { font-size: .72rem; line-height: 1.45; }
+#mcp-servers-status:empty { display: none; }
 #mcp-servers-status[data-error="true"] { color: #f0cd91; }
+.mcp-server-dialog { width: min(590px, calc(100% - 26px)); }
+.mcp-server-fields { display: grid; gap: 8px; min-width: 0; padding: 0; margin: 0; border: 0; }
+.mcp-field-header { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.mcp-dynamic-fields { display: grid; gap: 5px; }
+.mcp-dynamic-fields:empty { display: none; }
+.mcp-dynamic-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px; align-items: center; min-width: 0; }
+.mcp-dynamic-row[data-pair] { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto; }
+.mcp-dynamic-row[data-secret] { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto auto; }
+.mcp-dynamic-row .terminal-mode { justify-content: center; padding: 6px; }
+.mcp-server-dialog input:is([type="url"], [type="number"], [type="password"]) { min-width: 0; width: 100%; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: #141b17; color: inherit; font: inherit; }
+.mcp-server-dialog input, .mcp-server-dialog select { width: 100%; }
+.mcp-server-dialog input[type="checkbox"] { width: auto; }
+.mcp-server-advanced { border-top: 1px solid var(--line); padding-top: 8px; }
+.mcp-server-advanced > summary { cursor: pointer; color: var(--muted); font-size: .8rem; }
+.mcp-server-advanced > div { margin-top: 9px; }
+#mcp-json-editor { resize: vertical; min-height: 10rem; max-height: 55dvh; font: .78rem/1.45 var(--mono); }
 .unload:disabled { background: transparent; border-color: var(--line); color: var(--muted); opacity: .6; }
 .model-roles { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); }
 .model-roles summary { cursor: pointer; font-size: .83rem; color: var(--muted); }
