@@ -65,9 +65,14 @@ h2 { font-size: .96rem; font-weight: 650; }
 #skill-result:empty, #skill-catalog-message:empty, #skill-import-result:empty, #agents-result:empty, #agents-load-result:empty { display: none; }
 #skill-result[data-error="true"], #agents-load-result[data-error="true"] { color: #f0ac9c; }
 .skill-group { min-width: 0; }
-.skill-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding-bottom: 3px; }
-.skill-group-heading h3 { margin: 0; font-size: .82rem; font-weight: 600; color: var(--muted); }
-.skill-group-heading .secondary, #role-skill-count { font-size: .73rem; }
+.skill-group-heading { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 3px 0; color: #edf0ea; }
+.skill-group-heading h3 { margin: 0; font: 650 .98rem/1.35 system-ui, sans-serif; color: inherit; overflow-wrap: anywhere; }
+.skill-group-heading .secondary { margin-left: auto; font-size: .74rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.skill-group-disclosure > summary { cursor: pointer; list-style: none; }
+.skill-group-disclosure > summary::-webkit-details-marker { display: none; }
+.skill-group-disclosure > summary::after { content: ''; flex: 0 0 6px; height: 6px; margin: 0 3px 0 1px; border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform var(--motion-fast) var(--motion-ease); }
+.skill-group-disclosure[open] > summary::after { transform: rotate(45deg); }
+.skill-group-disclosure > summary:hover h3 { color: var(--accent); }
 #custom-skills-empty, #builtin-skills-empty, .skill-role-note { font-size: .74rem; line-height: 1.45; }
 .skill-role-note { padding-top: 8px; }
 .settings-row[data-enabled="false"] .settings-info { opacity: .65; }
@@ -599,12 +604,6 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
   .gpu { grid-template-columns: 1fr; }
 }
 
-.role-skills { border-top: 1px solid var(--line); padding: 9px 0; }
-.role-skills summary { color: var(--muted); font-size: .83rem; cursor: pointer; }
-.role-skills summary:hover { color: var(--accent); }
-.role-skills[open] summary { margin-bottom: 8px; }
-.role-skills summary .secondary { margin-left: 3px; }
-
 #project-tree .group-context-entry { color: var(--muted); font: .74rem var(--mono); padding-left: 10px; }
 #project-tree .group-context-entry:hover { color: var(--accent); }
 .group-context-dialog { width: min(760px, calc(100% - 26px)); }
@@ -643,13 +642,13 @@ button, .project-composer, .group-context-entry {
    browsers simply use instant native opening/closing. */
 @supports selector(details::details-content) {
   @supports (interpolate-size: allow-keywords) {
-    :is(.project-thinking, .project-tool, .project-activity) { interpolate-size: allow-keywords; }
-    :is(.project-thinking, .project-tool, .project-activity)::details-content {
+    :is(.project-thinking, .project-tool, .project-activity, .skill-group-disclosure) { interpolate-size: allow-keywords; }
+    :is(.project-thinking, .project-tool, .project-activity, .skill-group-disclosure)::details-content {
       block-size: 0; overflow: clip;
       transition: block-size var(--motion-normal) var(--motion-ease),
         content-visibility var(--motion-normal) allow-discrete;
     }
-    :is(.project-thinking, .project-tool, .project-activity)[open]::details-content { block-size: auto; }
+    :is(.project-thinking, .project-tool, .project-activity, .skill-group-disclosure)[open]::details-content { block-size: auto; }
   }
 }
 :is(.terminal-popover, .project-action-menu, .project-dialog, .ram-dialog) {
