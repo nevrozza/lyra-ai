@@ -72,3 +72,89 @@ export function initDialogDismissal(root = document) {
     });
   }
 }
+
+
+// A small tolerance avoids switching modes because of fractional pixels.
+export function nearChatEnd(scroller, threshold = 48) {
+  return scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= threshold;
+}
+
+export function chatFollowTarget(scroller, anchorTop = Infinity) {
+  const end = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  return Math.max(0, Math.min(end, anchorTop));
+}
+
+export function createChatScroll(scroller, bottomButton) {
+  let following = true;
+  let lastApplied;
+  let anchor;
+  let anchorTimer;
+  let frame;
+  const update = () => {
+    scroller.dataset.follow = String(following);
+    bottomButton.hidden = following || nearChatEnd(scroller);
+  };
+  const clearAnchor = () => {
+    clearTimeout(anchorTimer);
+    anchor = undefined;
+  };
+  function followNow() {
+    if (!following) { update(); return; }
+    if (anchor && !anchor.isConnected) clearAnchor();
+    const limit = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top - 12 : Infinity;
+    const end = chatFollowTarget(scroller);
+    // Do not move backwards to expose a summary already above the viewport.
+    const target = chatFollowTarget(scroller, Math.max(scroller.scrollTop, limit));
+    if (target < end - 1) {
+      following = false;
+      clearAnchor();
+    }
+    if (Math.abs(scroller.scrollTop - target) > 1) {
+      scroller.scrollTop = target;
+      lastApplied = scroller.scrollTop;
+    }
+    update();
+  }
+  function changed() {
+    if (frame != null) return;
+    frame = requestAnimationFrame(() => {
+      frame = undefined;
+      followNow();
+    });
+  }
+  function goToEnd() {
+    clearAnchor();
+    following = true;
+    followNow();
+  }
+  scroller.addEventListener('scroll', () => {
+    // Ignore our own movement; user scrolling up must suspend following.
+    if (lastApplied != null && Math.abs(scroller.scrollTop - lastApplied) <= 1) {
+      lastApplied = undefined;
+      update();
+      return;
+    }
+    lastApplied = undefined;
+    following = nearChatEnd(scroller);
+    if (!following) clearAnchor();
+    update();
+  }, { passive: true });
+  scroller.addEventListener('click', event => {
+    const summary = event.target.closest?.('summary');
+    const details = summary?.parentElement;
+    if (!details || details.tagName !== 'DETAILS' || details.open || !following) return;
+    // For a manually expanded block, follow its growth only while the
+    // heading remains visible. Large results should be read from the top.
+    clearAnchor();
+    anchor = summary;
+    anchorTimer = setTimeout(clearAnchor, 350);
+    changed();
+  });
+  bottomButton.addEventListener('click', goToEnd);
+  const observer = new ResizeObserver(changed);
+  observer.observe(scroller);
+  for (const child of scroller.children) observer.observe(child);
+  update();
+  return { changed, goToEnd };
+}
