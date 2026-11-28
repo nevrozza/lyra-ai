@@ -258,7 +258,7 @@
           <header class="panel-header"><h2 id="model-title">Модели</h2><span id="ollama" class="service">Ollama</span></header>
           <div class="panel-body">
             <ul id="model-list" class="model-list" aria-label="Установленные модели Ollama" hidden></ul>
-            <p id="model-list-message" class="secondary">Получаем список моделей…</p>
+            <div id="model-list-message" class="empty-state empty-state-compact" data-state="loading"><span class="empty-state-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7l8-4 8 4v10l-8 4-8-4zM4 7l8 4 8-4m-8 4v10"/></svg></span><div class="empty-state-copy"><strong id="model-list-message-title">Загружаем модели</strong><p id="model-list-message-text">Ожидаем данные Ollama.</p></div></div>
             <div id="selected-model" hidden>
               <strong id="model-name" class="model-name">—</strong>
               <button id="edit-description" class="model-description-text" type="button" title="Нажмите, чтобы редактировать описание" aria-label="Редактировать описание модели" disabled>Добавить описание…</button>
@@ -365,11 +365,14 @@
           <header class="panel-header"><h2 id="sessions-title">MCP-вызовы оркестратора</h2></header>
           <div class="panel-body sessions-body">
             <details id="session-recent" class="session-recent">
-              <summary><strong id="session-recent-total">—</strong><span>вызовов за 15 мин</span></summary>
+              <summary><span class="session-recent-metric"><strong id="session-recent-total">—</strong><span>Вызовов за 15 мин</span></span><span class="session-recent-label">По инструментам</span><span class="disclosure-chevron" aria-hidden="true"></span></summary>
               <ul id="session-recent-tools" aria-label="Вызовы по инструментам"></ul>
               <p class="secondary">Все MCP-вызовы оркестратора с момента запуска Lyra в пределах окна.</p>
             </details>
-            <p id="session-message" class="secondary">Пока нет MCP-вызовов оркестратора.</p>
+            <div id="session-message" class="empty-state empty-state-compact" role="status" data-state="loading">
+              <span class="empty-state-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>
+              <div class="empty-state-copy"><strong id="session-message-title">Загружаем журнал</strong><p id="session-message-text">Ожидаем данные от Lyra.</p></div>
+            </div>
             <ul id="session-list" class="session-list" aria-label="Группы MCP-вызовов оркестратора"></ul>
             <div id="session-detail" hidden>
               <div class="session-log-heading"><span>Вызовы группы</span><span class="secondary">Новые сверху</span></div>
@@ -381,33 +384,39 @@
         <section class="panel" aria-labelledby="mcp-servers-title">
           <header class="panel-header mcp-servers-header">
             <h2 id="mcp-servers-title">Серверы MCP</h2>
-            <button id="mcp-servers-add" class="unload" type="button" disabled>＋ Добавить</button>
+            <button id="mcp-servers-add" class="unload settings-add" type="button" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Добавить</button>
           </header>
           <div class="panel-body mcp-servers-body">
-            <p id="mcp-servers-count" class="secondary">Нет данных</p>
-            <ul id="mcp-servers-list" aria-label="Настроенные MCP-серверы"></ul>
-            <p id="mcp-servers-empty" class="secondary" hidden>Добавь локальный сервер или подключись к MCP по HTTP.</p>
-            <p id="mcp-servers-status" class="secondary" role="status"></p>
-            <div class="mcp-servers-footer">
-              <button id="mcp-servers-json" class="terminal-mode" type="button" disabled>JSON-конфигурация</button>
-              <button id="mcp-servers-reload" class="terminal-mode" type="button" disabled>Обновить</button>
+            <div id="mcp-servers-count" class="settings-summary" hidden>
+              <span id="mcp-servers-count-text"></span><span id="mcp-servers-enabled-dot" class="settings-summary-dot" aria-hidden="true"></span>
             </div>
-            <p class="secondary mcp-servers-note">Изменения применяются при следующем запуске Work.</p>
+            <ul id="mcp-servers-list" aria-label="Настроенные MCP-серверы"></ul>
+            <div id="mcp-servers-empty" class="empty-state mcp-empty" hidden>
+              <span class="empty-state-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3v5m6-5v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5"/></svg></span>
+              <div class="empty-state-copy"><strong>Нет MCP-серверов</strong><p>Подключи локальный инструмент или удалённый сервер, чтобы агенты могли использовать его в Work.</p></div>
+              <button id="mcp-servers-empty-add" class="settings-primary" type="button" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Подключить сервер</button>
+            </div>
+            <p id="mcp-servers-status" class="secondary settings-feedback" role="status">Ожидаем подключение к Lyra…</p>
+            <div class="mcp-servers-footer">
+              <button id="mcp-servers-json" class="terminal-mode settings-link" type="button" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H6a2 2 0 0 0-2 2v4l-2 3 2 3v4a2 2 0 0 0 2 2h2m8-18h2a2 2 0 0 1 2 2v4l2 3-2 3v4a2 2 0 0 1-2 2h-2"/></svg> JSON-конфигурация</button>
+              <button id="mcp-servers-reload" class="terminal-mode settings-link" type="button" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2 6m2-12v6h-6"/></svg> Обновить</button>
+            </div>
+            <p id="mcp-servers-note" class="secondary mcp-servers-note" hidden>Изменения применяются при следующем запуске Work.</p>
           </div>
         </section>
 
         <section class="panel" aria-labelledby="skills-title">
           <header class="panel-header mcp-servers-header">
             <h2 id="skills-title">Скиллы Pi</h2>
-            <button id="add-skill" class="unload" type="button" disabled>＋ Добавить</button>
+            <button id="add-skill" class="unload settings-add" type="button" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Добавить</button>
           </header>
           <div class="panel-body skills-body">
             <p id="skill-result" class="secondary" role="status"></p>
-            <p id="skill-catalog-message" class="secondary" role="status"></p>
+            <p id="skill-catalog-message" class="secondary settings-feedback" role="status">Загружаем скиллы…</p>
             <section class="skill-group" aria-labelledby="custom-skills-title">
               <div class="skill-group-heading"><h3 id="custom-skills-title">Кастомные скиллы</h3><span id="custom-skill-count" class="secondary"></span></div>
               <ul id="skill-catalog" class="settings-list" aria-label="Кастомные скиллы"></ul>
-              <p id="custom-skills-empty" class="secondary" hidden>Нет кастомных скиллов. Добавь папку или SKILL.md.</p>
+              <div id="custom-skills-empty" class="empty-state empty-state-compact" hidden><span class="empty-state-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7l8-4 8 4v10l-8 4-8-4zM4 7l8 4 8-4m-8 4v10"/></svg></span><div class="empty-state-copy"><strong>Пока нет кастомных скиллов</strong><p>Добавь папку с инструкциями или файл SKILL.md.</p></div></div>
             </section>
             <details id="builtin-skills" class="skill-group skill-group-disclosure" open>
               <summary class="skill-group-heading"><h3 id="builtin-skills-title">Встроенные скиллы</h3><span id="builtin-skill-count" class="secondary"></span></summary>
@@ -420,10 +429,13 @@
               <p class="secondary skill-role-note">При отключении расширенные инструкции не загружаются. Базовая роль сохраняется.</p>
             </details>
             <div class="agents-card settings-row">
-              <div class="settings-info">
-                <strong>AGENTS.md</strong>
-                <p>Глобальные инструкции для агентов Pi</p>
-                <p id="agents-summary">Загрузка…</p>
+              <div class="agents-card-identity">
+                <span class="empty-state-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M8 13h8m-8 4h8"/></svg></span>
+                <div class="settings-info">
+                  <strong>AGENTS.md</strong>
+                  <p>Общие инструкции для агентов Pi</p>
+                  <p id="agents-summary">Загрузка…</p>
+                </div>
               </div>
               <button id="edit-agents" class="unload" type="button" disabled>Открыть</button>
             </div>

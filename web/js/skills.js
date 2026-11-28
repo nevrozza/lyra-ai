@@ -78,6 +78,7 @@ export function createSkills() {
       if (request !== revision) return;
       const { custom, builtin, roles } = groupSkills(skills);
       message.textContent = '';
+      message.dataset.error = 'false';
       get('custom-skills-empty').hidden = custom.length > 0;
       get('builtin-skills-empty').hidden = builtin.length > 0;
       const count = group => group.filter(skill => skill.enabled).length + ' из ' + group.length;
@@ -116,7 +117,10 @@ export function createSkills() {
       reconcileSettingsRows(roleList, roles.map(renderSkill));
       updateControls();
     } catch {
-      if (request === revision) message.textContent = 'Не удалось загрузить список скиллов.';
+      if (request === revision) {
+        message.dataset.error = 'true';
+        message.textContent = 'Не удалось загрузить список скиллов.';
+      }
     }
   }
 

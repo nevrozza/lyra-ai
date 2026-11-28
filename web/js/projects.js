@@ -872,7 +872,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
       ? [...history, pending] : history;
     const empty = get('project-empty');
     empty.hidden = entries.length > 0 || Boolean(chatRun(chatId));
-    empty.textContent = chatId ? 'В этом чате пока нет сообщений.'
+    empty.textContent = chatId ? 'Начни разговор — напиши сообщение ниже.'
       : projectId ? archiveView ? 'Выбери чат, чтобы прочитать переписку.' : 'Выбери чат или начни новый.'
         : archiveView ? 'Здесь появятся архивированные проекты и чаты.' : 'Создай проект, чтобы начать работу.';
     messages.hidden = !entries.length;

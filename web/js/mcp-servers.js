@@ -44,6 +44,7 @@ export function createMcpServers() {
   const list = get('mcp-servers-list');
   const status = get('mcp-servers-status');
   const add = get('mcp-servers-add');
+  const emptyAdd = get('mcp-servers-empty-add');
   const reload = get('mcp-servers-reload');
   const jsonButton = get('mcp-servers-json');
   const dialog = get('mcp-server-dialog');
@@ -80,6 +81,7 @@ export function createMcpServers() {
         const row = element('li', '');
         row.className = 'settings-row';
         row.dataset.setting = name;
+        row.dataset.enabled = String(server.enabled !== false);
         const info = element('div', '');
         info.className = 'settings-info';
         info.append(element('strong', name));
@@ -93,6 +95,7 @@ export function createMcpServers() {
           catch { address = 'HTTP'; }
         }
         const endpointText = element('code', address);
+        endpointText.title = address;
         info.append(endpointText);
         const actions = element('div', '');
         actions.className = 'settings-actions';
@@ -114,17 +117,21 @@ export function createMcpServers() {
         return row;
       }));
     }
-    get('mcp-servers-empty').hidden = !config || entries.length > 0;
-    get('mcp-servers-count').textContent = config
-      ? 'Включено: ' + entries.filter(([, server]) => server.enabled !== false).length + ' из ' + entries.length
-      : 'Нет данных';
+    const empty = config != null && entries.length === 0;
+    get('mcp-servers-empty').hidden = !empty;
+    add.hidden = empty;
+    get('mcp-servers-count').hidden = !entries.length;
+    get('mcp-servers-note').hidden = !entries.length;
+    const enabled = entries.filter(([, server]) => server.enabled !== false).length;
+    get('mcp-servers-count-text').textContent = enabled + ' из ' + entries.length + ' включено';
+    get('mcp-servers-enabled-dot').dataset.active = String(enabled > 0);
   }
 
   function canEdit() { return online && available && !busy && config != null; }
 
   function render() {
     renderList();
-    add.disabled = jsonButton.disabled = !canEdit();
+    add.disabled = emptyAdd.disabled = jsonButton.disabled = !canEdit();
     reload.disabled = !online || busy || !available;
     for (const button of list.querySelectorAll('button')) button.disabled = !canEdit();
     for (const node of [...form.elements, ...rawForm.elements]) node.disabled = !canEdit();
@@ -327,7 +334,7 @@ export function createMcpServers() {
     field('headers').replaceChildren();
     if (refreshPending) refresh();
   });
-  add.onclick = () => openServer();
+  add.onclick = emptyAdd.onclick = () => openServer();
   reload.onclick = () => { if (online && !busy && available) void request(); };
   jsonButton.onclick = () => {
     if (!canEdit()) return;
@@ -353,6 +360,7 @@ export function createMcpServers() {
     setOnline(value) {
       const connected = value && !online;
       online = value;
+      if (!online && !busy && !config && available && status.dataset.error !== 'true') report('Ожидаем подключение к Lyra…');
       render();
       if (connected) refresh();
     },
