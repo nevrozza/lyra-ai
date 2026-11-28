@@ -88,6 +88,7 @@ struct Replacement {
 #[serde(tag = "tool", rename_all = "snake_case")]
 enum Mutation {
     Mkdir { path: PathBuf },
+    CopySkillResource { path: PathBuf, skill: String, source: String },
     Write {
         path: PathBuf,
         content: String,
@@ -101,7 +102,7 @@ enum Mutation {
 impl Mutation {
     fn path(&self) -> &Path {
         match self {
-            Self::Write { path, .. } | Self::Edit { path, .. } | Self::Mkdir { path } => path,
+            Self::Write { path, .. } | Self::Edit { path, .. } | Self::Mkdir { path } | Self::CopySkillResource { path, .. } => path,
         }
     }
 }
@@ -254,9 +255,22 @@ fn target_path(roots: &[PathBuf], root: &Path, path: &Path, directory: bool) -> 
     Err(invalid("Absolute path is outside the registered project folders."))
 }
 
-pub(in crate::server) fn mutate(
+#[cfg(test)]
+fn mutate(
     root: &Path,
     roots: &[PathBuf],
+    versions: &mut FileVersions,
+    request: &str,
+    claim: impl FnOnce(&Path) -> io::Result<bool>,
+    release: impl FnOnce(&Path),
+) -> io::Result<()> {
+    mutate_with_skills(root, roots, &[], versions, request, claim, release)
+}
+
+pub(in crate::server) fn mutate_with_skills(
+    root: &Path,
+    roots: &[PathBuf],
+    skills: &[PathBuf],
     versions: &mut FileVersions,
     request: &str,
     claim: impl FnOnce(&Path) -> io::Result<bool>,
@@ -285,6 +299,12 @@ pub(in crate::server) fn mutate(
         return result;
     }
     let result = (|| {
+        if let Mutation::CopySkillResource { skill, source, .. } = &change {
+            let source = crate::server::skills::resource_path(skills, skill, source)?;
+            // Create only: never overwrite any existing project file, even a
+            // binary one that cannot be read through the text tool.
+            return copy_resource(&source, &target);
+        }
         let current = match read_bytes(&target) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -294,7 +314,7 @@ pub(in crate::server) fn mutate(
         versions.validate(&target, current.as_deref(), replacing)?;
         let full = replacing || versions.seen.get(&crate::run::path_key(&target)).is_some_and(|old| old.full);
         let content = match change {
-            Mutation::Mkdir { .. } => unreachable!("directory handled above"),
+            Mutation::Mkdir { .. } | Mutation::CopySkillResource { .. } => unreachable!("handled above"),
             Mutation::Write { content, .. } => content,
             Mutation::Edit { edits, .. } => edited_content(
                 std::str::from_utf8(current.as_deref().ok_or_else(|| invalid("File does not exist"))?)
@@ -313,6 +333,24 @@ pub(in crate::server) fn mutate(
         versions.conflicts.remove(&crate::run::path_key(&target));
     }
     result
+}
+
+fn copy_resource(source: &Path, target: &Path) -> io::Result<()> {
+    const RESOURCE_LIMIT: u64 = 64 * 1024 * 1024;
+    match fs::symlink_metadata(target) {
+        Ok(_) => return Err(invalid("Destination already exists; choose a new path")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut input = fs::File::open(source)?.take(RESOURCE_LIMIT + 1);
+    let parent = target.parent().expect("file parent");
+    fs::create_dir_all(parent)?;
+    let mut output = tempfile::NamedTempFile::new_in(parent)?;
+    if io::copy(&mut input, &mut output)? > RESOURCE_LIMIT {
+        return Err(invalid("Skill resource exceeds the 64 MiB copy limit"));
+    }
+    output.persist_noclobber(target).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn replace_file(target: &Path, content: &str, expected: Option<&[u8]>) -> io::Result<()> {
@@ -572,5 +610,41 @@ mod tests {
         v.read(root, r#"{"path":"alias"}"#).unwrap();
         change(root, &mut v, r#"{"tool":"write","path":"alias","content":"new"}"#).unwrap();
         assert_eq!(fs::read_to_string(root.join("original")).unwrap(), "old");
+    }
+}
+
+
+#[cfg(test)]
+mod skill_resource_tests {
+    use super::*;
+
+    #[test]
+    fn copies_selected_binary_asset_without_overwriting_or_escaping_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let package = temp.path().join("skills").join("canvas-design");
+        fs::create_dir_all(package.join("fonts")).unwrap();
+        fs::create_dir(&project).unwrap();
+        let manifest = package.join("SKILL.md");
+        fs::write(&manifest, "instructions").unwrap();
+        let bytes = [0, 1, 0, 0, 128, 255, 0];
+        fs::write(package.join("fonts/Test.ttf"), bytes).unwrap();
+        let selected = [manifest];
+        let mut versions = FileVersions::default();
+        let request = r#"{"tool":"copy_skill_resource","skill":"canvas-design","source":"fonts/Test.ttf","path":"assets/Test.ttf"}"#;
+        mutate_with_skills(&project, &[], &selected, &mut versions, request, |_| Ok(true), |_| {}).unwrap();
+        let target = project.join("assets/Test.ttf");
+        assert_eq!(fs::read(&target).unwrap(), bytes);
+        assert!(mutate_with_skills(&project, &[], &selected, &mut versions, request, |_| Ok(true), |_| {}).is_err());
+        assert_eq!(fs::read(&target).unwrap(), bytes);
+        for request in [
+            r#"{"tool":"copy_skill_resource","skill":"canvas-design","source":"../secret","path":"other.ttf"}"#,
+            r#"{"tool":"copy_skill_resource","skill":"canvas-design","source":"fonts/Test.ttf","path":"../escape.ttf"}"#,
+            r#"{"tool":"copy_skill_resource","skill":"not-selected","source":"fonts/Test.ttf","path":"other.ttf"}"#,
+        ] {
+            assert!(mutate_with_skills(&project, &[], &selected, &mut versions, request, |_| Ok(true), |_| {}).is_err());
+        }
+        assert!(!temp.path().join("escape.ttf").exists());
+        assert!(!project.join("other.ttf").exists());
     }
 }

@@ -448,13 +448,15 @@
   <dialog closedby="any" id="skill-import-dialog" class="project-dialog" aria-labelledby="skill-import-title">
     <form id="skill-import" class="project-form">
       <h3 id="skill-import-title">Добавить скилл</h3>
-      <p class="secondary">Выбери папку с SKILL.md и дополнительными файлами или отдельный файл SKILL.md.</p>
+      <p class="secondary">Для скилла с ресурсами выбери всю папку с SKILL.md. Lyra сохранит её структуру, включая шрифты, изображения и скрипты.</p>
       <input id="skill-folder" type="file" webkitdirectory hidden>
       <input id="skill-file" type="file" accept=".md" hidden>
       <div class="skill-import-controls">
-        <button id="pick-skill-folder" class="unload" type="button" disabled>Выбрать папку</button>
+        <button id="pick-skill-folder" class="unload" type="button" disabled>Папка на компьютере Lyra</button>
+        <button id="upload-skill-folder" class="unload" type="button" disabled>Загрузить папку</button>
         <button id="pick-skill-file" class="unload" type="button" disabled>Выбрать SKILL.md</button>
       </div>
+      <p class="secondary">Прямой импорт с диска подходит для больших пакетов. Загрузка через браузер — до 16 МБ. Отдельный SKILL.md не включает зависимости.</p>
       <p id="skill-selection" class="secondary" role="status">Файлы не выбраны.</p>
       <p id="skill-import-result" class="secondary project-feedback" role="status"></p>
       <div class="project-controls project-dialog-actions">

@@ -58,6 +58,10 @@ pub(super) struct Skill {
     role_template: bool,
     #[serde(default)]
     builtin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_files: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_bytes: Option<u64>,
 }
 
 fn enabled_by_default() -> bool { true }
@@ -232,8 +236,11 @@ impl Store {
         Self::install_target(&root, &skill)?;
         let staging = staging(&root)?;
         let package = staging.path().join("package");
-        copy_directory(&source, &package).map_err(source_error)?;
-        let copied_skill = manifest(&package).map_err(source_error)?;
+        let mut stats = PackageStats::default();
+        copy_directory(&source, &package, &mut stats, 0).map_err(source_error)?;
+        let mut copied_skill = manifest(&package).map_err(source_error)?;
+        copied_skill.package_files = Some(stats.files);
+        copied_skill.package_bytes = Some(stats.bytes);
         if copied_skill.name != skill.name {
             return Err((
                 StatusCode::CONFLICT,
@@ -252,6 +259,7 @@ impl Store {
         let staging = staging(&root)?;
         let package = staging.path().join("package");
         fs::create_dir(&package).map_err(storage_error)?;
+        let count = files.len();
         let mut remaining = UPLOAD_LIMIT;
         for file in files {
             let path = package.join(upload_path(&file.path).map_err(source_error)?);
@@ -268,7 +276,9 @@ impl Store {
             let mut target = fs::File::create_new(path).map_err(source_error)?;
             io::Write::write_all(&mut target, &data).map_err(storage_error)?;
         }
-        let skill = manifest(&package).map_err(source_error)?;
+        let mut skill = manifest(&package).map_err(source_error)?;
+        skill.package_files = Some(count);
+        skill.package_bytes = Some((UPLOAD_LIMIT - remaining) as u64);
         self.publish(&root, &package, skill)
     }
 
@@ -461,7 +471,7 @@ impl Store {
 // The selected manifest paths, not Pi's discovery rules, define this run's catalog.
 pub(super) fn prompt_catalog(paths: &[PathBuf]) -> io::Result<String> {
     use std::fmt::Write;
-    let mut text = String::from("\n\n# Available Lyra skills\nUse load_skill with the exact skill name when it matches the task or the user requests it. Only the names below are available to this run. The tool resolves the actual SKILL.md location; do not guess a path. Its response includes the package directory for any referenced resources. If a requested skill is absent, report that fact. Do not claim a skill was loaded unless the tool succeeded.\n");
+    let mut text = String::from("\n\n# Available Lyra skills\nUse load_skill with the exact skill name when it matches the task or the user requests it. Only the names below are available to this run. The tool resolves the actual SKILL.md location; do not guess a path. Its response includes the package directory for any referenced resources. Resolve references relative to that directory. For binary assets such as fonts, use copy_skill_resource in Work to create a file in the project without reading binary content into the model. Never use shell commands to bypass guarded writes. If a requested skill is absent, report that fact. Do not claim a skill was loaded unless the tool succeeded.\n");
     if paths.is_empty() {
         text.push_str("No additional skills selected.\n");
     }
@@ -484,6 +494,25 @@ pub(super) fn selected_manifest<'a>(paths: &'a [PathBuf], name: &str) -> Result<
         format!("SKILL_NOT_AVAILABLE: {name}. Available skills: {}",
             if available.is_empty() { "(none)" } else { &available })
     })
+}
+
+// Resolve only resources of a skill selected for this run. No links, absolute
+// paths, parent traversal or alternate data streams are accepted.
+pub(super) fn resource_path(paths: &[PathBuf], name: &str, relative: &str) -> io::Result<PathBuf> {
+    let manifest = selected_manifest(paths, name).map_err(invalid)?;
+    let root = manifest.parent().ok_or_else(|| invalid("Missing skill directory"))?;
+    let relative = upload_path(relative)?;
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        let metadata = fs::symlink_metadata(&path)?;
+        if is_link(&metadata) { return Err(invalid("Skill resource links are not allowed")); }
+    }
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(root.canonicalize()?) || !canonical.is_file() {
+        return Err(invalid("Skill resource must be a regular file within the selected package"));
+    }
+    Ok(canonical)
 }
 
 fn staging(root: &Path) -> Result<tempfile::TempDir, HttpError> {
@@ -558,6 +587,8 @@ fn manifest(directory: &Path) -> io::Result<Skill> {
     skill.enabled = true;
     skill.role_template = is_role_skill(&skill.name);
     skill.builtin = is_builtin(&skill.name);
+    skill.package_files = None;
+    skill.package_bytes = None;
     Ok(skill)
 }
 
@@ -602,7 +633,11 @@ fn valid_name(name: &str) -> bool {
         })
 }
 
-fn copy_directory(source: &Path, target: &Path) -> io::Result<()> {
+#[derive(Default)]
+struct PackageStats { files: usize, bytes: u64 }
+
+fn copy_directory(source: &Path, target: &Path, stats: &mut PackageStats, depth: usize) -> io::Result<()> {
+    if depth > 64 { return Err(invalid("Слишком глубокая структура скилла.")); }
     fs::create_dir(target)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -613,9 +648,11 @@ fn copy_directory(source: &Path, target: &Path) -> io::Result<()> {
             return Err(invalid(format!("Ссылка внутри скилла: {}", from.display())));
         }
         if metadata.is_dir() {
-            copy_directory(&from, &to)?;
+            copy_directory(&from, &to, stats, depth + 1)?;
         } else if metadata.is_file() {
-            fs::copy(from, to)?;
+            let bytes = fs::copy(from, to)?;
+            stats.files += 1;
+            stats.bytes = stats.bytes.checked_add(bytes).ok_or_else(|| invalid("Слишком большой пакет"))?;
         } else {
             return Err(invalid(format!(
                 "Неподдерживаемый тип файла: {}",
@@ -831,11 +868,15 @@ mod tests {
             "---\r\nname: project-check\r\ndescription: >-\r\n  Check the project\r\n  before release.\r\n---\r\n# Guide\r\n",
         ).unwrap();
         fs::write(source.join("references/checks.md"), "checks").unwrap();
+        fs::create_dir_all(source.join("assets/fonts")).unwrap();
+        let font = [0, 1, 0, 0, 128, 255, 0];
+        fs::write(source.join("assets/fonts/Test.ttf"), font).unwrap();
 
         let store = Store::new(temp.path().join("installed"));
         assert!(store.paths(None).unwrap().is_empty());
         let installed = store.install(&source).unwrap();
         assert_eq!(installed.description, "Check the project before release.");
+        assert_eq!(installed.package_files, Some(3));
         assert!(matches!(
             store.install(&source),
             Err((StatusCode::CONFLICT, _))
@@ -847,6 +888,11 @@ mod tests {
         assert!(paths[0].is_file());
         let checks = paths[0].parent().unwrap().join("references/checks.md");
         assert_eq!(fs::read_to_string(checks).unwrap(), "checks");
+        let resource = resource_path(&paths, "project-check", "assets/fonts/Test.ttf").unwrap();
+        assert_eq!(fs::read(resource).unwrap(), font);
+        assert!(resource_path(&paths, "project-check", "../outside").is_err());
+        assert!(resource_path(&paths, "project-check", "assets/fonts").is_err());
+        assert!(resource_path(&[], "project-check", "assets/fonts/Test.ttf").is_err());
         assert!(store.paths(Some(&[])).unwrap().is_empty());
         assert!(store.paths(Some(&["unknown".into()])).is_err());
     }

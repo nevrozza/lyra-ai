@@ -46,6 +46,11 @@ export default function (pi) {
                 path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1 })),
             }), "Read current file contents before editing. Use offset and limit for large files."],
             ["write", "Create a new file (missing parent directories are created automatically) or replace an existing file after a complete current read. Acquires a dynamic file lock.", Type.Object({ path, content: Type.String() }), "Create a new file or replace a fully read file."],
+            ["copy_skill_resource", "Copy a resource from an available Lyra skill package to a new file in the project. Preserves binary bytes, including fonts and images. Never overwrites existing files; source is relative to the skill package root.", Type.Object({
+                skill: Type.String({ description: "Exact name of an available skill" }),
+                source: Type.String({ description: "Relative resource path within the package, e.g. assets/fonts/Example.ttf" }),
+                path,
+            }), "Copy a skill asset to a new project file without reading its binary contents."],
             ["mkdir", "Create a directory and missing parent directories within the registered workspace. Existing directories are accepted.", Type.Object({ path }), "Create an empty or nested directory; write already creates parents for files."],
             ["edit", "Replace exact, unique, non-overlapping text after reading the current file. Acquires a dynamic file lock.", Type.Object({
                 path,
@@ -169,7 +174,7 @@ export default function (pi) {
         }
     }
     const tools = ["read", "grep", "find", "ls", "run_command", "load_skill", "finish_task"];
-    const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir"] : [])];
+    const expected = textOnly ? [] : review ? [...tools, ...reviewTools] : [...tools, "write", "edit", ...(guardedWrite ? ["mkdir", "copy_skill_resource"] : [])];
     async function verifyTools() {
         await pi.setActiveTools([...expected, ...pi.getActiveTools().filter(isMcpTool)]);
         const active = pi.getActiveTools();
