@@ -37,6 +37,11 @@ export function toolPreview(tool) {
     const code = partialString(raw, 'content');
     return { target, text: code ?? '', label: 'Содержимое файла', ready: code != null };
   }
+  if (tool.name === 'edit') {
+    const before = partialString(raw, 'oldText');
+    const after = partialString(raw, 'newText');
+    return { target, text: after ?? before ?? '', label: 'Первая замена · ' + (after != null ? 'Стало' : 'Было') };
+  }
   return { target, text: raw, label: 'Аргументы' };
 }
 
@@ -207,7 +212,11 @@ export function renderSavedTool(body, tool, technicalDetail) {
     count.className = 'tool-inline-status';
     body.append(count);
     view.edit.replacements.forEach((replacement, index) => appendReplacement(body, replacement, index));
-    if (view.edit.total > view.edit.replacements.length) body.append(element('p', 'Остальные замены сохранены в журнале.'));
+    if (view.edit.total > view.edit.replacements.length) {
+      const more = element('p', 'Остальные замены сохранены в журнале.');
+      more.className = 'tool-inline-status';
+      body.append(more);
+    }
   } else if (view.command) {
     appendOutput(body, 'Команда', view.command);
   }
@@ -358,7 +367,8 @@ export function createLiveTools(container, changed) {
       const rate = elapsed >= 250 && tool.argument_bytes > 0 ? size(Math.round(tool.argument_bytes * 1000 / elapsed)) + '/с' : '';
       setText(speed, tool.phase === 'generating' ? rate : '');
       const write = tool.name === 'write';
-      const show = (write || Boolean(view.text)) && tool.phase !== 'executing';
+      const edit = tool.name === 'edit';
+      const show = (write || edit || Boolean(view.text)) && tool.phase !== 'executing';
       body.hidden = !show;
       chevron.hidden = !show;
       fileCode.node.hidden = !write || !show;
@@ -367,7 +377,8 @@ export function createLiveTools(container, changed) {
       if (write && show) {
         fileCode.update({ ...view, truncated: tool.preview_truncated }, row.open);
       } else if (show) {
-        setText(label, view.label);
+        setText(label, edit && !view.text ? 'Ожидаем содержимое замены…' : view.label);
+        code.hidden = edit && !view.text;
         const nearEnd = code.scrollHeight - code.scrollTop - code.clientHeight < 24;
         if (setText(code, view.text) && row.open && nearEnd) code.scrollTop = code.scrollHeight;
       } else {

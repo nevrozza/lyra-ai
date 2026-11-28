@@ -67,3 +67,10 @@ test('unknown tools retain fields and clipped result, malformed arguments fall b
   assert.equal(view.clipped,true);
   assert.equal(context.savedToolView({name:'mcp__example',arguments:'{"broken"'}).invalid,true);
 });
+
+test('live edit shows the replacement instead of JSON', () => {
+  const preview = context.toolPreview({name:'edit',preview:'{"path":"a.js","edits":[{"oldText":"old","newText":"new'});
+  assert.equal(preview.target,'a.js');
+  assert.equal(preview.text,'new');
+  assert.equal(preview.label,'Первая замена · Стало');
+});
