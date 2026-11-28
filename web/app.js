@@ -90,6 +90,7 @@ function connect() {
     if (!session.closed) {
       connectionState('online', 'Подключено');
       commands.refresh();
+      sessions.refresh();
       skills.refresh();
       projects.refresh();
     }
@@ -140,6 +141,7 @@ document.addEventListener('visibilitychange', () => {
 setInterval(() => {
   if (session.closed || document.hidden) return;
   models.tick();
+  if (session.online) sessions.tick();
 }, 1_000);
 
 initLayout();
