@@ -1120,6 +1120,8 @@ struct ToolTrace {
     target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     write_preview: Option<WritePreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edit_preview: Option<EditPreview>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     finished_at: Option<u64>,
@@ -1140,6 +1142,42 @@ fn write_preview(name: &str, arguments: &Value) -> Option<WritePreview> {
     let text = arguments["content"].as_str()?;
     let end = text.floor_char_boundary(WRITE_PREVIEW_LIMIT);
     Some(WritePreview { text: text[..end].to_owned(), truncated: end < text.len() })
+}
+
+#[derive(Serialize)]
+struct EditReplacementPreview {
+    before: String,
+    after: String,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct EditPreview {
+    replacements: Vec<EditReplacementPreview>,
+    total: usize,
+}
+
+fn edit_preview(name: &str, arguments: &Value) -> Option<EditPreview> {
+    if name != "edit" { return None; }
+    let edits = arguments["edits"].as_array()?;
+    let mut replacements = Vec::new();
+    // Keep a bounded preview of both sides of each replacement. Full payloads
+    // remain in the saved session log, not in the dashboard response.
+    let mut budget = WRITE_PREVIEW_LIMIT;
+    for edit in edits.iter().take(8) {
+        let before = edit["oldText"].as_str()?;
+        let after = edit["newText"].as_str()?;
+        let a = before.floor_char_boundary((budget / 2).min(4096));
+        let b = after.floor_char_boundary((budget - a).min(4096));
+        replacements.push(EditReplacementPreview {
+            before: before[..a].to_owned(),
+            after: after[..b].to_owned(),
+            truncated: a < before.len() || b < after.len(),
+        });
+        budget -= a + b;
+        if budget == 0 { break; }
+    }
+    Some(EditPreview { replacements, total: edits.len() })
 }
 
 fn tool_preview(mut text: String) -> String {
@@ -1230,6 +1268,7 @@ fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestam
                 } else { compact_tool_arguments(&part["arguments"]) },
                 target: if dashboard { tool_target(name, &part["arguments"]) } else { None },
                 write_preview: if dashboard { write_preview(name, &part["arguments"]) } else { None },
+                edit_preview: if dashboard { edit_preview(name, &part["arguments"]) } else { None },
                 status: "pending",
                 finished_at: None,
                 result: None,
@@ -1766,9 +1805,23 @@ mod tests {
         assert!(tools[1].arguments.contains("index.html"));
         assert!(!tools[1].arguments.contains("large file body"));
         assert!(tools[1].write_preview.is_none());
+        assert!(tools[2].edit_preview.is_none());
         assert_eq!(tools[2].status, "error");
         assert_eq!(tools[2].result.as_deref(), Some("FILE_LOCKED"));
         assert_eq!(tools[3].status, "pending");
+    }
+
+    #[test]
+    fn dashboard_edit_preview_is_bounded_and_preserves_both_sides() {
+        let edits = (0..12).map(|_| serde_json::json!({"oldText":"я".repeat(5000),"newText":"new\nline"})).collect::<Vec<_>>();
+        let args = serde_json::json!({"path":"a.rs","edits":edits});
+        let preview = edit_preview("edit", &args).unwrap();
+        assert_eq!(preview.total, 12);
+        assert!(preview.replacements.len() <= 8);
+        assert!(preview.replacements[0].truncated);
+        assert_eq!(preview.replacements[0].after, "new\nline");
+        assert!(preview.replacements.iter().map(|edit| edit.before.len() + edit.after.len()).sum::<usize>() <= WRITE_PREVIEW_LIMIT);
+        assert!(edit_preview("read", &args).is_none());
     }
 
     #[test]

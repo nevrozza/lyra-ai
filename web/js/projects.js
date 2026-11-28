@@ -1,7 +1,7 @@
 import { element, get, createChatScroll } from './ui.js';
 import { createThinkingControl } from './chat-thinking.js';
 import { renderMarkdown } from './markdown.js';
-import { createLiveTools, savedWritePreview, createToolCodeBlock } from './tool-preview.js';
+import { createLiveTools, renderSavedTool } from './tool-preview.js';
 
 const taskStatuses = {
   queued: 'В очереди', running: 'В работе', completed: 'Готово',
@@ -827,17 +827,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
       const body = element('div', '');
       body.className = 'project-tool-body';
       appendMessageTime(body, message);
-      const write = savedWritePreview(tool);
-      if (write) {
-        const code = createToolCodeBlock();
-        code.update(write);
-        body.append(code.node);
-      } else {
-        body.append(element('h4', 'Аргументы'), element('pre', tool.arguments || '{}'));
-      }
-      if (tool.result != null) {
-        body.append(element('h4', 'Результат'), element('pre', tool.result || '(пусто)'));
-      }
+      renderSavedTool(body, tool, (summary) => detail('technical:' + tool.id, 'tool-technical', summary));
       node.append(body);
     };
     node.addEventListener('toggle', populate);
