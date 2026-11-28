@@ -155,6 +155,14 @@ struct DeleteArchived {
     project_id: u64,
     project_session_id: Option<u64>,
     group_id: Option<u64>,
+    #[serde(default)]
+    archived_chats_only: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreArchivedChats {
+    project_id: u64,
 }
 
 #[derive(Serialize)]
@@ -234,6 +242,7 @@ pub(super) fn routes() -> Router<Arc<App>> {
         .route("/projects/sessions/mode", post(update_session_mode))
         .route("/projects/archive", post(archive))
         .route("/projects/archive/delete", post(delete_archived))
+        .route("/projects/archive/restore-chats", post(restore_archived_chats))
         .route("/projects/groups/settings", post(update_group))
         .route("/projects/{project_id}/groups/{group_id}/context", get(read_group_context))
         .route("/projects/groups/context", post(update_group_context))
@@ -312,6 +321,14 @@ async fn update_group(State(app): State<Arc<App>>, Json(input): Json<GroupSettin
 
 async fn archive(State(app): State<Arc<App>>, Json(input): Json<Archive>) -> Result<Json<Project>> {
     work(app, |app| set_archive(app, input)).await.map(Json)
+}
+
+async fn restore_archived_chats(State(app): State<Arc<App>>, Json(input): Json<RestoreArchivedChats>) -> Result<Json<Project>> {
+    work(app, move |app| {
+        let project = app.projects.restore_archived_chats(input.project_id)?;
+        app.task.send_modify(crate::run::Snapshot::projects_changed);
+        Ok(Json(project.summary()))
+    }).await
 }
 
 async fn delete_archived(State(app): State<Arc<App>>, Json(input): Json<DeleteArchived>) -> Result<Json<DeletedArchive>> {
@@ -670,6 +687,18 @@ impl Store {
         })
     }
 
+    fn restore_archived_chats(&self, project_id: u64) -> Result<Project> {
+        self.change(|catalog| {
+            let project = catalog.projects.iter_mut().find(|project| project.id == project_id)
+                .ok_or_else(|| missing("Project"))?;
+            project.ensure_active()?;
+            for session in &mut project.sessions {
+                session.archived = false;
+            }
+            Ok(project.clone())
+        })
+    }
+
     // Only Lyra metadata and session logs are deleted. Never remove registered
     // folders, internal workspaces, artifacts, or paths supplied by a client.
     fn delete_archived(&self, input: DeleteArchived, active: impl Fn(u64) -> bool) -> Result<DeletedArchive> {
@@ -680,15 +709,23 @@ impl Store {
             let index = catalog.projects.iter().position(|project| project.id == input.project_id)
                 .ok_or_else(|| missing("Project"))?;
             let project = &catalog.projects[index];
-            let whole_project = input.project_session_id.is_none() && input.group_id.is_none();
+            if input.archived_chats_only {
+                if input.project_session_id.is_some() || input.group_id.is_some() {
+                    return Err(invalid("Массовое удаление архивных чатов не принимает чат или группу."));
+                }
+                project.ensure_active()?;
+            }
+            let whole_project = !input.archived_chats_only && input.project_session_id.is_none() && input.group_id.is_none();
             if whole_project && !project.archived {
                 return Err(invalid("Сначала переместите проект в архив."));
             }
             let mut ids: HashSet<u64> = project.sessions.iter().filter(|session| {
-                input.project_session_id.is_none_or(|id| session.id == id)
+                (!input.archived_chats_only || session.archived)
+                    && input.project_session_id.is_none_or(|id| session.id == id)
                     && input.group_id.is_none_or(|id| session.group.as_ref().is_some_and(|group| group.id == id))
             }).map(|session| session.id).collect();
             if !whole_project && ids.is_empty() {
+                if input.archived_chats_only { return Ok(Vec::new()); }
                 return Err(missing("Chat or group"));
             }
             // Queue owners and their execution chats are one logical record.
@@ -1418,7 +1455,7 @@ mod tests {
         let history = store.session_file(chat.id);
         fs::create_dir_all(history.parent().unwrap()).unwrap();
         fs::write(&history, "history").unwrap();
-        let target = || DeleteArchived { project_id: project.id, project_session_id: Some(chat.id), group_id: None };
+        let target = || DeleteArchived { project_id: project.id, project_session_id: Some(chat.id), group_id: None, archived_chats_only: false };
         assert!(store.delete_archived(target(), |_| false).is_err());
         store.set_archive(Archive { project_id: project.id, project_session_id: Some(chat.id), group_id: None, archived: true }).unwrap();
         assert!(store.delete_archived(target(), |_| true).is_err());
@@ -1430,12 +1467,50 @@ mod tests {
         assert!(file.exists());
         let remaining = store.list().unwrap();
         assert_eq!(remaining.projects[0].sessions[0].id, other.id);
-        let whole = || DeleteArchived { project_id: project.id, project_session_id: None, group_id: None };
+        let whole = || DeleteArchived { project_id: project.id, project_session_id: None, group_id: None, archived_chats_only: false };
         assert!(store.delete_archived(whole(), |_| false).is_err());
         store.set_archive(Archive { project_id: project.id, project_session_id: None, group_id: None, archived: true }).unwrap();
         assert_eq!(store.delete_archived(whole(), |_| false).unwrap().deleted_session_ids, vec![other.id]);
         assert!(store.list().unwrap().projects.is_empty());
         assert!(file.exists());
+    }
+
+    #[test]
+    fn bulk_archive_actions_preserve_working_project_and_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(serde_json::from_str(r#"{"name":"Project"}"#).unwrap()).unwrap();
+        let create = |name: &str| store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": name,
+        })).unwrap()).unwrap();
+        let working = create("Working");
+        let first = create("First");
+        let second = create("Second");
+        let archive_chat = |id| store.set_archive(Archive {
+            project_id: project.id, project_session_id: Some(id), group_id: None, archived: true,
+        }).unwrap();
+        archive_chat(first.id);
+        archive_chat(second.id);
+        let restored = store.restore_archived_chats(project.id).unwrap();
+        assert!(!restored.archived);
+        assert!(restored.sessions.iter().all(|chat| !chat.archived));
+        archive_chat(first.id);
+        archive_chat(second.id);
+        let target = || DeleteArchived {
+            project_id: project.id, project_session_id: None, group_id: None, archived_chats_only: true,
+        };
+        assert!(store.delete_archived(target(), |id| id == first.id).is_err());
+        let deleted = store.delete_archived(target(), |id| id == working.id).unwrap();
+        assert_eq!(deleted.deleted_session_ids, vec![first.id, second.id]);
+        let catalog = store.list().unwrap();
+        assert_eq!(catalog.projects.len(), 1);
+        assert!(!catalog.projects[0].archived);
+        assert_eq!(catalog.projects[0].sessions.len(), 1);
+        assert_eq!(catalog.projects[0].sessions[0].id, working.id);
+        assert!(store.delete_archived(target(), |_| false).unwrap().deleted_session_ids.is_empty());
+        store.set_archive(Archive { project_id: project.id, project_session_id: None, group_id: None, archived: true }).unwrap();
+        assert!(store.delete_archived(target(), |_| false).is_err());
+        assert!(store.restore_archived_chats(project.id).is_err());
     }
 
     #[test]

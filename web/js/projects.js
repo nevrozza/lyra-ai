@@ -521,7 +521,9 @@ export function createProjects({ onSelection = () => {} } = {}) {
     if (wasOpen || !available()) return;
     entryMenu.dataset.anchor = anchor.dataset.projectEntry;
     entryMenu.replaceChildren();
-    const members = group ? groupMembers(project, group.id) : chat ? [chat] : project.sessions;
+    const archivedChatsOnly = archiveView && !project.archived && !chat && !group;
+    const members = archivedChatsOnly ? project.sessions.filter(member => member.archived)
+      : group ? groupMembers(project, group.id) : chat ? [chat] : project.sessions;
     const busy = members.some(member => {
       const owner = member.job ? member : project.sessions.find(candidate => candidate.job?.chat_session_id === member.id);
       return pendingTask(owner) || sending.has(member.id) ||
@@ -536,17 +538,22 @@ export function createProjects({ onSelection = () => {} } = {}) {
       button.onclick = () => { closeEntryMenu(); handler(); };
       entryMenu.append(button);
     };
-    if (group) add('Общий контекст', () => openGroupContext(project, group));
-    if (!project.archived && !archived) {
-      if (group) add('Настройки группы', () => openGroupForm(project, group));
-      else if (chat) add('Настройки чата', () => openChatForm(chat, project), busy);
-      else add('Настройки проекта', () => openProjectForm(project));
-    }
-    if (!project.archived || (!chat && !group)) {
-      add(archived ? 'Восстановить' : 'Архивировать', () => archive(project, chat, group, !archived), !archived && busy);
-    }
-    if (project.archived || archived) {
-      add('Удалить навсегда', () => deleteArchived(project, chat, group), busy, true);
+    if (archivedChatsOnly) {
+      add('Восстановить все чаты', () => restoreArchivedChats(project));
+      add('Удалить навсегда все чаты из архива', () => deleteArchived(project, undefined, undefined, true), busy, true);
+    } else {
+      if (group) add('Общий контекст', () => openGroupContext(project, group));
+      if (!project.archived && !archived) {
+        if (group) add('Настройки группы', () => openGroupForm(project, group));
+        else if (chat) add('Настройки чата', () => openChatForm(chat, project), busy);
+        else add('Настройки проекта', () => openProjectForm(project));
+      }
+      if (!project.archived || (!chat && !group)) {
+        add(archived ? 'Восстановить' : 'Архивировать', () => archive(project, chat, group, !archived), !archived && busy);
+      }
+      if (project.archived || archived) {
+        add('Удалить навсегда', () => deleteArchived(project, chat, group), busy, true);
+      }
     }
     if (!entryMenu.childElementCount) add('Сначала восстановите проект', () => {}, true);
     const rect = anchor.getBoundingClientRect();
@@ -1077,16 +1084,27 @@ export function createProjects({ onSelection = () => {} } = {}) {
     });
   }
 
-  function deleteArchived(project, chat, group) {
+  function restoreArchivedChats(project) {
     closeEntryMenu();
-    const target = chat ? `чат «${chat.name}»` : group ? `группу «${group.name}»` : `проект «${project.name}»`;
-    const scope = !chat && !group ? 'Все его чаты и история будут удалены.' :
-      'История и связанные архивные чаты задач будут удалены.';
+    save('/projects/archive/restore-chats', { project_id: project.id }, async () => {
+      await refresh();
+      report('Все архивные чаты проекта восстановлены.');
+    });
+  }
+
+  function deleteArchived(project, chat, group, archivedChatsOnly = false) {
+    closeEntryMenu();
+    const target = archivedChatsOnly ? `все архивные чаты проекта «${project.name}»`
+      : chat ? `чат «${chat.name}»` : group ? `группу «${group.name}»` : `проект «${project.name}»`;
+    const scope = archivedChatsOnly ? 'Рабочие чаты и сам проект останутся.'
+      : !chat && !group ? 'Все его чаты и история будут удалены.'
+      : 'История и связанные архивные чаты задач будут удалены.';
     if (!window.confirm(`Удалить навсегда ${target}?\n\n${scope} Рабочие файлы и папки останутся на диске. Отменить действие нельзя.`)) return;
     save('/projects/archive/delete', {
       project_id: project.id,
       project_session_id: chat?.id,
       group_id: group?.id,
+      archived_chats_only: archivedChatsOnly,
     }, async result => {
       for (const id of result.deleted_session_ids) {
         drafts.delete(id);
