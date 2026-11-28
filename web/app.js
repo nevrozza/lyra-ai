@@ -57,6 +57,7 @@ function receiveRun(next) {
   const commandsUpdated = session.run?.commands_revision !== next.commands_revision;
   const projectsUpdated = session.run?.projects_revision !== next.projects_revision;
   const skillsUpdated = session.run?.skills_revision !== next.skills_revision;
+  const mcpServersUpdated = session.run?.mcp_servers_revision !== next.mcp_servers_revision;
   const benchmarkUpdated = session.run?.benchmark_revision !== next.benchmark_revision;
   const metricsUpdated = session.run?.metrics_revision !== next.metrics_revision;
   const delegationChanged = session.run?.delegated_model !== next.delegated_model;
@@ -72,6 +73,7 @@ function receiveRun(next) {
   if (commandsUpdated) commands.refresh();
   if (projectsUpdated) projects.refresh();
   if (skillsUpdated) skills.refreshCatalog();
+  if (mcpServersUpdated) mcpServers.refresh();
   models.render(session.metrics?.models, benchmarkUpdated);
 }
 

@@ -54,12 +54,12 @@ fn spawn_stdio(server: &Server) -> Result<Child, String> {
     child.map_err(|_| "Could not start MCP server process; check command and working directory".into())
 }
 
-struct Stdio {
+struct StdioConnection {
     input: tokio::process::ChildStdin,
     output: BufReader<tokio::process::ChildStdout>,
 }
 
-impl Stdio {
+impl StdioConnection {
     async fn send(&mut self, value: Value) -> Result<(), String> {
         self.input.write_all(format!("{value}\n").as_bytes()).await.map_err(|_| "MCP server input closed".into())
     }
@@ -94,7 +94,7 @@ impl Stdio {
 async fn stdio(server: &Server) -> Result<Vec<String>, String> {
     let mut child = spawn_stdio(server)?;
     let _tree = Tree::attach(&child).map_err(|_| "Could not supervise MCP server process")?;
-    let mut connection = Stdio {
+    let mut connection = StdioConnection {
         input: child.stdin.take().expect("piped stdin"),
         output: BufReader::new(child.stdout.take().expect("piped stdout")),
     };

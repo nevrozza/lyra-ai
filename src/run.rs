@@ -44,6 +44,7 @@ pub struct Snapshot {
     commands_revision: u64,
     projects_revision: u64,
     skills_revision: u64,
+    mcp_servers_revision: u64,
 }
 
 #[derive(Serialize)]
@@ -133,6 +134,7 @@ impl Snapshot {
             commands_revision: 0,
             projects_revision: 0,
             skills_revision: 0,
+            mcp_servers_revision: 0,
         }
     }
 
@@ -530,6 +532,10 @@ impl Snapshot {
 
     pub fn commands_changed(&mut self) {
         self.commands_revision += 1;
+    }
+
+    pub fn mcp_servers_changed(&mut self) {
+        self.mcp_servers_revision += 1;
     }
 
     pub fn skills_changed(&mut self) {
