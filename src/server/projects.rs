@@ -1413,6 +1413,14 @@ impl Session {
     }
 }
 
+pub(super) async fn desktop_path() -> Result<PathBuf> {
+    let path = tokio::time::timeout(std::time::Duration::from_secs(15), folder_picker::desktop())
+        .await
+        .map_err(|_| invalid("Desktop lookup timed out on the Lyra host"))?
+        .map_err(|error| invalid(format!("Could not resolve the Desktop on the Lyra host: {error}")))?;
+    canonical_folder(&path)
+}
+
 fn canonical_folder(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         return Err(invalid("Project folders must be absolute paths"));
@@ -1610,6 +1618,34 @@ mod tests {
             "id": project.id, "name": "Renamed",
         })).unwrap()).unwrap();
         assert_eq!(renamed.folders, [created]);
+    }
+
+    #[test]
+    fn bootstrap_directory_under_registered_parent_then_narrow_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = dir.path().join("Desktop");
+        fs::create_dir(&desktop).unwrap();
+        let desktop = canonical_folder(&desktop).unwrap();
+        let store = Store::new(dir.path().join("data"));
+        let project = store.save(SaveProject {
+            id: None, name: "Test19".into(), folders: Some(vec![desktop.clone()]),
+        }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Prepare folder", "mode": "work",
+        })).unwrap()).unwrap();
+        let task = store.task(project.id, Some(chat.id), None).unwrap();
+        let mut versions = write_scope::FileVersions::default();
+        write_scope::mutate(&task.workspace, &task.folders, &mut versions,
+            r#"{"tool":"mkdir","path":"Test19"}"#, |_| Ok(true), |_| {}).unwrap();
+        let child = canonical_folder(&desktop.join("Test19")).unwrap();
+        store.save(SaveProject { id: Some(project.id), name: project.name, folders: Some(vec![child.clone()]) }).unwrap();
+        let narrowed = store.task(project.id, Some(chat.id), None).unwrap();
+        assert_eq!(narrowed.workspace, child);
+        assert_eq!(narrowed.folders, [child]);
+        assert!(write_scope::mutate(&narrowed.workspace, &narrowed.folders, &mut versions,
+            &serde_json::json!({"tool":"mkdir","path":desktop.join("Unrelated")}).to_string(),
+            |_| Ok(true), |_| {}).is_err());
+        assert!(!desktop.join("Unrelated").exists());
     }
 
     #[test]

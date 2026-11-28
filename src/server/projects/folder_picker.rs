@@ -102,6 +102,59 @@ async fn choose() -> io::Result<Option<PathBuf>> {
     selected(output, true)
 }
 
+// Resolve the host account's actual Desktop without a model, interactive
+// dialog, user-supplied command, or assumptions about the directory name.
+#[cfg(windows)]
+pub(super) async fn desktop() -> io::Result<PathBuf> {
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let system = std::env::var_os("SystemRoot")
+        .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?;
+    let powershell = PathBuf::from(system).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let output = Command::new(powershell)
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true)
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            r#"$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Write([Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory))"#])
+        .output().await?;
+    desktop_output(output)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) async fn desktop() -> io::Result<PathBuf> {
+    let output = Command::new("/usr/bin/osascript")
+        .kill_on_drop(true)
+        .args(["-e", "POSIX path of (path to desktop folder)"])
+        .output().await?;
+    desktop_output(output)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(super) async fn desktop() -> io::Result<PathBuf> {
+    let output = Command::new("xdg-user-dir")
+        .kill_on_drop(true)
+        .arg("DESKTOP")
+        .output().await?;
+    let path = desktop_output(output)?;
+    // XDG uses HOME when Desktop is disabled. Do not silently authorize
+    // the entire home directory as a Desktop workspace.
+    if let Some(home) = std::env::var_os("HOME")
+        && path.canonicalize().ok().zip(PathBuf::from(home).canonicalize().ok())
+            .is_some_and(|(path, home)| path == home)
+    {
+        return Err(io::Error::other("Desktop is not configured; provide the existing parent directory explicitly"));
+    }
+    Ok(path)
+}
+
+fn desktop_output(output: Output) -> io::Result<PathBuf> {
+    let path = selected(output, false)?
+        .ok_or_else(|| io::Error::other("Desktop is not configured"))?;
+    if !path.is_absolute() {
+        return Err(io::Error::other("Desktop lookup did not return an absolute path"));
+    }
+    Ok(path)
+}
+
 fn selected(output: Output, cancel_exit: bool) -> io::Result<Option<PathBuf>> {
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
