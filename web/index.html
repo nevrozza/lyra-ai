@@ -69,7 +69,8 @@
               <button id="new-project-task" class="unload" type="button" hidden>＋ Задача</button>
             </div>
           </header>
-          <div class="project-reading">
+          <div class="project-reading-wrap">
+          <div class="project-reading" id="project-reading">
             <p id="project-empty" class="project-empty secondary">Выбери проект или создай новый.</p>
             <ol id="project-messages" aria-label="Сообщения чата" hidden></ol>
             <details id="project-live-thinking" class="project-thinking" hidden>
@@ -95,6 +96,10 @@
               </p>
               <button id="stop-project-prompt" class="unload" type="button">Остановить</button>
             </div>
+          </div>
+            <button id="project-scroll-bottom" class="unload project-scroll-bottom" type="button" aria-label="К последним сообщениям" title="К последним сообщениям" hidden>
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-7-7 7 7 7-7"/></svg>
+            </button>
           </div>
           <p id="project-message" class="secondary project-feedback" role="status"></p>
           <p id="project-context-notice" class="project-feedback project-context-notice" role="status" hidden></p>

@@ -139,7 +139,10 @@ h2 { font-size: .96rem; font-weight: 650; }
 .project-action-menu button:hover:not(:disabled) { background: #314438; }
 .project-action-menu button.project-delete-action:not(:disabled) { color: #f0ac9c; }
 .project-action-menu button.project-delete-action:hover:not(:disabled) { background: #40302d; }
+.project-reading-wrap { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .project-reading { flex: 1; display: grid; align-items: start; max-height: 520px; min-height: 185px; overflow: auto; padding: 18px 20px; }
+.project-reading[data-follow="true"] { overflow-anchor: none; }
+.project-scroll-bottom { position: absolute; z-index: 1; bottom: 10px; right: 24px; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border-radius: 50%; box-shadow: 0 3px 12px #0006; }
 .project-empty { align-self: center; justify-self: center; text-align: center; }
 .project-reading:has(.project-progress:not([hidden])) { align-content: start; gap: 14px; }
 .project-progress { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: min(100%, 740px); margin: 0 auto; }

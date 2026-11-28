@@ -1,4 +1,4 @@
-import { element, get } from './ui.js';
+import { element, get, createChatScroll } from './ui.js';
 import { createThinkingControl } from './chat-thinking.js';
 import { renderMarkdown } from './markdown.js';
 
@@ -67,6 +67,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
   const prompt = get('project-prompt');
   const composer = get('project-prompt-form');
   const messages = get('project-messages');
+  const chatScroll = createChatScroll(get('project-reading'), get('project-scroll-bottom'));
   const liveThinking = get('project-live-thinking');
   const liveThinkingText = liveThinking.querySelector('p');
   const entryMenu = get('project-entry-menu');
@@ -874,8 +875,6 @@ export function createProjects({ onSelection = () => {} } = {}) {
     empty.textContent = chatId ? 'В этом чате пока нет сообщений.'
       : projectId ? archiveView ? 'Выбери чат, чтобы прочитать переписку.' : 'Выбери чат или начни новый.'
         : archiveView ? 'Здесь появятся архивированные проекты и чаты.' : 'Создай проект, чтобы начать работу.';
-    const reading = messages.parentElement;
-    const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
     messages.hidden = !entries.length;
     // Snapshot open states before replacing history. Keep the outer and inner
     // disclosures independent even while tool results stream in.
@@ -969,7 +968,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
       void messages.offsetWidth;
       messages.classList.add('project-chat-enter');
     }
-    if (atEnd || scrollToEnd) reading.scrollTop = reading.scrollHeight;
+    if (scrollToEnd || switched || enteringChat) chatScroll.goToEnd();
+    else chatScroll.changed();
   }
 
   function renderLiveThinking(delegation) {
@@ -984,10 +984,8 @@ export function createProjects({ onSelection = () => {} } = {}) {
     }
     liveThinking.hidden = !text.trim();
     if (liveThinkingText.textContent === text) return;
-    const reading = messages.parentElement;
-    const atEnd = reading.scrollHeight - reading.scrollTop - reading.clientHeight < 24;
     liveThinkingText.textContent = text;
-    if (atEnd) reading.scrollTop = reading.scrollHeight;
+    chatScroll.changed();
   }
 
   async function refreshHistory() {
