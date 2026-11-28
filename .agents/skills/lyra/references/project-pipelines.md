@@ -151,9 +151,9 @@ Lyra accepts steps with dependencies inside a named chat group. Use `group_name`
 | `storage-integrate` | Wire the adapter and exercise the migration | `storage-schema`, `storage-adapter` | `follow_up.review` for Storage |
 | `ui-view` | Build the view against the agreed interface | — | Focused check |
 | `ui-bind` | Connect the view to verified storage and add integration coverage | `ui-view`, `storage-integrate` | `follow_up.review` for UI |
-| `whole-task-review` | Check storage and UI together against the original request | `storage-integrate`, `ui-bind` | Standalone `role: review` |
+| `whole-task-integrate` | Exercise the integrated storage/UI flow, add the necessary cross-component regression check and verify the original request | `storage-integrate`, `ui-bind` | `follow_up.review` for the assembled task |
 
-With a stable interface, `ui-view` can start with the storage leaves. `ui-bind` waits through the Storage review and fixes. Use guarded file tools and obey the shell rules for every executable step.
+Submit this entire settled graph together. With a stable interface, `ui-view` can start with the storage leaves. `ui-bind` waits through the Storage review and fixes. The final integration waits through both group cycles, then runs its own automatic assembled review. If no real integration/check work is necessary, use an explicit standalone final review rather than inventing a ceremonial implementation task. Use guarded file tools and obey the shell rules for every executable step.
 
 A batch accepts up to 16 steps and each step accepts up to 16 direct dependencies. For a larger plan, submit batches in dependency order and keep the returned task IDs. Use those IDs in `after` across batches. Use group integration results to join multiple branches. If a group fails, follow its blocked branches and recover the affected work while independent groups continue.
 
