@@ -106,7 +106,7 @@ impl WorkProgress {
     fn record_guarded_success(&mut self, request: &str) {
         let Ok(request) = serde_json::from_str::<Value>(request) else { return };
         let (Some(tool), Some(path)) = (request["tool"].as_str(), request["path"].as_str()) else { return };
-        if !matches!(tool, "mkdir" | "write" | "edit") { return; }
+        if !matches!(tool, "mkdir" | "write" | "edit" | "copy_skill_resource") { return; }
         self.confirmed_mutation_count = self.confirmed_mutation_count.saturating_add(1);
         if self.recent_mutations.len() == RECENT_MUTATION_LIMIT {
             self.recent_mutations.remove(0);
@@ -699,8 +699,8 @@ pub(super) async fn run(
                             file_versions.read(workspace, request)
                         } else {
                             let roots = project.map_or(&[][..], |project| project.folders.as_slice());
-                            projects::write_scope::mutate(
-                                workspace, roots, &mut file_versions, request,
+                            projects::write_scope::mutate_with_skills(
+                                workspace, roots, skills, &mut file_versions, request,
                                 |path| {
                                     let mut result = Err("FILE_LOCKED: delegation unavailable".to_owned());
                                     app.task.send_if_modified(|snapshot| {
@@ -1091,7 +1091,7 @@ async fn write_project_instructions(
     } else if matches!(task.role, Some(Role::Review)) {
         text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write, edit and mkdir tools are intentionally unavailable. Report fixes instead of editing.\n");
     } else {
-        text.push_str("\nWork mode: use read before editing existing files, write for creating new files or replacing fully read files, and edit for targeted changes. Write creates missing parent directories automatically (e.g. write path src/ui/View.kt). Use mkdir only to create directories explicitly, including empty directories. Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
+        text.push_str("\nWork mode: use read before editing existing files, write for creating new files or replacing fully read files, and edit for targeted changes. Write creates missing parent directories automatically (e.g. write path src/ui/View.kt). Use mkdir only to create directories explicitly, including empty directories. Use copy_skill_resource to copy an existing binary or text resource from a selected skill package to a new project file (no overwrite). Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
@@ -1229,7 +1229,7 @@ fn spawn_pi(
                 // Pi's --tools is an allowlist for extension tools as well as built-ins.
                 // For Work runs the extension overrides read/write/edit with guarded tools
                 // and verifies the overrides before accepting the prompt.
-                "read,grep,find,ls,write,edit,mkdir,load_skill,finish_task,run_command"
+                "read,grep,find,ls,write,edit,mkdir,copy_skill_resource,load_skill,finish_task,run_command"
             } else {
                 "read,grep,find,ls,write,edit"
             };

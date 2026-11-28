@@ -21,6 +21,7 @@ export function createSkills() {
   const file = get('skill-file');
   const pickFolder = get('pick-skill-folder');
   const pickFile = get('pick-skill-file');
+  const uploadFolder = get('upload-skill-folder');
   const selection = get('skill-selection');
   const emptySelection = selection.textContent;
   const result = get('skill-result');
@@ -35,11 +36,13 @@ export function createSkills() {
   let running = false;
   let revision = 0;
   let files = [];
+  let localFolder = null;
+  let picking = false;
 
   function updateControls() {
-    addSkill.disabled = pickFolder.disabled = pickFile.disabled = saving || !online;
-    cancelImport.disabled = saving;
-    button.disabled = saving || !online || !files.length;
+    addSkill.disabled = pickFolder.disabled = pickFile.disabled = uploadFolder.disabled = saving || picking || !online;
+    cancelImport.disabled = saving || picking;
+    button.disabled = saving || picking || !online || (!files.length && !localFolder);
     for (const control of [...list.querySelectorAll('button'), ...builtinList.querySelectorAll('button'), ...roleList.querySelectorAll('button')]) {
       control.disabled = saving || !online || (running && control.dataset.remove === 'true');
     }
@@ -49,6 +52,7 @@ export function createSkills() {
     const chosen = [...input.files];
     input.value = '';
     if (!chosen.length) return;
+    localFolder = null;
     files = chosen.map(file => ({
       path: file.webkitRelativePath ? file.webkitRelativePath.split('/').slice(1).join('/') : file.name,
       file,
@@ -64,7 +68,7 @@ export function createSkills() {
       files = [];
     }
     selection.textContent = files.length
-      ? chosen[0].webkitRelativePath.split('/')[0] || chosen[0].name
+      ? (chosen[0].webkitRelativePath.split('/')[0] || chosen[0].name) + ' · ' + files.length + ' файлов · ' + (files.reduce((size, entry) => size + entry.file.size, 0) / 1024 / 1024).toFixed(2) + ' МБ'
       : emptySelection;
     updateControls();
   }
@@ -153,32 +157,61 @@ export function createSkills() {
     importResult.textContent = '';
     importDialog.showModal();
   };
-  cancelImport.onclick = () => { if (!saving) importDialog.close(); };
-  importDialog.oncancel = event => { if (saving) event.preventDefault(); };
+  cancelImport.onclick = () => { if (!saving && !picking) importDialog.close(); };
+  importDialog.oncancel = event => { if (saving || picking) event.preventDefault(); };
   importDialog.addEventListener('close', () => {
     files = [];
+    localFolder = null;
     selection.textContent = emptySelection;
     importResult.textContent = '';
     updateControls();
   });
-  pickFolder.addEventListener('click', () => folder.click());
+  pickFolder.onclick = async () => {
+    if (pickFolder.disabled) return;
+    picking = true;
+    updateControls();
+    importResult.dataset.error = 'false';
+    importResult.textContent = 'Выбери папку в системном диалоге на компьютере Lyra…';
+    try {
+      const response = await fetch('/projects/pick-folder', { method: 'POST' });
+      if (!response.ok) throw new Error(await response.text());
+      const path = await response.json();
+      if (path) {
+        localFolder = path;
+        files = [];
+        selection.textContent = path;
+      }
+      importResult.textContent = '';
+    } catch (error) {
+      importResult.dataset.error = 'true';
+      importResult.textContent = 'Не удалось открыть системный диалог. Используй загрузку папки. ' + error.message;
+    } finally {
+      picking = false;
+      updateControls();
+    }
+  };
+  uploadFolder.addEventListener('click', () => folder.click());
   pickFile.addEventListener('click', () => file.click());
   folder.addEventListener('change', () => select(folder));
   file.addEventListener('change', () => select(file));
 
   form.addEventListener('submit', async event => {
     event.preventDefault();
-    if (saving || !online || !files.length) return;
+    if (saving || picking || !online || (!files.length && !localFolder)) return;
     saving = true;
     importResult.dataset.error = 'false';
     importResult.textContent = 'Загрузка…';
     updateControls();
     try {
-      const payload = [];
-      for (const { path, file } of files) {
-        payload.push({ path, data: await readFile(file) });
+      let payload;
+      if (localFolder) payload = { path: localFolder };
+      else {
+        payload = [];
+        for (const { path, file } of files) {
+          payload.push({ path, data: await readFile(file) });
+        }
       }
-      const response = await fetch('/skills/upload', {
+      const response = await fetch(localFolder ? '/skills' : '/skills/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -189,7 +222,7 @@ export function createSkills() {
       files = [];
       selection.textContent = emptySelection;
       result.dataset.error = 'false';
-      result.textContent = `Скилл «${skill.name}» установлен.`;
+      result.textContent = `Скилл «${skill.name}» установлен` + (skill.package_files != null ? ' · ' + skill.package_files + ' файлов · ' + (skill.package_bytes / 1024 / 1024).toFixed(2) + ' МБ' : '') + '.';
       importDialog.close();
       await refreshCatalog();
     } catch (error) {

@@ -1175,7 +1175,7 @@ fn tool_target(name: &str, arguments: &Value) -> Option<String> {
     let field = |key: &str| arguments.get(key).and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
     let value = match name {
-        "read" | "write" | "edit" | "mkdir" | "ls" => field("path"),
+        "read" | "write" | "edit" | "mkdir" | "ls" | "copy_skill_resource" => field("path"),
         "grep" | "find" => field("pattern").or_else(|| field("path")),
         "run_command" | "start_background_command" | "bash" => field("command"),
         "load_skill" => field("name"),
