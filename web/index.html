@@ -397,39 +397,77 @@
         </section>
 
         <section class="panel" aria-labelledby="skills-title">
-          <header class="panel-header"><h2 id="skills-title">Скиллы Pi</h2></header>
+          <header class="panel-header mcp-servers-header">
+            <h2 id="skills-title">Скиллы Pi</h2>
+            <button id="add-skill" class="unload" type="button" disabled>＋ Добавить</button>
+          </header>
           <div class="panel-body skills-body">
-            <form id="skill-import">
-              <div class="skill-import-controls">
-                <input id="skill-folder" type="file" webkitdirectory hidden>
-                <input id="skill-file" type="file" accept=".md" hidden>
-                <button id="pick-skill-folder" class="unload" type="button" disabled>Выбрать папку</button>
-                <button id="pick-skill-file" class="unload" type="button" disabled>Выбрать SKILL.md</button>
-                <button id="install-skill" class="unload" type="submit" disabled>Загрузить</button>
-              </div>
-              <p id="skill-selection" class="secondary" role="status">Выберите папку с SKILL.md или отдельный файл SKILL.md.</p>
-            </form>
             <p id="skill-result" class="secondary" role="status"></p>
-            <p id="skill-catalog-message" class="secondary"></p>
-            <ul id="skill-catalog" aria-label="Обычные скиллы"></ul>
+            <p id="skill-catalog-message" class="secondary" role="status"></p>
+            <section class="skill-group" aria-labelledby="custom-skills-title">
+              <div class="skill-group-heading"><h3 id="custom-skills-title">Кастомные скиллы</h3><span id="custom-skill-count" class="secondary"></span></div>
+              <ul id="skill-catalog" class="settings-list" aria-label="Кастомные скиллы"></ul>
+              <p id="custom-skills-empty" class="secondary" hidden>Нет кастомных скиллов. Добавь папку или SKILL.md.</p>
+            </section>
+            <section class="skill-group" aria-labelledby="builtin-skills-title">
+              <div class="skill-group-heading"><h3 id="builtin-skills-title">Встроенные скиллы</h3><span id="builtin-skill-count" class="secondary"></span></div>
+              <ul id="builtin-skill-catalog" class="settings-list" aria-label="Встроенные скиллы"></ul>
+              <p id="builtin-skills-empty" class="secondary" hidden>Нет встроенных скиллов.</p>
+            </section>
             <details id="role-skills" class="role-skills" hidden>
-              <summary>Ролевые скиллы Lyra <span id="role-skill-count" class="secondary"></span></summary>
-              <ul id="role-skill-catalog" aria-label="Ролевые скиллы Lyra"></ul>
+              <summary>Ролевые скиллы <span id="role-skill-count" class="secondary"></span></summary>
+              <ul id="role-skill-catalog" class="settings-list" aria-label="Ролевые скиллы Lyra"></ul>
+              <p class="secondary skill-role-note">При отключении расширенные инструкции не загружаются. Базовая роль сохраняется.</p>
             </details>
-            <form id="agents-form">
-              <label for="agents-content">Глобальный <code>AGENTS.md</code></label>
-              <p id="agents-help" class="secondary">Общие инструкции для агентов Pi. При перезапуске Lyra загружает встроенную версию.</p>
-              <textarea id="agents-content" rows="6" aria-describedby="agents-help" readonly></textarea>
-              <div class="skill-import-controls">
-                <button id="save-agents" class="unload" type="submit" disabled>Сохранить AGENTS.md</button>
+            <div class="agents-card settings-row">
+              <div class="settings-info">
+                <strong>AGENTS.md</strong>
+                <p>Глобальные инструкции для агентов Pi</p>
+                <p id="agents-summary">Загрузка…</p>
               </div>
-              <p id="agents-result" class="secondary" role="status"></p>
-            </form>
+              <button id="edit-agents" class="unload" type="button" disabled>Открыть</button>
+            </div>
+            <p id="agents-load-result" class="secondary" role="status"></p>
           </div>
         </section>
       </div>
     </div>
   </main>
+  <dialog closedby="any" id="skill-import-dialog" class="project-dialog" aria-labelledby="skill-import-title">
+    <form id="skill-import" class="project-form">
+      <h3 id="skill-import-title">Добавить скилл</h3>
+      <p class="secondary">Выбери папку с SKILL.md и дополнительными файлами или отдельный файл SKILL.md.</p>
+      <input id="skill-folder" type="file" webkitdirectory hidden>
+      <input id="skill-file" type="file" accept=".md" hidden>
+      <div class="skill-import-controls">
+        <button id="pick-skill-folder" class="unload" type="button" disabled>Выбрать папку</button>
+        <button id="pick-skill-file" class="unload" type="button" disabled>Выбрать SKILL.md</button>
+      </div>
+      <p id="skill-selection" class="secondary" role="status">Файлы не выбраны.</p>
+      <p id="skill-import-result" class="secondary project-feedback" role="status"></p>
+      <div class="project-controls project-dialog-actions">
+        <button id="cancel-skill-import" class="unload" type="button">Отмена</button>
+        <button id="install-skill" type="submit" disabled>Добавить</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog closedby="any" id="agents-dialog" class="project-dialog agents-dialog" aria-labelledby="agents-title">
+    <form id="agents-form" class="project-form">
+      <h3 id="agents-title">Глобальный AGENTS.md</h3>
+      <p id="agents-help" class="secondary">Общие инструкции для агентов Pi. При перезапуске Lyra загружает встроенную версию, заменяя изменения.</p>
+      <div class="agents-tabs" role="group" aria-label="Режим редактора">
+        <button id="agents-edit-tab" class="unload" type="button" aria-pressed="true">Редактор</button>
+        <button id="agents-preview-tab" class="unload" type="button" aria-pressed="false">Предпросмотр</button>
+      </div>
+      <textarea id="agents-content" rows="18" aria-label="Текст AGENTS.md" aria-describedby="agents-help" spellcheck="false" readonly></textarea>
+      <div id="agents-preview" class="agents-preview" hidden></div>
+      <p id="agents-result" class="secondary project-feedback" role="status"></p>
+      <div class="project-controls project-dialog-actions">
+        <button id="cancel-agents" class="unload" type="button">Закрыть</button>
+        <button id="save-agents" type="submit" disabled>Сохранить</button>
+      </div>
+    </form>
+  </dialog>
   <dialog closedby="any" id="mcp-server-dialog" class="project-dialog mcp-server-dialog" aria-labelledby="mcp-server-title">
     <form id="mcp-server-form" class="project-form">
       <h3 id="mcp-server-title">Добавить MCP-сервер</h3>

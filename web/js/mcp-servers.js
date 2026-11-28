@@ -1,4 +1,4 @@
-import { element, get } from './ui.js';
+import { element, get, iconButton, settingsSwitch, trashIcon } from './ui.js';
 
 const endpoint = '/settings/mcp-servers';
 const normalizedName = name => name.replace(/-/g, '_').toLowerCase();
@@ -40,21 +40,6 @@ export function buildServer(fields) {
   return server;
 }
 
-function iconButton(label, path) {
-  const button = element('button', '');
-  button.type = 'button';
-  button.title = label;
-  button.setAttribute('aria-label', label);
-  // Static icon paths are authored locally, never from server configuration.
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  for (const [key, value] of Object.entries({ width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(key, value);
-  const shape = document.createElementNS(svg.namespaceURI, 'path');
-  shape.setAttribute('d', path);
-  svg.append(shape);
-  button.append(svg);
-  return button;
-}
-
 export function createMcpServers() {
   const list = get('mcp-servers-list');
   const status = get('mcp-servers-status');
@@ -93,9 +78,9 @@ export function createMcpServers() {
       listKey = key;
       list.replaceChildren(...entries.map(([name, server]) => {
         const row = element('li', '');
-        row.className = 'mcp-server-row';
+        row.className = 'settings-row';
         const info = element('div', '');
-        info.className = 'mcp-server-info';
+        info.className = 'settings-info';
         info.append(element('strong', name));
         const kind = element('span', server.url != null ? 'Streamable HTTP' : 'stdio · локальный');
         kind.className = 'mcp-server-type';
@@ -109,21 +94,15 @@ export function createMcpServers() {
         const endpointText = element('code', address);
         info.append(endpointText);
         const actions = element('div', '');
-        actions.className = 'mcp-server-actions';
-        const toggle = element('button', '');
-        toggle.type = 'button';
-        toggle.className = 'mcp-switch';
-        toggle.setAttribute('role', 'switch');
-        toggle.setAttribute('aria-checked', String(server.enabled !== false));
-        toggle.setAttribute('aria-label', name + ': включён');
-        toggle.title = server.enabled === false ? 'Включить' : 'Выключить';
+        actions.className = 'settings-actions';
+        const toggle = settingsSwitch(name, server.enabled !== false);
         toggle.onclick = () => {
           if (!canEdit()) return;
           void persist(replaceServer(config, name, name, { ...server, enabled: server.enabled === false }));
         };
         const edit = iconButton('Редактировать ' + name, 'm15 5 4 4M4 20l4-1 13-13-4-4L4 15z');
         edit.onclick = () => openServer(name);
-        const remove = iconButton('Удалить ' + name, 'M3 6h18M8 6V3h8v3m3 0-1 15H6L5 6m5 4v7m4-7v7');
+        const remove = iconButton('Удалить ' + name, trashIcon);
         remove.dataset.delete = '';
         remove.onclick = () => {
           if (!canEdit() || !window.confirm('Удалить MCP-сервер «' + name + '» из конфигурации Lyra?')) return;
