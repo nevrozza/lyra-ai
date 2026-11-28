@@ -98,6 +98,11 @@ async fn handle(
                     | "cancel_project_task"
                     | "retry_project_task"
                     | "complete_project_step"
+                    | "list_mcp_servers"
+                    | "save_mcp_server"
+                    | "set_mcp_server_enabled"
+                    | "remove_mcp_server"
+                    | "test_mcp_server"
             ) {
                 return rpc_error(id, -32602, "Unknown tool");
             }
@@ -134,6 +139,12 @@ async fn handle(
                     detail.push_str(" · ");
                 }
                 let _ = write!(detail, "контекст {tokens} токенов");
+            }
+            if matches!(name, "save_mcp_server" | "set_mcp_server_enabled" | "remove_mcp_server" | "test_mcp_server")
+                && let Some(server) = args["name"].as_str().filter(|name| name.len() <= 120
+                    && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')))
+            {
+                detail = server.to_owned();
             }
             let mut trace = Call::start(app.clone(), name, model, &detail, group);
             let name = name.to_owned();
@@ -271,6 +282,52 @@ fn tools() -> Value {
         "annotations": {"idempotentHint": true, "destructiveHint": false}
     });
     let mut tools = json!([
+        {
+            "name": "list_mcp_servers",
+            "description": "List configured MCP servers for local Lyra Work agents. Returns names, transport, enabled state and exposure, never secret values. Enabled does not mean connected. Local mode only.",
+            "inputSchema": {"type":"object","properties":{},"additionalProperties":false},
+            "annotations":{"readOnlyHint":true}
+        },
+        {
+            "name": "save_mcp_server",
+            "description": "Add or patch one MCP server for subsequent Work runs. Only configure servers explicitly authorized by the user; local processes can execute code. Existing omitted fields are preserved; supplied maps/arrays replace those fields. Use environment references for secrets. Does not start or test the server. Local mode only.",
+            "inputSchema": {"type":"object","properties":{
+                "name":{"type":"string","pattern":"^[A-Za-z0-9_-]+$"},
+                "server":{"type":"object","properties":{
+                    "type":{"enum":["stdio","http","streamable-http"]},
+                    "command":{"type":"string"},
+                    "args":{"type":"array","items":{"type":"string"}},
+                    "cwd":{"type":["string","null"]},
+                    "env":{"type":"object","additionalProperties":{"type":"string"}},
+                    "url":{"type":"string"},
+                    "headers":{"type":"object","additionalProperties":{"type":"string"}},
+                    "description":{"type":["string","null"]},
+                    "timeout":{"type":["integer","null"],"minimum":1,"maximum":u32::MAX},
+                    "enabled":{"type":"boolean"},
+                    "exposure":{"enum":["direct","hidden"]},
+                    "toolExposure":{"type":"object","additionalProperties":{"enum":["direct","hidden"]}}
+                },"additionalProperties":false,"description":"For new servers, provide command (stdio) or URL (HTTP). Changing transports removes incompatible fields. Omitted fields are unchanged on update."}
+            },"required":["name","server"],"additionalProperties":false},
+            "annotations":{"idempotentHint":true,"destructiveHint":true}
+        },
+        {
+            "name":"set_mcp_server_enabled",
+            "description":"Enable or disable a configured MCP server for future Work runs. Does not interrupt existing runs. Local mode only.",
+            "inputSchema":{"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"],"additionalProperties":false},
+            "annotations":{"idempotentHint":true,"destructiveHint":false}
+        },
+        {
+            "name":"remove_mcp_server",
+            "description":"Remove a server from Lyra configuration, not its installed files. Does not interrupt existing runs. Only remove on user request. Local mode only.",
+            "inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},
+            "annotations":{"idempotentHint":true,"destructiveHint":true}
+        },
+        {
+            "name":"test_mcp_server",
+            "description":"Test a configured server (including disabled servers) with a real MCP initialize handshake and tools/list, without calling tools or loading a model. Starts configured stdio processes or connects over HTTP(S); only test user-authorized servers. Returns raw discovered tool names, not a guarantee of Pi exposure. Local mode only.",
+            "inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":true}
+        },
         {
             "name": "inspect",
             "description": "Read system load, local models, benchmarks, memory estimates, and Lyra queue settings.",
@@ -576,6 +633,14 @@ async fn call(
     trace: &mut Call,
 ) -> Result<ToolOutput, String> {
     let text = match name {
+        "list_mcp_servers" => {
+            let _: NoArguments = arguments(args)?;
+            project_result(super::mcp_servers::list_for_orchestrator(&app).await)
+        }
+        "save_mcp_server" => project_result(super::mcp_servers::save_for_orchestrator(&app, arguments(args)?).await),
+        "set_mcp_server_enabled" => project_result(super::mcp_servers::enable_for_orchestrator(&app, arguments(args)?).await),
+        "remove_mcp_server" => project_result(super::mcp_servers::remove_for_orchestrator(&app, arguments(args)?).await),
+        "test_mcp_server" => project_result(super::mcp_servers::test_for_orchestrator(&app, arguments(args)?).await),
         "inspect" => {
             let request: Inspect = arguments(args)?;
             inspect(app, request).await

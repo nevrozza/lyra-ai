@@ -20,7 +20,7 @@ Restart/reconnect Codex after the change and verify the server with `codex mcp l
 
 ### Connect MCP servers to Lyra Work
 
-Open **Серверы MCP** in the local dashboard and save a JSON configuration. Pi takes a fresh snapshot for each Work run, including queued Work. Compatible Pi builds must provide the built-in `builtin:mcp` extension.
+Open **Серверы MCP** in the local dashboard and add a server using the form or JSON editor. Codex can also manage the same configuration using `list_mcp_servers`, `save_mcp_server`, `set_mcp_server_enabled`, `remove_mcp_server`, and `test_mcp_server`. Saving a partial server object patches existing fields; omitted credentials are preserved. Use the tools only for user-authorized connections. The test performs MCP initialization and tool discovery without model inference or invoking any tool; HTTP(S) testing requires Node.js on PATH. It tests the protocol connection, not Pi's final exposed tool allowlist. Settings apply only to future Work runs. Pi takes a fresh snapshot for each Work run, including queued Work. Compatible Pi builds must provide the built-in `builtin:mcp` extension.
 
 ```json
 {

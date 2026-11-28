@@ -73,6 +73,8 @@ export function createMcpServers() {
   let busy = false;
   let available = true;
   let config;
+  let etag;
+  let refreshPending = false;
   let editingName;
   let httpType;
   let dirty = false;
@@ -165,12 +167,15 @@ export function createMcpServers() {
     report(next ? 'Сохраняем…' : 'Загружаем…', false, target);
     render();
     try {
-      const response = await fetch(endpoint, next ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) } : undefined);
+      const headers = { 'Content-Type': 'application/json' };
+      if (etag) headers['If-Match'] = etag;
+      const response = await fetch(endpoint, next ? { method: 'POST', headers, body: JSON.stringify(next) } : undefined);
       if (!response.ok) {
         if (response.status === 403) { available = false; config = undefined; }
         throw new Error(await response.text() || 'HTTP ' + response.status);
       }
       config = await response.json();
+      etag = response.headers.get('ETag');
       report(next ? 'Сохранено.' : '', false, status);
       if (target !== status) report('', false, target);
       return true;
@@ -180,6 +185,7 @@ export function createMcpServers() {
     } finally {
       busy = false;
       render();
+      if (refreshPending) refresh();
     }
   }
 
@@ -312,6 +318,16 @@ export function createMcpServers() {
     } catch (error) { report(error.message, true, target); }
   };
 
+  function refresh() {
+    if (!online || !available) return;
+    if (busy || dialog.open || rawDialog.open) {
+      refreshPending = true;
+      return;
+    }
+    refreshPending = false;
+    void request();
+  }
+
   function cancelAllowed(changed) {
     return !busy && (!changed || window.confirm('Закрыть без сохранения изменений?'));
   }
@@ -319,11 +335,15 @@ export function createMcpServers() {
   field('cancel').onclick = () => { if (cancelAllowed(dirty)) dialog.close(); };
   rawDialog.oncancel = event => { if (!cancelAllowed(rawEditor.value !== rawSaved)) event.preventDefault(); };
   get('mcp-json-cancel').onclick = () => { if (cancelAllowed(rawEditor.value !== rawSaved)) rawDialog.close(); };
-  rawDialog.addEventListener('close', () => { rawEditor.value = rawSaved = ''; });
+  rawDialog.addEventListener('close', () => {
+    rawEditor.value = rawSaved = '';
+    if (refreshPending) refresh();
+  });
   dialog.addEventListener('close', () => {
     dirty = false;
     field('env').replaceChildren();
     field('headers').replaceChildren();
+    if (refreshPending) refresh();
   });
   add.onclick = () => openServer();
   reload.onclick = () => { if (online && !busy && available) void request(); };
@@ -347,11 +367,12 @@ export function createMcpServers() {
   };
 
   return {
+    refresh,
     setOnline(value) {
       const connected = value && !online;
       online = value;
       render();
-      if (connected && !config && !busy && available) void request();
+      if (connected) refresh();
     },
   };
 }
