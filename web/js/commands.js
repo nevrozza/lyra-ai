@@ -39,7 +39,6 @@ export function createCommands({ openChat }) {
     const place = commandLocation(command, selection);
     const host = place === 'external' ? externalHost : chatHost;
     const visible = place === 'chat' || place === 'external';
-    const wasHidden = panel.hidden;
     chatHost.hidden = place !== 'chat';
     externalHost.hidden = place !== 'external';
     if (visible && panel.parentElement !== host) host.append(panel);
@@ -47,7 +46,6 @@ export function createCommands({ openChat }) {
     pendingLink.hidden = place !== 'other';
     pendingLink.textContent = command?.running ? 'Команда в другом чате' : 'Терминал ждёт подтверждения';
     if (!visible) return;
-    if (place === 'chat' && (changed || wasHidden)) panel.scrollIntoView({ block: 'nearest' });
     title.textContent = command.stopping ? 'Остановка команды' :
       command.running ? 'Команда выполняется' : 'Разрешить запуск команды?';
     get('command-workspace').textContent = `${place === 'external' ? 'Вне чата · ' : ''}${command.shell} · ${command.workspace}`;
