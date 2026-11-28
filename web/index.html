@@ -379,18 +379,20 @@
           </div>
         </section>
         <section class="panel" aria-labelledby="mcp-servers-title">
-          <header class="panel-header"><h2 id="mcp-servers-title">Серверы MCP</h2></header>
-          <div class="panel-body">
-            <form id="mcp-servers-form" class="mcp-servers-form">
-              <label for="mcp-servers-config">Конфигурация JSON</label>
-              <p id="mcp-servers-help" class="secondary">В <code>mcpServers</code> укажите <code>command</code> и <code>args</code> для локального сервера или <code>url</code> для Streamable HTTP. Изменения применятся в следующем запуске Work.</p>
-              <textarea id="mcp-servers-config" spellcheck="false" aria-describedby="mcp-servers-help mcp-servers-status" rows="8" disabled></textarea>
-              <div class="mcp-servers-actions">
-                <button id="mcp-servers-save" type="submit" disabled>Сохранить</button>
-                <button id="mcp-servers-reload" class="unload" type="button" disabled>Перечитать</button>
-              </div>
-              <p id="mcp-servers-status" class="secondary" role="status"></p>
-            </form>
+          <header class="panel-header mcp-servers-header">
+            <h2 id="mcp-servers-title">Серверы MCP</h2>
+            <button id="mcp-servers-add" class="unload" type="button" disabled>＋ Добавить</button>
+          </header>
+          <div class="panel-body mcp-servers-body">
+            <p id="mcp-servers-count" class="secondary">Нет данных</p>
+            <ul id="mcp-servers-list" aria-label="Настроенные MCP-серверы"></ul>
+            <p id="mcp-servers-empty" class="secondary" hidden>Добавь локальный сервер или подключись к MCP по HTTP.</p>
+            <p id="mcp-servers-status" class="secondary" role="status"></p>
+            <div class="mcp-servers-footer">
+              <button id="mcp-servers-json" class="terminal-mode" type="button" disabled>JSON-конфигурация</button>
+              <button id="mcp-servers-reload" class="terminal-mode" type="button" disabled>Обновить</button>
+            </div>
+            <p class="secondary mcp-servers-note">Изменения применяются при следующем запуске Work.</p>
           </div>
         </section>
 
@@ -428,6 +430,66 @@
       </div>
     </div>
   </main>
+  <dialog closedby="any" id="mcp-server-dialog" class="project-dialog mcp-server-dialog" aria-labelledby="mcp-server-title">
+    <form id="mcp-server-form" class="project-form">
+      <h3 id="mcp-server-title">Добавить MCP-сервер</h3>
+      <label for="mcp-server-name">Имя сервера</label>
+      <input id="mcp-server-name" type="text" required pattern="[A-Za-z0-9_\-]+" placeholder="filesystem" autocomplete="off" spellcheck="false">
+      <label for="mcp-server-description">Описание <span class="secondary">(необязательно)</span></label>
+      <input id="mcp-server-description" type="text" placeholder="Доступ к файлам проекта">
+      <label for="mcp-server-transport">Подключение</label>
+      <select id="mcp-server-transport">
+        <option value="stdio">Локальный процесс (stdio)</option>
+        <option value="streamable-http">Удалённый сервер (Streamable HTTP)</option>
+      </select>
+      <fieldset id="mcp-server-local" class="mcp-server-fields">
+        <label for="mcp-server-command">Команда запуска</label>
+        <input id="mcp-server-command" type="text" placeholder="npx, uvx, node…" autocomplete="off" spellcheck="false" required>
+        <div class="mcp-field-header"><span>Аргументы</span><button id="mcp-server-add-arg" class="terminal-mode" type="button">＋ Аргумент</button></div>
+        <div id="mcp-server-args" class="mcp-dynamic-fields"></div>
+        <label for="mcp-server-cwd">Рабочая папка <span class="secondary">(необязательно)</span></label>
+        <input id="mcp-server-cwd" type="text" placeholder="C:\path\to\server" spellcheck="false">
+        <div class="mcp-field-header"><span>Переменные окружения</span><button id="mcp-server-add-env" class="terminal-mode" type="button">＋ Переменная</button></div>
+        <div id="mcp-server-env" class="mcp-dynamic-fields"></div>
+      </fieldset>
+      <fieldset id="mcp-server-remote" class="mcp-server-fields" hidden disabled>
+        <label for="mcp-server-url">URL сервера</label>
+        <input id="mcp-server-url" type="url" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false" required>
+        <div class="mcp-field-header"><span>HTTP-заголовки</span><button id="mcp-server-add-header" class="terminal-mode" type="button">＋ Заголовок</button></div>
+        <div id="mcp-server-headers" class="mcp-dynamic-fields"></div>
+      </fieldset>
+      <p class="secondary mcp-servers-note">Для секретов можно использовать переменные окружения, например ${API_TOKEN}.</p>
+      <label class="pin"><input id="mcp-server-enabled" type="checkbox" checked> Включён</label>
+      <details id="mcp-server-advanced" class="mcp-server-advanced">
+        <summary>Дополнительные настройки</summary>
+        <div class="mcp-server-fields">
+          <label for="mcp-server-timeout">Таймаут (timeout)</label>
+          <input id="mcp-server-timeout" type="number" min="1" max="4294967295" step="1" placeholder="По умолчанию">
+          <label for="mcp-server-exposure">Доступность инструментов</label>
+          <select id="mcp-server-exposure"><option value="direct">Открыты (direct)</option><option value="hidden">Скрыты (hidden)</option></select>
+          <div class="mcp-field-header"><span>Исключения для инструментов</span><button id="mcp-server-add-tool" class="terminal-mode" type="button">＋ Правило</button></div>
+          <div id="mcp-server-tools" class="mcp-dynamic-fields"></div>
+        </div>
+      </details>
+      <p id="mcp-server-form-status" class="secondary project-feedback" role="status"></p>
+      <div class="project-controls project-dialog-actions">
+        <button id="mcp-server-cancel" class="unload" type="button">Отмена</button>
+        <button id="mcp-server-save" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog closedby="any" id="mcp-json-dialog" class="project-dialog mcp-server-dialog" aria-labelledby="mcp-json-title">
+    <form id="mcp-json-form" class="project-form">
+      <h3 id="mcp-json-title">JSON-конфигурация MCP</h3>
+      <p class="secondary">Можно вставить готовый объект mcpServers вместе с его внешним ключом. Сохранение заменит весь список серверов.</p>
+      <textarea id="mcp-json-editor" rows="12" spellcheck="false" aria-label="JSON-конфигурация MCP"></textarea>
+      <p id="mcp-json-status" class="secondary project-feedback" role="status"></p>
+      <div class="project-controls project-dialog-actions">
+        <button id="mcp-json-cancel" class="unload" type="button">Отмена</button>
+        <button id="mcp-json-save" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
   <dialog closedby="any" id="ram-dialog" class="ram-dialog" aria-labelledby="ram-title">
     <header class="panel-header">
       <h2 id="ram-title">Использование RAM</h2>
