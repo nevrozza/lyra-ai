@@ -381,7 +381,7 @@ pub(super) async fn test_for_orchestrator(app: &App, input: NamedServer) -> Resu
     let server = config.mcp_servers.get(&input.name).ok_or_else(|| missing_server(&input.name))?;
     let tools = probe::test(server).await.map_err(|message| (StatusCode::BAD_GATEWAY, message))?;
     Ok(json!({"name": input.name, "connected": true, "enabled": server.enabled, "tools": tools,
-        "note": "MCP handshake and tools/list succeeded; no tool invoked. Work uses its own Pi connection."}))
+        "note": "MCP handshake succeeded; tools discovered when supported. No tool invoked. Work uses its own Pi connection."}))
 }
 
 #[cfg(test)]

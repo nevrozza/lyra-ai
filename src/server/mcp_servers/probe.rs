@@ -151,8 +151,25 @@ async fn http(server: &Server) -> Result<Vec<String>, String> {
 pub(super) async fn test(server: &Server) -> Result<Vec<String>, String> {
     // Bound the whole handshake, not each page separately. Dropping the future
     // kills the child/process tree. No local model or tool execution is needed.
-    let seconds = u64::from(server.timeout.unwrap_or(30)).clamp(1, 45);
-    tokio::time::timeout(Duration::from_secs(seconds), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         if server.url.is_some() { http(server).await } else { stdio(server).await }
     }).await.map_err(|_| "MCP connection test timed out".to_owned())?
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_references_are_expanded_without_shell_evaluation() {
+        let name = "LYRA_TEST_MCP_VARIABLE_UNSET_38192";
+        let reference = format!("Bearer ${{{name}}}");
+        assert_eq!(expand("literal value").unwrap(), "literal value");
+        assert_eq!(expand("$(echo not-executed)").unwrap(), "$(echo not-executed)");
+        if std::env::var(name).is_err() {
+            assert!(expand(&reference).is_err());
+        }
+        assert!(expand("${").is_err());
+    }
 }
