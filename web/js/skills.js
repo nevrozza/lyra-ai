@@ -220,6 +220,7 @@ export function createSkills() {
       if (!response.ok) throw new Error(await response.text());
       const skill = await response.json();
       files = [];
+      localFolder = null;
       selection.textContent = emptySelection;
       result.dataset.error = 'false';
       result.textContent = `Скилл «${skill.name}» установлен` + (skill.package_files != null ? ' · ' + skill.package_files + ' файлов · ' + (skill.package_bytes / 1024 / 1024).toFixed(2) + ' МБ' : '') + '.';

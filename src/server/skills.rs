@@ -868,11 +868,15 @@ mod tests {
             "---\r\nname: project-check\r\ndescription: >-\r\n  Check the project\r\n  before release.\r\n---\r\n# Guide\r\n",
         ).unwrap();
         fs::write(source.join("references/checks.md"), "checks").unwrap();
+        fs::create_dir_all(source.join("assets/fonts")).unwrap();
+        let font = [0, 1, 0, 0, 128, 255, 0];
+        fs::write(source.join("assets/fonts/Test.ttf"), font).unwrap();
 
         let store = Store::new(temp.path().join("installed"));
         assert!(store.paths(None).unwrap().is_empty());
         let installed = store.install(&source).unwrap();
         assert_eq!(installed.description, "Check the project before release.");
+        assert_eq!(installed.package_files, Some(3));
         assert!(matches!(
             store.install(&source),
             Err((StatusCode::CONFLICT, _))
@@ -884,6 +888,11 @@ mod tests {
         assert!(paths[0].is_file());
         let checks = paths[0].parent().unwrap().join("references/checks.md");
         assert_eq!(fs::read_to_string(checks).unwrap(), "checks");
+        let resource = resource_path(&paths, "project-check", "assets/fonts/Test.ttf").unwrap();
+        assert_eq!(fs::read(resource).unwrap(), font);
+        assert!(resource_path(&paths, "project-check", "../outside").is_err());
+        assert!(resource_path(&paths, "project-check", "assets/fonts").is_err());
+        assert!(resource_path(&[], "project-check", "assets/fonts/Test.ttf").is_err());
         assert!(store.paths(Some(&[])).unwrap().is_empty());
         assert!(store.paths(Some(&["unknown".into()])).is_err());
     }

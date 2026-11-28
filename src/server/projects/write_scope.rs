@@ -612,3 +612,39 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("original")).unwrap(), "old");
     }
 }
+
+
+#[cfg(test)]
+mod skill_resource_tests {
+    use super::*;
+
+    #[test]
+    fn copies_selected_binary_asset_without_overwriting_or_escaping_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let package = temp.path().join("skills").join("canvas-design");
+        fs::create_dir_all(package.join("fonts")).unwrap();
+        fs::create_dir(&project).unwrap();
+        let manifest = package.join("SKILL.md");
+        fs::write(&manifest, "instructions").unwrap();
+        let bytes = [0, 1, 0, 0, 128, 255, 0];
+        fs::write(package.join("fonts/Test.ttf"), bytes).unwrap();
+        let selected = [manifest];
+        let mut versions = FileVersions::default();
+        let request = r#"{"tool":"copy_skill_resource","skill":"canvas-design","source":"fonts/Test.ttf","path":"assets/Test.ttf"}"#;
+        mutate_with_skills(&project, &[], &selected, &mut versions, request, |_| Ok(true), |_| {}).unwrap();
+        let target = project.join("assets/Test.ttf");
+        assert_eq!(fs::read(&target).unwrap(), bytes);
+        assert!(mutate_with_skills(&project, &[], &selected, &mut versions, request, |_| Ok(true), |_| {}).is_err());
+        assert_eq!(fs::read(&target).unwrap(), bytes);
+        for request in [
+            r#"{"tool":"copy_skill_resource","skill":"canvas-design","source":"../secret","path":"other.ttf"}"#,
+            r#"{"tool":"copy_skill_resource","skill":"canvas-design","source":"fonts/Test.ttf","path":"../escape.ttf"}"#,
+            r#"{"tool":"copy_skill_resource","skill":"not-selected","source":"fonts/Test.ttf","path":"other.ttf"}"#,
+        ] {
+            assert!(mutate_with_skills(&project, &[], &selected, &mut versions, request, |_| Ok(true), |_| {}).is_err());
+        }
+        assert!(!temp.path().join("escape.ttf").exists());
+        assert!(!project.join("other.ttf").exists());
+    }
+}
