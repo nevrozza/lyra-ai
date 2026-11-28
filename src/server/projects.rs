@@ -474,8 +474,9 @@ impl Store {
         let _guard = self.lock.lock().expect("project store lock");
         let as_io = |(_, message): HttpError| io::Error::other(message);
         let mut catalog = self.list().map_err(as_io)?;
-        let project = catalog.projects.iter_mut().find(|project| project.id == task.project.id)
+        let index = catalog.projects.iter().position(|project| project.id == task.project.id)
             .ok_or_else(|| io::Error::other("Project not found"))?;
+        let project = &catalog.projects[index];
         project.ensure_active().map_err(as_io)?;
         let session_id = task.session_id.ok_or_else(|| io::Error::other("Saved Work chat required"))?;
         let session = project.session(session_id).map_err(as_io)?;
@@ -498,7 +499,11 @@ impl Store {
 
         let raw = value["path"].as_str().ok_or_else(|| io::Error::other("mkdir requires path"))?;
         let path = Path::new(raw);
-        if path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        if path.as_os_str().is_empty() || path.components().any(|part| match part {
+            std::path::Component::ParentDir | std::path::Component::CurDir => true,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => !path.is_absolute(),
+            _ => false,
+        }) {
             return Err(io::Error::other("Use a concrete directory path without . or .."));
         }
         let requested = if path.is_absolute() { path.to_path_buf() } else { task.workspace.join(path) };
@@ -522,9 +527,9 @@ impl Store {
         let newly_claimed = claim(&target)?;
         let result = (|| {
             fs::create_dir(&target)?;
-            let result = (|| {
+            let result: io::Result<PathBuf> = (|| {
                 let folder = canonical_folder(&target).map_err(as_io)?;
-                project.folders = vec![folder.clone()];
+                catalog.projects[index].folders = vec![folder.clone()];
                 self.persist_catalog(&catalog).map_err(as_io)?;
                 Ok(folder)
             })();
@@ -1731,6 +1736,28 @@ mod tests {
         assert!(mutate(&current, &mut versions, serde_json::json!({"tool":"mkdir","path":outside.join("escape")})).is_err());
         assert!(mutate(&current, &mut versions, serde_json::json!({"tool":"write","path":"index.html","content":"ok"})).unwrap().is_none());
         assert_eq!(fs::read_to_string(target.join("index.html")).unwrap(), "ok");
+    }
+
+    #[test]
+    fn first_relative_mkdir_binds_and_failed_creation_does_not_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data").join("projects"));
+        let project = store.save(SaveProject { id: None, name: "Relative".into(), folders: None }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Prepare"
+        })).unwrap()).unwrap();
+        let task = store.task(project.id, Some(chat.id), None).unwrap();
+        let mut versions = write_scope::FileVersions::default();
+        let mkdir = |path: &Path, versions: &mut write_scope::FileVersions| store.guarded_mutation(
+            &task, &[], versions, &serde_json::json!({"tool":"mkdir","path":path}).to_string(),
+            |_| Ok(true), |_| {}
+        );
+        assert!(mkdir(Path::new("missing/child"), &mut versions).is_err());
+        assert!(mkdir(&store.directory.join("private"), &mut versions).is_err());
+        assert!(store.list().unwrap().projects[0].folders.is_empty());
+        let bound = mkdir(Path::new("site"), &mut versions).unwrap().unwrap();
+        assert_eq!(bound, canonical_folder(&task.workspace.join("site")).unwrap());
+        assert_eq!(store.list().unwrap().projects[0].folders, [bound]);
     }
 
     #[test]
