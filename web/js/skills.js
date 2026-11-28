@@ -1,4 +1,4 @@
-import { element, get, iconButton, settingsSwitch, trashIcon } from './ui.js';
+import { element, get, iconButton, settingsSwitch, trashIcon, reconcileSettingsRows } from './ui.js';
 import { renderMarkdown } from './markdown.js';
 
 export function groupSkills(skills) {
@@ -88,6 +88,7 @@ export function createSkills() {
       const renderSkill = skill => {
         const entry = element('li', '');
         entry.className = 'settings-row';
+        entry.dataset.setting = skill.name;
         entry.dataset.enabled = String(skill.enabled);
         const info = element('div', '');
         info.className = 'settings-info';
@@ -110,9 +111,9 @@ export function createSkills() {
         entry.append(info, controls);
         return entry;
       };
-      list.replaceChildren(...custom.map(renderSkill));
-      builtinList.replaceChildren(...builtin.map(renderSkill));
-      roleList.replaceChildren(...roles.map(renderSkill));
+      reconcileSettingsRows(list, custom.map(renderSkill));
+      reconcileSettingsRows(builtinList, builtin.map(renderSkill));
+      reconcileSettingsRows(roleList, roles.map(renderSkill));
       updateControls();
     } catch {
       if (request === revision) message.textContent = 'Не удалось загрузить список скиллов.';

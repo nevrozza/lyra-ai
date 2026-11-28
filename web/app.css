@@ -321,7 +321,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .session-call > summary { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; gap: 7px; align-items: start; padding: 8px 3px; cursor: pointer; list-style: none; font-size: .8rem; }
 .session-call > summary::-webkit-details-marker { display: none; }
 .session-call-title { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
-.session-call-title::before { content: '▸'; color: var(--muted); flex: 0 0 9px; transition: transform var(--motion-fast); }
+.session-call-title::before { content: '▸'; color: var(--muted); flex: 0 0 9px; transition: transform var(--motion-fast) var(--motion-ease); }
 .session-call[open] .session-call-title::before { transform: rotate(90deg); }
 .session-call-title > span { min-width: 0; overflow-wrap: anywhere; font-family: var(--mono); }
 .session-call-title small { display: block; color: var(--muted); font-size: .7rem; font-family: var(--mono); overflow-wrap: anywhere; }
@@ -434,7 +434,7 @@ h2 { font-size: .96rem; font-weight: 650; }
 .settings-actions .settings-switch { margin-right: 4px; }
 .pin-switch > input:focus-visible + .settings-switch { outline: 2px solid var(--accent); outline-offset: 4px; }
 .pin-switch > input:disabled + .settings-switch { opacity: .5; }
-.settings-switch::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #b2bdb1; transition: transform var(--motion-fast); }
+.settings-switch::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #b2bdb1; transition: transform var(--motion-fast) var(--motion-ease), background-color var(--motion-fast) var(--motion-ease); }
 .settings-actions .settings-switch[aria-checked="true"], .pin-switch > input:checked + .settings-switch { background: #597a49; }
 .settings-switch[aria-checked="true"]::before, .pin-switch > input:checked + .settings-switch::before { transform: translateX(12px); background: #d4efb9; }
 .mcp-servers-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -617,9 +617,10 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 
 /* Shared motion primitives. Avoid animating layout on hover or replaying
    entrance animations when polling replaces unchanged data. */
-button, .project-composer, .group-context-entry {
+button, .project-composer, .group-context-entry, .settings-switch, .settings-info, .model-dot, .session-event-status, .project-tool-indicator {
   transition: background-color var(--motion-fast) var(--motion-ease),
-    color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease);
+    color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease);
 }
 .connection span, .metrics-freshness::before {
   transition: background-color var(--motion-normal) var(--motion-ease);
@@ -645,13 +646,13 @@ button, .project-composer, .group-context-entry {
    browsers simply use instant native opening/closing. */
 @supports selector(details::details-content) {
   @supports (interpolate-size: allow-keywords) {
-    :is(.project-thinking, .project-tool, .project-activity, .skill-group-disclosure) { interpolate-size: allow-keywords; }
-    :is(.project-thinking, .project-tool, .project-activity, .skill-group-disclosure)::details-content {
+    details { interpolate-size: allow-keywords; }
+    details::details-content {
       block-size: 0; overflow: clip;
       transition: block-size var(--motion-normal) var(--motion-ease),
         content-visibility var(--motion-normal) allow-discrete;
     }
-    :is(.project-thinking, .project-tool, .project-activity, .skill-group-disclosure)[open]::details-content { block-size: auto; }
+    details[open]::details-content { block-size: auto; }
   }
 }
 :is(.terminal-popover, .project-action-menu, .project-dialog, .ram-dialog) {
@@ -676,6 +677,34 @@ button, .project-composer, .group-context-entry {
 @keyframes lyra-chat-in { from { opacity: 0; } to { opacity: 1; } }
 .project-message-enter { animation: lyra-message-in var(--motion-normal) var(--motion-ease) both; }
 .project-chat-enter { animation: lyra-chat-in var(--motion-normal) var(--motion-ease) both; }
+.settings-row-enter { animation: lyra-message-in var(--motion-normal) var(--motion-ease); }
+:is(#agents-content, #agents-preview, #mcp-server-local, #mcp-server-remote):not([hidden]) {
+  animation: lyra-chat-in var(--motion-fast) var(--motion-ease);
+}
+.context-settings-details > summary::before { transition: transform var(--motion-normal) var(--motion-ease); }
+:is(.session-recent, .session-call-event, .model-roles, #benchmark-profile-diagnostics, .mcp-server-advanced) > summary {
+  transition: color var(--motion-fast) var(--motion-ease);
+}
+:is(.session-recent, .session-call-event, .model-roles, #benchmark-profile-diagnostics, .mcp-server-advanced) > summary:hover { color: var(--accent); }
+.settings-actions button:not(.settings-switch):active:not(:disabled) { transform: scale(.94); }
+.settings-actions button:not(.settings-switch) {
+  transition: color var(--motion-fast) var(--motion-ease), background-color var(--motion-fast) var(--motion-ease),
+    opacity var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-ease);
+}
+.project-scroll-bottom:not([hidden]) { animation: lyra-message-in var(--motion-fast) var(--motion-ease); }
+:is(.project-dialog, .ram-dialog)::backdrop {
+  opacity: 0;
+  transition: opacity var(--motion-normal) var(--motion-ease);
+}
+:is(.project-dialog, .ram-dialog)[open]::backdrop { opacity: 1; }
+@supports (transition-behavior: allow-discrete) {
+  :is(.project-dialog, .ram-dialog)::backdrop {
+    transition: opacity var(--motion-normal) var(--motion-ease), display var(--motion-normal) allow-discrete;
+  }
+}
+@starting-style {
+  :is(.project-dialog, .ram-dialog)[open]::backdrop { opacity: 0; }
+}
 @property --meter-fill { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
 meter[data-motion-meter] {
   border: 0; border-radius: 7px;
@@ -689,6 +718,8 @@ meter[data-motion-meter]::-webkit-meter-even-less-good-value { background: trans
 meter[data-motion-meter]::-moz-meter-bar { background: transparent; }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-fast: 0ms; --motion-normal: 0ms; }
-  .project-spinner, .project-message-enter, .project-chat-enter { animation: none; }
+  .project-spinner, .project-message-enter, .project-chat-enter, .settings-row-enter,
+  .project-scroll-bottom:not([hidden]), :is(#agents-content, #agents-preview, #mcp-server-local, #mcp-server-remote):not([hidden]) { animation: none; }
+  .settings-actions button:not(.settings-switch):active:not(:disabled) { transform: none; }
   #project-messages .project-message-time { transition: none; }
 }

@@ -1,4 +1,4 @@
-import { element, get, iconButton, settingsSwitch, trashIcon } from './ui.js';
+import { element, get, iconButton, settingsSwitch, trashIcon, reconcileSettingsRows } from './ui.js';
 
 const endpoint = '/settings/mcp-servers';
 const normalizedName = name => name.replace(/-/g, '_').toLowerCase();
@@ -76,9 +76,10 @@ export function createMcpServers() {
     const key = JSON.stringify(entries);
     if (key !== listKey) {
       listKey = key;
-      list.replaceChildren(...entries.map(([name, server]) => {
+      reconcileSettingsRows(list, entries.map(([name, server]) => {
         const row = element('li', '');
         row.className = 'settings-row';
+        row.dataset.setting = name;
         const info = element('div', '');
         info.className = 'settings-info';
         info.append(element('strong', name));
@@ -270,7 +271,9 @@ export function createMcpServers() {
   for (const [button, container, kind] of [['add-arg','args','arg'],['add-env','env','env'],['add-header','headers','header'],['add-tool','tools','tool']]) {
     field(button).onclick = () => {
       if (!canEdit()) return;
-      dynamicRow(field(container), kind).querySelector('input')?.focus();
+      const row = dynamicRow(field(container), kind);
+      row.classList.add('settings-row-enter');
+      row.querySelector('input')?.focus();
       dirty = true;
     };
   }
