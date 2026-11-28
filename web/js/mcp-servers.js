@@ -147,6 +147,7 @@ export function createMcpServers() {
     for (const button of list.querySelectorAll('button')) button.disabled = !canEdit();
     for (const node of [...form.elements, ...rawForm.elements]) node.disabled = !canEdit();
     if (canEdit()) updateTransport();
+    field('cancel').disabled = get('mcp-json-cancel').disabled = busy;
     field('save').disabled = !canEdit();
     get('mcp-json-save').disabled = !canEdit() || rawEditor.value === rawSaved;
   }
