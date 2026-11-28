@@ -1118,11 +1118,28 @@ struct ToolTrace {
     arguments: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_preview: Option<WritePreview>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     finished_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<String>,
+}
+
+const WRITE_PREVIEW_LIMIT: usize = 16 * 1024;
+
+#[derive(Serialize)]
+struct WritePreview {
+    text: String,
+    truncated: bool,
+}
+
+fn write_preview(name: &str, arguments: &Value) -> Option<WritePreview> {
+    if name != "write" { return None; }
+    let text = arguments["content"].as_str()?;
+    let end = text.floor_char_boundary(WRITE_PREVIEW_LIMIT);
+    Some(WritePreview { text: text[..end].to_owned(), truncated: end < text.len() })
 }
 
 fn tool_preview(mut text: String) -> String {
@@ -1208,10 +1225,11 @@ fn append_tool_calls(messages: &mut VecDeque<Message>, content: &Value, timestam
             tool: Some(ToolTrace {
                 id: id.to_owned(),
                 name: name.to_owned(),
-                arguments: if dashboard {
+                arguments: if dashboard && (name != "write" || !part["arguments"]["content"].is_string()) {
                     tool_preview(serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default())
                 } else { compact_tool_arguments(&part["arguments"]) },
                 target: if dashboard { tool_target(name, &part["arguments"]) } else { None },
+                write_preview: if dashboard { write_preview(name, &part["arguments"]) } else { None },
                 status: "pending",
                 finished_at: None,
                 result: None,
@@ -1747,9 +1765,30 @@ mod tests {
         assert_eq!(tools[1].status, "ok");
         assert!(tools[1].arguments.contains("index.html"));
         assert!(!tools[1].arguments.contains("large file body"));
+        assert!(tools[1].write_preview.is_none());
         assert_eq!(tools[2].status, "error");
         assert_eq!(tools[2].result.as_deref(), Some("FILE_LOCKED"));
         assert_eq!(tools[3].status, "pending");
+    }
+
+    #[test]
+    fn dashboard_write_preview_preserves_code_and_marks_truncation() {
+        let code = "const text = \"hello\";\n\t// мир\n";
+        let mut messages = VecDeque::new();
+        let calls = serde_json::json!([
+            {"type":"toolCall","id":"a","name":"write","arguments":{"path":"src/app.js","content":code}},
+            {"type":"toolCall","id":"b","name":"write","arguments":{"path":"large.txt","content":"я".repeat(WRITE_PREVIEW_LIMIT)}},
+            {"type":"toolCall","id":"c","name":"write","arguments":{"path":"empty.txt","content":""}}
+        ]);
+        append_tool_calls(&mut messages, &calls, Some(1000), true);
+        let first = messages[0].tool.as_ref().unwrap();
+        assert_eq!(first.write_preview.as_ref().unwrap().text, code);
+        assert!(!first.write_preview.as_ref().unwrap().truncated);
+        assert!(!first.arguments.contains("content"));
+        let large = messages[1].tool.as_ref().unwrap().write_preview.as_ref().unwrap();
+        assert!(large.truncated);
+        assert!(large.text.len() <= WRITE_PREVIEW_LIMIT);
+        assert_eq!(messages[2].tool.as_ref().unwrap().write_preview.as_ref().unwrap().text, "");
     }
 
     #[test]
