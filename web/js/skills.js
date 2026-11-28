@@ -231,7 +231,7 @@ function createAgentsEditor() {
   function updateControls() {
     content.readOnly = !online || busy || saved === null;
     button.disabled = content.readOnly || content.value === saved;
-    open.disabled = !online || busy || saved === null;
+    open.disabled = !online || busy;
     cancel.disabled = busy;
     get('agents-summary').textContent = saved === null ? 'Нет данных'
       : saved.trim() ? saved.split('\n').length + ' строк · ' + new TextEncoder().encode(saved).length.toLocaleString('ru-RU') + ' Б'
@@ -257,6 +257,7 @@ function createAgentsEditor() {
       content.value = await response.json();
       saved = content.value;
       loadResult.textContent = '';
+      return true;
     } catch (error) {
       loadResult.dataset.error = 'true';
       loadResult.textContent = error instanceof TypeError || !error.message
@@ -269,8 +270,7 @@ function createAgentsEditor() {
 
   open.onclick = async () => {
     if (open.disabled) return;
-    await refresh();
-    if (saved === null || !online) return;
+    if (!await refresh() || !online) return;
     content.value = saved;
     result.textContent = '';
     switchTab(false);
