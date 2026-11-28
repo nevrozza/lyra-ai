@@ -16,3 +16,12 @@ test('short call duration remains readable', () => {
   assert.equal(context.formatCallDuration(2500), '2.5 с');
   assert.equal(context.formatCallDuration(null), '');
 });
+
+
+test('journal scroll preservation accepts zero scroll and an empty list', () => {
+  const container = { scrollTop: 0, children: [], getBoundingClientRect: () => ({ top: 0 }) };
+  let renders = 0;
+  context.preserveScroll(container, 'call', () => { renders++; });
+  assert.equal(renders, 1);
+  assert.equal(container.scrollTop, 0);
+});

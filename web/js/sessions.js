@@ -29,10 +29,10 @@ function timeNode(ms) {
   return time;
 }
 
-function preserveScroll(container, key, render) {
+export function preserveScroll(container, key, render) {
   const top = container.scrollTop;
   const rect = container.getBoundingClientRect();
-  const anchor = top > 8 && [...container.children].find(row => row.getBoundingClientRect().bottom > rect.top);
+  const anchor = top > 8 ? [...container.children].find(row => row.getBoundingClientRect().bottom > rect.top) : undefined;
   const offset = anchor ? anchor.getBoundingClientRect().top - rect.top : 0;
   const id = anchor?.dataset[key];
   render();
@@ -199,13 +199,14 @@ export function createSessions() {
     const requested = selected;
     try {
       const response = await fetch(requested == null ? '/sessions' : `/sessions?selected=${requested}`);
-      if (!response.ok) throw new Error();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const view = await response.json();
       if (requested === selected) {
         if (selected != null) selected = view.selected ?? undefined;
         render(view);
       }
-    } catch {
+    } catch (error) {
+      console.warn('Lyra MCP journal refresh failed', error);
       message.hidden = false;
       message.dataset.state = 'error';
       get('session-message-title').textContent = 'Журнал недоступен';
