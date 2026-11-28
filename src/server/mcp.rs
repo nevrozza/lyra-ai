@@ -210,7 +210,7 @@ fn tools() -> Value {
     });
     let follow_up = json!({
         "type": "object",
-        "description": "Automatic review, fixes, and optional startup verification.",
+        "description": "Automatic independent review, fixes, repeat review, and optional startup verification. Attach to the real final implementation/integration step by default so routine corrections need no orchestrator round trip.",
         "properties": {
             "review": stage,
             "launch": stage,
@@ -248,7 +248,7 @@ fn tools() -> Value {
         "description": "Server-side wait limit; use the default with a 3600-second Codex MCP timeout. Expiry does not cancel work."});
     let enqueue_and_wait = json!({
         "name": "enqueue_and_wait",
-        "description": "Preferred for a settled batch when no independent orchestrator work is needed. Submit a batch and wait for completion including automatic review/fix rounds, or actionable failure, pause or ready external step. Returns task IDs and compact handoffs. Requires stable batch_id; reuse the same batch after a lost response, never duplicate it.",
+        "description": "Default for the entire settled dependency graph (including sequential tasks and follow_up.review) when no independent orchestrator work is needed. Submit once and wait for completion including automatic review/fix rounds, or actionable failure, pause or ready external step. Do not manually supervise intermediate tasks or routine fixes. Returns task IDs and compact handoffs. Requires stable batch_id; reuse the same batch after a lost response, never duplicate it.",
         "inputSchema": {"type": "object", "properties": {
             "batch": blocking_batch_schema, "timeout_seconds": await_timeout.clone()
         }, "required": ["batch"], "additionalProperties": false},

@@ -1,6 +1,6 @@
 # Lyra
 
-Lyra is a local Ollama/Pi worker runtime and dashboard. Codex owns planning and acceptance; Lyra runs queued local tasks, dependencies, guarded file changes, review and fixes through MCP.
+Lyra is a local Ollama/Pi worker runtime and dashboard. Codex owns planning and final acceptance; by default it submits the full settled dependency graph once, and Lyra autonomously runs queued local tasks, dependencies, guarded file changes, independent review, fixes and repeat review through MCP. Manual checkpoints are for unresolved consequential decisions or actionable blockers, not routine handoffs.
 
 ## Connect Codex
 
