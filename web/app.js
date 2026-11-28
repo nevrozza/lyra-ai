@@ -6,7 +6,9 @@ import { createProjects } from './js/projects.js';
 import { initLayout } from './js/layout.js';
 import { createModels } from './js/models.js';
 import { createTelemetry } from './js/telemetry.js';
-import { get } from './js/ui.js';
+import { get, initDialogDismissal } from './js/ui.js';
+
+initDialogDismissal();
 
 const session = { closed: false, online: false, run: undefined, metrics: undefined };
 const uiRevision = document.querySelector('meta[name="lyra-ui-revision"]').content;
