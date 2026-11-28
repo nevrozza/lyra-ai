@@ -445,13 +445,102 @@ impl Store {
         let _guard = self.lock.lock().expect("project store lock");
         let mut catalog = self.list()?;
         let result = update(&mut catalog)?;
+        self.persist_catalog(&catalog)?;
+        Ok(result)
+    }
+
+    fn persist_catalog(&self, catalog: &Catalog) -> Result<()> {
         fs::create_dir_all(&self.directory).map_err(storage)?;
         let file = tempfile::NamedTempFile::new_in(&self.directory).map_err(storage)?;
-        serde_json::to_writer(file.as_file(), &catalog).map_err(storage)?;
+        serde_json::to_writer(file.as_file(), catalog).map_err(storage)?;
         file.as_file().sync_all().map_err(storage)?;
         file.persist(self.directory.join("projects.json"))
             .map_err(storage)?;
-        Ok(result)
+        Ok(())
+    }
+
+    // Hold the same catalog lock as save/enqueue across scope validation,
+    // folder creation and publication. A stale worker cannot mutate its old
+    // workspace after another chat has claimed the first project directory.
+    pub(super) fn guarded_mutation(
+        &self,
+        task: &Task,
+        skills: &[PathBuf],
+        versions: &mut write_scope::FileVersions,
+        request: &str,
+        claim: impl FnOnce(&Path) -> io::Result<bool>,
+        release: impl FnOnce(&Path),
+    ) -> io::Result<Option<PathBuf>> {
+        let _guard = self.lock.lock().expect("project store lock");
+        let as_io = |(_, message): HttpError| io::Error::other(message);
+        let mut catalog = self.list().map_err(as_io)?;
+        let index = catalog.projects.iter().position(|project| project.id == task.project.id)
+            .ok_or_else(|| io::Error::other("Project not found"))?;
+        let project = &catalog.projects[index];
+        project.ensure_active().map_err(as_io)?;
+        let session_id = task.session_id.ok_or_else(|| io::Error::other("Saved Work chat required"))?;
+        let session = project.session(session_id).map_err(as_io)?;
+        session.ensure_active().map_err(as_io)?;
+        if session.mode != ChatMode::Work {
+            return Err(io::Error::other("Chat is no longer in Work mode"));
+        }
+        if project.folders != task.project.folders {
+            return Err(io::Error::other("WORKSPACE_CHANGED: the project working folder changed. Finish this run and continue in the saved chat with the new workspace."));
+        }
+        let value: Value = serde_json::from_str(request)?;
+        let bootstrap = value["tool"] == "mkdir"
+            && project.folders.is_empty()
+            && !project.sessions.iter().any(|session| session.job.as_ref().is_some_and(queue::Job::pending))
+            && fs::read_dir(&task.workspace)?.next().is_none();
+        if !bootstrap {
+            write_scope::mutate_with_skills(&task.workspace, &task.folders, skills, versions, request, claim, release)?;
+            return Ok(None);
+        }
+
+        let raw = value["path"].as_str().ok_or_else(|| io::Error::other("mkdir requires path"))?;
+        let path = Path::new(raw);
+        if path.as_os_str().is_empty() || path.components().any(|part| match part {
+            std::path::Component::ParentDir | std::path::Component::CurDir => true,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => !path.is_absolute(),
+            _ => false,
+        }) {
+            return Err(io::Error::other("Use a concrete directory path without . or .."));
+        }
+        let requested = if path.is_absolute() { path.to_path_buf() } else { task.workspace.join(path) };
+        let parent = requested.parent().ok_or_else(|| io::Error::other("Choose a new directory under an existing parent"))?;
+        let leaf = requested.file_name().ok_or_else(|| io::Error::other("Choose a new directory, not a filesystem root"))?;
+        // The parent must already exist. Resolve it first, then validate the
+        // new leaf with the same guarded path rules used for ordinary mkdir.
+        let parent = canonical_folder(parent).map_err(as_io)?;
+        let target = write_scope::resolve(&parent, Path::new(leaf), true)?;
+        let data = self.directory.parent().unwrap_or(&self.directory).canonicalize()?;
+        let own_workspace = task.workspace.canonicalize()?;
+        if target.starts_with(&data) && !target.starts_with(&own_workspace) {
+            return Err(io::Error::other("Cannot initialize a workspace inside Lyra's private data directory"));
+        }
+        // Do not claim an existing directory via the bootstrap exception.
+        match fs::symlink_metadata(&target) {
+            Ok(_) => return Err(io::Error::other("The directory already exists; register it explicitly instead")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let newly_claimed = claim(&target)?;
+        let result = (|| {
+            fs::create_dir(&target)?;
+            let result: io::Result<PathBuf> = (|| {
+                let folder = canonical_folder(&target).map_err(as_io)?;
+                catalog.projects[index].folders = vec![folder.clone()];
+                self.persist_catalog(&catalog).map_err(as_io)?;
+                Ok(folder)
+            })();
+            if result.is_err() {
+                // Never recursively delete anything on failure.
+                let _ = fs::remove_dir(&target);
+            }
+            result
+        })();
+        if newly_claimed { release(&target); }
+        result.map(Some)
     }
 
     fn save(&self, input: SaveProject) -> Result<Project> {
@@ -1610,6 +1699,85 @@ mod tests {
             "id": project.id, "name": "Renamed",
         })).unwrap()).unwrap();
         assert_eq!(renamed.folders, [created]);
+    }
+
+    #[test]
+    fn first_mkdir_claims_workspace_and_rejects_stale_runs_and_external_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let store = Store::new(data.join("projects"));
+        let outside = dir.path().join("destination");
+        fs::create_dir(&outside).unwrap();
+        let project = store.save(SaveProject { id: None, name: "Test19".into(), folders: None }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Prepare", "mode": "work"
+        })).unwrap()).unwrap();
+        let stale = store.task(project.id, Some(chat.id), None).unwrap();
+        let second = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Other", "mode": "work"
+        })).unwrap()).unwrap();
+        let concurrent = store.task(project.id, Some(second.id), None).unwrap();
+        let mut versions = write_scope::FileVersions::default();
+        let mutate = |task: &Task, versions: &mut write_scope::FileVersions, tool: Value| {
+            store.guarded_mutation(task, &[], versions, &tool.to_string(), |_| Ok(true), |_| {})
+        };
+        let target = outside.join("Test19");
+        assert!(mutate(&stale, &mut versions, serde_json::json!({"tool":"write","path":outside.join("bad.txt"),"content":"no"})).is_err());
+        assert!(mutate(&stale, &mut versions, serde_json::json!({"tool":"mkdir","path":outside})).is_err());
+        let bound = mutate(&stale, &mut versions, serde_json::json!({"tool":"mkdir","path":target})).unwrap().unwrap();
+        assert_eq!(bound, canonical_folder(&target).unwrap());
+        assert!(target.is_dir());
+        assert!(mutate(&concurrent, &mut versions, serde_json::json!({"tool":"mkdir","path":outside.join("second")})).is_err());
+        assert!(!outside.join("second").exists());
+        assert!(mutate(&stale, &mut versions, serde_json::json!({"tool":"write","path":"old.txt","content":"no"})).is_err());
+        let current = store.task(project.id, Some(chat.id), None).unwrap();
+        assert_eq!(current.workspace, bound);
+        assert_eq!(current.folders, vec![bound.clone()]);
+        assert!(mutate(&current, &mut versions, serde_json::json!({"tool":"mkdir","path":outside.join("escape")})).is_err());
+        assert!(mutate(&current, &mut versions, serde_json::json!({"tool":"write","path":"index.html","content":"ok"})).unwrap().is_none());
+        assert_eq!(fs::read_to_string(target.join("index.html")).unwrap(), "ok");
+    }
+
+    #[test]
+    fn first_relative_mkdir_binds_and_failed_creation_does_not_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data").join("projects"));
+        let project = store.save(SaveProject { id: None, name: "Relative".into(), folders: None }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Prepare"
+        })).unwrap()).unwrap();
+        let task = store.task(project.id, Some(chat.id), None).unwrap();
+        let mut versions = write_scope::FileVersions::default();
+        let mkdir = |path: &Path, versions: &mut write_scope::FileVersions| store.guarded_mutation(
+            &task, &[], versions, &serde_json::json!({"tool":"mkdir","path":path}).to_string(),
+            |_| Ok(true), |_| {}
+        );
+        assert!(mkdir(Path::new("missing/child"), &mut versions).is_err());
+        assert!(mkdir(&store.directory.join("private"), &mut versions).is_err());
+        assert!(store.list().unwrap().projects[0].folders.is_empty());
+        let bound = mkdir(Path::new("site"), &mut versions).unwrap().unwrap();
+        assert_eq!(bound, canonical_folder(&task.workspace.join("site")).unwrap());
+        assert_eq!(store.list().unwrap().projects[0].folders, [bound]);
+    }
+
+    #[test]
+    fn existing_internal_content_prevents_automatic_rebinding() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("data").join("projects"));
+        let project = store.save(SaveProject { id: None, name: "Existing".into(), folders: None }).unwrap();
+        let chat = store.create_session(serde_json::from_value(serde_json::json!({
+            "project_id": project.id, "name": "Work",
+        })).unwrap()).unwrap();
+        let task = store.task(project.id, Some(chat.id), None).unwrap();
+        fs::write(task.workspace.join("existing.txt"), "keep").unwrap();
+        let mut versions = write_scope::FileVersions::default();
+        let target = dir.path().join("outside");
+        assert!(store.guarded_mutation(&task, &[], &mut versions,
+            &serde_json::json!({"tool":"mkdir","path":target}).to_string(), |_| Ok(true), |_| {}).is_err());
+        assert!(!target.exists());
+        assert!(store.guarded_mutation(&task, &[], &mut versions,
+            r#"{"tool":"mkdir","path":"assets"}"#, |_| Ok(true), |_| {}).unwrap().is_none());
+        assert!(task.workspace.join("assets").is_dir());
     }
 
     #[test]

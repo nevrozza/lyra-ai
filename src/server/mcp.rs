@@ -394,7 +394,7 @@ fn tools() -> Value {
         }),
         json!({
             "name": "save_project",
-            "description": "Create a project or update its registered folders and metadata.",
+            "description": "Create a project or update its registered folders and metadata. For a new destination, create a project without folders, then create a Work chat to perform the first guarded mkdir and bind the newly created directory automatically. Register existing destinations directly.",
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},

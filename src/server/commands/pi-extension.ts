@@ -51,7 +51,7 @@ export default function (pi) {
                 source: Type.String({ description: "Relative resource path within the package, e.g. assets/fonts/Example.ttf" }),
                 path,
             }), "Copy a skill asset to a new project file without reading its binary contents."],
-            ["mkdir", "Create a directory and missing parent directories within the registered workspace. Existing directories are accepted.", Type.Object({ path }), "Create an empty or nested directory; write already creates parents for files."],
+            ["mkdir", "Create a directory and missing parents within the registered workspace. For a fresh folderless project with an empty internal workspace and no queued work, the first mkdir can create a new directory under an existing authorized parent at any absolute path and bind it as the only project workspace. End the turn after binding.", Type.Object({ path }), "Create an empty or nested directory; write already creates parents for files."],
             ["edit", "Replace exact, unique, non-overlapping text in a file read this run. Generate replacements directly here.", Type.Object({
                 path,
                 edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
@@ -80,6 +80,7 @@ export default function (pi) {
                             : [{ type: "text", text: result.text }];
                         return { content, details: {} };
                     }
+                    if (result.workspace_bound) return { content: [{ type: "text", text: `Directory ready: ${result.workspace_bound}. This is now the project's only workspace. Finish the task and end this turn; the next run starts there.` }], details: result };
                     return { content: [{ type: "text", text: name === "mkdir" ? `Directory ready: ${args.path}` : `Updated ${args.path}` }], details: result };
                 },
             });
