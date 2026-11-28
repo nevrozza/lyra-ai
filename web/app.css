@@ -80,8 +80,6 @@ h2 { font-size: .96rem; font-weight: 650; }
 #agents-result { overflow-wrap: anywhere; }
 .project-workspace { margin-top: 16px; background: #171e1a; }
 .project-workspace-header { min-height: 54px; flex-wrap: wrap; }
-.project-system-link { margin-left: auto; color: var(--muted); font-size: .8rem; text-underline-offset: 4px; white-space: nowrap; }
-.project-system-link:hover { color: var(--accent); }
 .project-split { display: grid; grid-template-columns: minmax(205px, 24%) minmax(0, 1fr); min-height: min(570px, 75dvh); }
 .project-sidebar { display: grid; grid-template-rows: auto auto minmax(0, 1fr); align-content: start; gap: 14px; min-width: 0; padding: 16px 12px; border-right: 1px solid var(--line); border-radius: 0 0 0 12px; background: #141a17; }
 .project-sidebar nav { min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; }
@@ -560,7 +558,7 @@ meter::-moz-meter-bar { background: #b6d99a; border-radius: 7px; }
 
 /* Shared motion primitives. Avoid animating layout on hover or replaying
    entrance animations when polling replaces unchanged data. */
-button, .project-composer, .project-system-link, .group-context-entry {
+button, .project-composer, .group-context-entry {
   transition: background-color var(--motion-fast) var(--motion-ease),
     color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease);
 }
