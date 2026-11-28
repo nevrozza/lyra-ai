@@ -47,6 +47,11 @@ export function activityOpen(active, manual) {
   return manual ?? active;
 }
 
+export function shouldSubmitPrompt(event) {
+  return event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229
+    && !event.ctrlKey && !event.altKey && !event.metaKey;
+}
+
 export function createProjects({ onSelection = () => {} } = {}) {
   const tree = get('project-tree');
   const projectDialog = get('project-dialog');
@@ -76,6 +81,9 @@ export function createProjects({ onSelection = () => {} } = {}) {
   const sendButton = get('send-project-prompt');
   const stopButton = get('stop-project-prompt');
   const modelSelect = get('project-chat-model');
+  const modelPopover = get('chat-model-popover');
+  const modelOptions = get('chat-model-options');
+  let sizedPromptValue;
   const thinking = createThinkingControl();
   const drafts = new Map();
   const chatModels = new Map();
@@ -269,6 +277,9 @@ export function createProjects({ onSelection = () => {} } = {}) {
     projectForm.querySelector('[type="submit"]').disabled = !ready;
     chatForm.querySelector('[type="submit"]').disabled = !ready;
     composer.hidden = !chat || chat.archived || project.archived;
+    get('project-model-controls').hidden = composer.hidden;
+    if (composer.hidden) closeModelPopover();
+    else resizePrompt();
     const working = chatMode() === 'work';
     get('project-mode-control').hidden = !chat;
     const chatModeButton = get('project-mode-chat');
@@ -279,6 +290,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     prompt.placeholder = working ? 'Задача для Lyra…' : 'Спроси модель…';
     const model = refreshModels();
     modelSelect.disabled = !online || !model;
+    if (modelSelect.disabled) closeModelPopover();
     thinking.update(online && run && !composer.hidden ? model : undefined, run);
     sendButton.disabled = !online || saving || !model || !prompt.value.trim() || composer.hidden || Boolean(active);
     sendButton.hidden = Boolean(active);
@@ -297,8 +309,27 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const key = JSON.stringify([models, selected]);
     if (key !== modelOptionsKey) {
       modelOptionsKey = key;
-      setOptions(modelSelect, models.length ? models.map(model => [model, model]) :
-        [['', 'Нет доступных моделей']], selected ?? '');
+      get('project-chat-model-name').textContent = selected ?? 'Нет доступных моделей';
+      modelSelect.title = selected ?? 'Нет доступных моделей';
+      modelSelect.setAttribute('aria-label', selected ? `Модель: ${selected}` : 'Нет доступных моделей');
+      modelOptions.replaceChildren(...models.map(model => {
+        const choice = element('button', '');
+        choice.type = 'button';
+        choice.setAttribute('aria-pressed', String(model === selected));
+        const check = element('span', '✓');
+        check.className = 'terminal-check';
+        check.setAttribute('aria-hidden', 'true');
+        choice.append(element('span', model), check);
+        choice.onclick = () => {
+          if (modelSelect.disabled || composer.hidden) return;
+          chatModels.set(chatId, model);
+          closeModelPopover();
+          updateControls();
+          modelSelect.focus({ preventScroll: true });
+        };
+        return choice;
+      }));
+      positionModelPopover();
     }
     return selected;
   }
@@ -688,6 +719,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
       if (chat.group) collapsedGroups.delete(`${projectId}/group/${chat.group.id}`);
     }
     if (chatId !== previousChat) {
+      closeModelPopover();
       closeWorkspacePopover();
       closeEntryMenu();
       history = [];
@@ -1166,10 +1198,48 @@ export function createProjects({ onSelection = () => {} } = {}) {
     });
   };
 
-  modelSelect.onchange = () => {
-    chatModels.set(chatId, modelSelect.value);
-    updateControls();
+  function closeModelPopover() {
+    if (modelPopover.matches(':popover-open')) modelPopover.hidePopover();
+  }
+
+  function positionModelPopover() {
+    if (!modelPopover.matches(':popover-open')) return;
+    const rect = modelSelect.getBoundingClientRect();
+    const width = modelPopover.offsetWidth;
+    const height = modelPopover.offsetHeight;
+    const top = rect.top >= height + 12 ? rect.top - height - 4 : rect.bottom + 4;
+    modelPopover.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
+    modelPopover.style.top = Math.max(8, Math.min(top, window.innerHeight - height - 8)) + 'px';
+  }
+
+  modelSelect.onclick = () => {
+    if (modelSelect.disabled) return;
+    if (modelPopover.matches(':popover-open')) closeModelPopover();
+    else {
+      modelPopover.showPopover({ source: modelSelect });
+      positionModelPopover();
+      modelOptions.querySelector('[aria-pressed="true"]')?.focus({ preventScroll: true });
+    }
   };
+  modelPopover.addEventListener('toggle', () => {
+    modelSelect.setAttribute('aria-expanded', String(modelPopover.matches(':popover-open')));
+  });
+  window.addEventListener('resize', positionModelPopover);
+  window.addEventListener('scroll', positionModelPopover, true);
+
+  function resizePrompt(force = false) {
+    if (CSS.supports('field-sizing', 'content') || composer.hidden) return;
+    if (!force && sizedPromptValue === prompt.value) return;
+    sizedPromptValue = prompt.value;
+    prompt.style.height = 'auto';
+    prompt.style.height = prompt.scrollHeight + 'px';
+  }
+  window.addEventListener('resize', () => resizePrompt(true));
+  prompt.addEventListener('keydown', event => {
+    if (!shouldSubmitPrompt(event)) return;
+    event.preventDefault();
+    if (!event.repeat && !sendButton.disabled && !composer.hidden) composer.requestSubmit(sendButton);
+  });
   for (const mode of ['chat', 'work']) {
     get(`project-mode-${mode}`).onclick = () => {
       const project = selectedProject();
