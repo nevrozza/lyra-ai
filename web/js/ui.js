@@ -158,3 +158,31 @@ export function createChatScroll(scroller, bottomButton) {
   update();
   return { changed, goToEnd };
 }
+
+export function iconButton(label, path) {
+  const button = element('button', '');
+  button.type = 'button';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  // Static icon paths are authored locally, never from server configuration.
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [key, value] of Object.entries({ width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(key, value);
+  const shape = document.createElementNS(svg.namespaceURI, 'path');
+  shape.setAttribute('d', path);
+  svg.append(shape);
+  button.append(svg);
+  return button;
+}
+
+export const trashIcon = 'M3 6h18M8 6V3h8v3m3 0-1 15H6L5 6m5 4v7m4-7v7';
+
+export function settingsSwitch(name, enabled) {
+  const toggle = element('button', '');
+  toggle.type = 'button';
+  toggle.className = 'settings-switch';
+  toggle.setAttribute('role', 'switch');
+  toggle.setAttribute('aria-checked', String(enabled));
+  toggle.setAttribute('aria-label', name + ': включён');
+  toggle.title = enabled ? 'Выключить' : 'Включить';
+  return toggle;
+}

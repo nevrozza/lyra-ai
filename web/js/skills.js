@@ -1,8 +1,21 @@
-import { element, get } from './ui.js';
+import { element, get, iconButton, settingsSwitch, trashIcon } from './ui.js';
+import { renderMarkdown } from './markdown.js';
+
+export function groupSkills(skills) {
+  return {
+    custom: skills.filter(skill => !skill.role_template && !skill.builtin),
+    builtin: skills.filter(skill => !skill.role_template && skill.builtin),
+    roles: skills.filter(skill => skill.role_template),
+  };
+}
 
 export function createSkills() {
   const agents = createAgentsEditor();
   const form = get('skill-import');
+  const importDialog = get('skill-import-dialog');
+  const addSkill = get('add-skill');
+  const cancelImport = get('cancel-skill-import');
+  const importResult = get('skill-import-result');
   const button = get('install-skill');
   const folder = get('skill-folder');
   const file = get('skill-file');
@@ -13,6 +26,7 @@ export function createSkills() {
   const result = get('skill-result');
   const message = get('skill-catalog-message');
   const list = get('skill-catalog');
+  const builtinList = get('builtin-skill-catalog');
   const roleDetails = get('role-skills');
   const roleList = get('role-skill-catalog');
   const roleCount = get('role-skill-count');
@@ -23,9 +37,10 @@ export function createSkills() {
   let files = [];
 
   function updateControls() {
-    pickFolder.disabled = pickFile.disabled = saving || !online;
+    addSkill.disabled = pickFolder.disabled = pickFile.disabled = saving || !online;
+    cancelImport.disabled = saving;
     button.disabled = saving || !online || !files.length;
-    for (const control of [...list.querySelectorAll('button, input'), ...roleList.querySelectorAll('button, input')]) {
+    for (const control of [...list.querySelectorAll('button'), ...builtinList.querySelectorAll('button'), ...roleList.querySelectorAll('button')]) {
       control.disabled = saving || !online || (running && control.dataset.remove === 'true');
     }
   }
@@ -38,14 +53,14 @@ export function createSkills() {
       path: file.webkitRelativePath ? file.webkitRelativePath.split('/').slice(1).join('/') : file.name,
       file,
     }));
-    result.textContent = '';
+    importResult.textContent = '';
     if (!files.some(file => file.path === 'SKILL.md')) {
-      result.dataset.error = 'true';
-      result.textContent = 'В корне выбранного скилла нужен файл SKILL.md.';
+      importResult.dataset.error = 'true';
+      importResult.textContent = 'В корне выбранного скилла нужен файл SKILL.md.';
       files = [];
     } else if (files.length > 2048 || files.reduce((size, entry) => size + entry.file.size, 0) > 16 * 1024 * 1024) {
-      result.dataset.error = 'true';
-      result.textContent = 'Скилл может содержать до 2048 файлов общим объёмом до 16 МБ.';
+      importResult.dataset.error = 'true';
+      importResult.textContent = 'Скилл может содержать до 2048 файлов общим объёмом до 16 МБ.';
       files = [];
     }
     selection.textContent = files.length
@@ -61,51 +76,42 @@ export function createSkills() {
       if (!response.ok) throw new Error();
       const skills = await response.json();
       if (request !== revision) return;
-      const general = skills.filter(skill => !skill.role_template);
-      const roles = skills.filter(skill => skill.role_template);
-      message.textContent = general.length ? '' : 'Пока нет обычных скиллов.';
+      const { custom, builtin, roles } = groupSkills(skills);
+      message.textContent = '';
+      get('custom-skills-empty').hidden = custom.length > 0;
+      get('builtin-skills-empty').hidden = builtin.length > 0;
+      const count = group => group.filter(skill => skill.enabled).length + ' из ' + group.length;
+      get('custom-skill-count').textContent = count(custom);
+      get('builtin-skill-count').textContent = count(builtin);
       roleDetails.hidden = !roles.length;
-      roleCount.textContent = '· ' + roles.length;
+      roleCount.textContent = '· ' + count(roles);
       const renderSkill = skill => {
         const entry = element('li', '');
-        const description = element('p', skill.description);
-        description.className = 'secondary';
+        entry.className = 'settings-row';
         entry.dataset.enabled = String(skill.enabled);
-        const heading = element('div', '');
-        heading.className = 'skill-entry-heading';
-        const name = element('code', skill.name);
+        const info = element('div', '');
+        info.className = 'settings-info';
+        info.append(element('strong', skill.name));
+        if (skill.description) info.append(element('p', skill.description));
         const controls = element('div', '');
-        controls.className = 'skill-entry-controls';
-        const label = element('label', '');
-        label.className = 'skill-enable';
-        const toggle = element('input', '');
-        toggle.type = 'checkbox';
-        toggle.checked = skill.enabled;
-        toggle.setAttribute('aria-label', 'Включить скилл ' + skill.name);
-        toggle.onchange = () => changeSkill(skill, toggle.checked);
-        label.append(toggle, element('span', skill.enabled ? 'Включён' : 'Отключён'));
-        controls.append(label);
+        controls.className = 'settings-actions';
+        const toggle = settingsSwitch(skill.name, skill.enabled);
+        toggle.onclick = () => changeSkill(skill, !skill.enabled);
+        controls.append(toggle);
         if (!skill.builtin) {
-          const remove = element('button', 'Удалить');
-          remove.type = 'button';
-          remove.className = 'unload skill-remove';
+          const remove = iconButton('Удалить скилл ' + skill.name, trashIcon);
           remove.dataset.remove = 'true';
-          remove.title = 'Удалить скилл ' + skill.name;
+          remove.dataset.delete = '';
           remove.onclick = () => {
             if (window.confirm('Удалить скилл «' + skill.name + '» из Lyra?')) changeSkill(skill);
           };
           controls.append(remove);
         }
-        heading.append(name, controls);
-        entry.append(heading, description);
-        if (skill.role_template) {
-          const note = element('small', 'При отключении расширенные инструкции не загружаются. Базовая роль сохраняется.');
-          note.className = 'secondary';
-          entry.append(note);
-        }
+        entry.append(info, controls);
         return entry;
       };
-      list.replaceChildren(...general.map(renderSkill));
+      list.replaceChildren(...custom.map(renderSkill));
+      builtinList.replaceChildren(...builtin.map(renderSkill));
       roleList.replaceChildren(...roles.map(renderSkill));
       updateControls();
     } catch {
@@ -137,6 +143,19 @@ export function createSkills() {
     }
   }
 
+  addSkill.onclick = () => {
+    if (!online || saving) return;
+    importResult.textContent = '';
+    importDialog.showModal();
+  };
+  cancelImport.onclick = () => { if (!saving) importDialog.close(); };
+  importDialog.oncancel = event => { if (saving) event.preventDefault(); };
+  importDialog.addEventListener('close', () => {
+    files = [];
+    selection.textContent = emptySelection;
+    importResult.textContent = '';
+    updateControls();
+  });
   pickFolder.addEventListener('click', () => folder.click());
   pickFile.addEventListener('click', () => file.click());
   folder.addEventListener('change', () => select(folder));
@@ -146,8 +165,8 @@ export function createSkills() {
     event.preventDefault();
     if (saving || !online || !files.length) return;
     saving = true;
-    result.dataset.error = 'false';
-    result.textContent = 'Загрузка…';
+    importResult.dataset.error = 'false';
+    importResult.textContent = 'Загрузка…';
     updateControls();
     try {
       const payload = [];
@@ -164,11 +183,13 @@ export function createSkills() {
       const skill = await response.json();
       files = [];
       selection.textContent = emptySelection;
+      result.dataset.error = 'false';
       result.textContent = `Скилл «${skill.name}» установлен.`;
+      importDialog.close();
       await refreshCatalog();
     } catch (error) {
-      result.dataset.error = 'true';
-      result.textContent = error instanceof TypeError || !error.message
+      importResult.dataset.error = 'true';
+      importResult.textContent = error instanceof TypeError || !error.message
         ? 'Не удалось установить скилл.'
         : error.message;
     } finally {
@@ -192,21 +213,42 @@ export function createSkills() {
 }
 
 function createAgentsEditor() {
+  const dialog = get('agents-dialog');
+  const open = get('edit-agents');
   const form = get('agents-form');
   const content = get('agents-content');
+  const preview = get('agents-preview');
+  const editTab = get('agents-edit-tab');
+  const previewTab = get('agents-preview-tab');
   const button = get('save-agents');
+  const cancel = get('cancel-agents');
   const result = get('agents-result');
+  const loadResult = get('agents-load-result');
   let online = false;
   let busy = false;
   let saved = null;
 
   function updateControls() {
-    content.readOnly = busy || saved === null;
-    button.disabled = !online || content.readOnly || content.value === saved;
+    content.readOnly = !online || busy || saved === null;
+    button.disabled = content.readOnly || content.value === saved;
+    open.disabled = !online || busy || saved === null;
+    cancel.disabled = busy;
+    get('agents-summary').textContent = saved === null ? 'Нет данных'
+      : saved.trim() ? saved.split('\n').length + ' строк · ' + new TextEncoder().encode(saved).length.toLocaleString('ru-RU') + ' Б'
+      : 'Пустой файл';
+  }
+
+  function switchTab(next) {
+    content.hidden = next;
+    preview.hidden = !next;
+    editTab.setAttribute('aria-pressed', String(!next));
+    previewTab.setAttribute('aria-pressed', String(next));
+    if (next) preview.replaceChildren(renderMarkdown(content.value || 'Нет инструкций.'));
+    else preview.replaceChildren();
   }
 
   async function refresh() {
-    if (!online || busy || (saved !== null && content.value !== saved)) return;
+    if (!online || busy || dialog.open) return;
     busy = true;
     updateControls();
     try {
@@ -214,17 +256,36 @@ function createAgentsEditor() {
       if (!response.ok) throw new Error(await response.text());
       content.value = await response.json();
       saved = content.value;
-      result.textContent = '';
+      loadResult.textContent = '';
     } catch (error) {
-      result.dataset.error = 'true';
-      result.textContent = error instanceof TypeError || !error.message
-        ? 'Не удалось загрузить AGENTS.md.'
-        : error.message;
+      loadResult.dataset.error = 'true';
+      loadResult.textContent = error instanceof TypeError || !error.message
+        ? 'Не удалось загрузить AGENTS.md.' : error.message;
     } finally {
       busy = false;
       updateControls();
     }
   }
+
+  open.onclick = async () => {
+    if (open.disabled) return;
+    await refresh();
+    if (saved === null || !online) return;
+    content.value = saved;
+    result.textContent = '';
+    switchTab(false);
+    dialog.showModal();
+  };
+  editTab.onclick = () => switchTab(false);
+  previewTab.onclick = () => switchTab(true);
+  const canClose = () => !busy && (content.value === saved || window.confirm('Закрыть без сохранения AGENTS.md?'));
+  dialog.oncancel = event => { if (!canClose()) event.preventDefault(); };
+  cancel.onclick = () => { if (canClose()) dialog.close(); };
+  dialog.addEventListener('close', () => {
+    content.value = saved ?? '';
+    switchTab(false);
+    updateControls();
+  });
 
   content.addEventListener('input', () => {
     result.textContent = '';
@@ -251,8 +312,7 @@ function createAgentsEditor() {
     } catch (error) {
       result.dataset.error = 'true';
       result.textContent = error instanceof TypeError || !error.message
-        ? 'Не удалось сохранить AGENTS.md.'
-        : error.message;
+        ? 'Не удалось сохранить AGENTS.md.' : error.message;
     } finally {
       busy = false;
       updateControls();
