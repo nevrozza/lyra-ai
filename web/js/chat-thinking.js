@@ -58,6 +58,9 @@ export function createThinkingControl() {
     const selected = settings && currentChoice(settings);
     const label = labelFor(selected);
     buttonLabel.textContent = label ? `Thinking · ${label}` : 'Thinking';
+    button.title = buttonLabel.textContent;
+    button.setAttribute('aria-label', buttonLabel.textContent);
+    button.dataset.active = String(selected != null && selected !== false && selected !== 'off');
     get('chat-thinking-name').textContent = model ?? '';
     get('chat-thinking-note').hidden = !settings?.off_uses_lowest;
     const key = JSON.stringify(settings?.options ?? []);

@@ -102,16 +102,23 @@
           <p id="project-archive-notice" class="secondary project-feedback" hidden></p>
           <form id="project-prompt-form" class="project-composer" hidden>
             <label for="project-prompt" class="visually-hidden">Сообщение для Lyra</label>
-            <textarea id="project-prompt" rows="2" placeholder="Спроси модель…" required></textarea>
-            <div class="project-controls project-composer-controls">
-              <label class="project-model-label" for="project-chat-model">Модель
-                <select id="project-chat-model"></select>
-              </label>
-              <button id="chat-thinking" class="unload" type="button" aria-expanded="false" aria-controls="chat-thinking-popover" hidden><span id="chat-thinking-label">Thinking</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
-              <button id="send-project-prompt" type="submit">Отправить</button>
-            </div>
+            <textarea id="project-prompt" rows="1" placeholder="Спроси модель…" aria-label="Сообщение для Lyra" required></textarea>
+            <button id="send-project-prompt" type="submit" aria-label="Отправить" title="Отправить (Enter)">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+            </button>
           </form>
           <div class="project-permissions">
+            <div id="project-model-controls" class="project-model-controls" hidden>
+              <button id="project-chat-model" class="terminal-mode project-model-button" type="button" aria-expanded="false" aria-controls="chat-model-popover" aria-label="Выбрать модель" disabled>
+                <span id="project-chat-model-name">Нет доступных моделей</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <button id="chat-thinking" class="terminal-mode" type="button" aria-expanded="false" aria-controls="chat-thinking-popover" aria-label="Thinking" title="Thinking" hidden>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 18V5a3 3 0 0 0-6-.5 4 4 0 0 0-2 6.5 4 4 0 0 0 1 7.5A4 4 0 0 0 12 18Zm0 0V5a3 3 0 0 1 6-.5 4 4 0 0 1 2 6.5 4 4 0 0 1-1 7.5A4 4 0 0 1 12 18ZM8 10c0 2 2 3 4 3m4-3c0 2-2 3-4 3M6 4.5 7 7m11-2.5L17 7M5 18.5l2-2.5m12 2.5L17 16"/></svg>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                <span id="chat-thinking-label" class="visually-hidden">Thinking</span>
+              </button>
+            </div>
             <button id="command-settings-global" class="terminal-mode" type="button" aria-expanded="false" aria-controls="command-settings-popover" title="Терминал — глобальные разрешения Lyra">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/></svg>
               <span id="command-mode-label">Нет данных</span>
@@ -131,6 +138,10 @@
           <button id="command-notifications" class="unload" type="button" hidden>Включить уведомления</button>
           <p id="command-notification-status" class="secondary" role="status" hidden></p>
         </div>
+      </div>
+      <div id="chat-model-popover" class="terminal-popover chat-model-popover" popover="auto" role="group" aria-label="Выбор модели">
+        <p class="secondary">Модель</p>
+        <div id="chat-model-options" class="terminal-options"></div>
       </div>
       <div id="chat-thinking-popover" class="terminal-popover" popover="auto" role="group" aria-labelledby="chat-thinking-title">
         <p id="chat-thinking-title" class="secondary">Thinking</p>
