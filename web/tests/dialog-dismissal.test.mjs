@@ -28,3 +28,13 @@ test('all application dialogs and popovers opt into native light dismissal', () 
   assert.ok(popovers.length > 0);
   assert.ok(popovers.every(match => match[1] === 'auto'));
 });
+
+
+test('static popover triggers are native invokers so a click on the trigger is not outside dismissal', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  for (const id of ['project-workspace-popover', 'chat-model-popover', 'chat-thinking-popover', 'command-settings-popover']) {
+    const trigger = [...html.matchAll(/<button\b[^>]*>/g)].map(match => match[0])
+      .find(tag => tag.includes('aria-controls="' + id + '"'));
+    assert.ok(trigger?.includes('popovertarget="' + id + '"'), id);
+  }
+});

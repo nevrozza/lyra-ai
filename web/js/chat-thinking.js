@@ -106,7 +106,8 @@ export function createThinkingControl() {
     render();
   }
 
-  button.onclick = () => {
+  button.onclick = event => {
+    event.preventDefault();
     if (button.disabled || !settings?.options.length) return;
     if (isOpen()) {
       close();

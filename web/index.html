@@ -50,7 +50,7 @@
                 <span id="project-working-model" class="project-working-model" role="status" hidden>
                   <span class="project-working-dot" aria-hidden="true"></span><span id="project-working-model-name"></span>
                 </span>
-                <button id="project-chat-workspace" class="project-workspace-button" type="button" aria-expanded="false" aria-controls="project-workspace-popover" aria-label="Рабочие папки и зависимости" title="Рабочие папки и зависимости" hidden>
+                <button id="project-chat-workspace" class="project-workspace-button" type="button" aria-expanded="false" aria-controls="project-workspace-popover" popovertarget="project-workspace-popover" aria-label="Рабочие папки и зависимости" title="Рабочие папки и зависимости" hidden>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
                 </button>
                 <div id="project-workspace-popover" class="terminal-popover project-workspace-popover" popover="auto" role="group" aria-label="Рабочие папки и зависимости">
@@ -108,17 +108,17 @@
           </form>
           <div class="project-permissions">
             <div id="project-model-controls" class="project-model-controls" hidden>
-              <button id="project-chat-model" class="terminal-mode project-model-button" type="button" aria-expanded="false" aria-controls="chat-model-popover" aria-label="Выбрать модель" disabled>
+              <button id="project-chat-model" class="terminal-mode project-model-button" type="button" aria-expanded="false" aria-controls="chat-model-popover" popovertarget="chat-model-popover" aria-label="Выбрать модель" disabled>
                 <span id="project-chat-model-name">Нет доступных моделей</span>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
               </button>
-              <button id="chat-thinking" class="terminal-mode" type="button" aria-expanded="false" aria-controls="chat-thinking-popover" aria-label="Thinking" title="Thinking" hidden>
+              <button id="chat-thinking" class="terminal-mode" type="button" aria-expanded="false" aria-controls="chat-thinking-popover" popovertarget="chat-thinking-popover" aria-label="Thinking" title="Thinking" hidden>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 18V5a3 3 0 0 0-6-.5 4 4 0 0 0-2 6.5 4 4 0 0 0 1 7.5A4 4 0 0 0 12 18Zm0 0V5a3 3 0 0 1 6-.5 4 4 0 0 1 2 6.5 4 4 0 0 1-1 7.5A4 4 0 0 1 12 18ZM8 10c0 2 2 3 4 3m4-3c0 2-2 3-4 3M6 4.5 7 7m11-2.5L17 7M5 18.5l2-2.5m12 2.5L17 16"/></svg>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
                 <span id="chat-thinking-label" class="visually-hidden">Thinking</span>
               </button>
             </div>
-            <button id="command-settings-global" class="terminal-mode" type="button" aria-expanded="false" aria-controls="command-settings-popover" title="Терминал — глобальные разрешения Lyra">
+            <button id="command-settings-global" class="terminal-mode" type="button" aria-expanded="false" aria-controls="command-settings-popover" popovertarget="command-settings-popover" title="Терминал — глобальные разрешения Lyra">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/></svg>
               <span id="command-mode-label">Нет данных</span>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
