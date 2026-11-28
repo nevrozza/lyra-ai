@@ -27,6 +27,8 @@ use super::{
     sessions::{Call, Kind},
 };
 
+mod orchestrator_skill;
+
 const VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 pub(super) fn routes() -> Router<Arc<App>> {
     Router::new().route("/mcp", post(handle))
@@ -65,11 +67,23 @@ async fn handle(
             json!({
                 "protocolVersion": if VERSIONS.contains(&version) { version } else { VERSIONS[0] },
                 "serverInfo": {"name": "lyra", "version": env!("CARGO_PKG_VERSION")},
-                "capabilities": {"tools": {}}
+                "capabilities": {"tools": {}, "resources": {}},
+                "instructions": orchestrator_skill::INSTRUCTIONS
             })
         }
         "ping" => json!({}),
         "tools/list" => json!({"tools": tools()}),
+        "resources/list" => orchestrator_skill::list(),
+        "resources/templates/list" => json!({"resourceTemplates": []}),
+        "resources/read" => {
+            let Some(uri) = params["uri"].as_str() else {
+                return rpc_error(id, -32602, "Resource URI required");
+            };
+            match orchestrator_skill::read(uri) {
+                Some(resource) => resource,
+                None => return rpc_error(id, -32602, "Unknown Lyra resource"),
+            }
+        }
         "tools/call" => {
             let Some(name) = params["name"].as_str() else {
                 return rpc_error(id, -32602, "Tool name required");
@@ -77,6 +91,7 @@ async fn handle(
             if !matches!(
                 name,
                 "inspect"
+                    | "get_orchestrator_skill"
                     | "set_description"
                     | "manage_model"
                     | "run_model"
@@ -488,6 +503,7 @@ fn tools() -> Value {
         }),
     ]);
     tools.as_array_mut().expect("tool definitions").extend([
+        orchestrator_skill::tool(),
         complete_step,
         retry_task,
         enqueue_and_wait,
@@ -635,6 +651,10 @@ async fn call(
     trace: &mut Call,
 ) -> Result<ToolOutput, String> {
     let text = match name {
+        "get_orchestrator_skill" => {
+            let request: orchestrator_skill::Request = arguments(args)?;
+            orchestrator_skill::get(request)
+        }
         "list_mcp_servers" => {
             let _: NoArguments = arguments(args)?;
             project_result(super::mcp_servers::list_for_orchestrator(&app).await)

@@ -45,6 +45,20 @@ Register the requested folder and identify `landing.html` in each writer's task.
 
 This is an illustrative three-pass plan, not a required number of tasks. Omit `parallel` for the shared-file writes. If using this plan, check that the queue returns three implementation task IDs and a separate review task ID. Report the actual stages, checks, and any blockers after completion.
 
+## Planning and checkpoints
+
+For a nontrivial change, plan before dispatch, using the least coordination that makes the work reliable:
+
+1. **Ground the goal.** Read the relevant project facts or obtain a bounded discovery handoff. List observable user outcomes, required invariants and failure cases. Distinguish verified contracts from proposed choices and unknowns.
+2. **Choose a slice.** Prefer a small working vertical path (the necessary data, logic, interface and checks for one outcome) over disconnected layers when the path can be owned and verified coherently. Component-level work is equally valid when its contract is settled, separate ownership avoids conflicts, or useful parallelism reduces total time. A single coherent worker is often best for coupled work.
+3. **Resolve risk early.** Test a critical uncertain API, feasibility assumption or shared contract with a focused read-only discovery or minimal authorized implementation/check before scheduling its consumers. The orchestrator approves consequential decisions, not a mechanical queue status. Keep ordinary decisions in the technical brief; no approval ceremony for routine work.
+4. **Map dependencies and cost.** Identify real information dependencies, overlapping mutations, shared artifacts, and resource constraints. Reserve an eligible independent reviewer. Estimate time to verified completion from observed capability, benchmark/load timings, expected generation and verification, context, memory and coordination; do not use file-count thresholds or invented timing estimates.
+5. **Dispatch and adapt.** Encode settled work in the queue and `after`, use `group_brief` for durable shared goals/contracts, and inspect the actual handoff at meaningful milestones. Continue independent work where useful. Replan the remaining scope if evidence contradicts the assumptions; preserve existing IDs, accepted decisions, successful work and cancellation. Verify assembled behavior before accepting it.
+
+A useful task has a named deliverable, intended components or paths, prerequisite results, observable acceptance conditions, a focused verification method, and a concise handoff. Use the existing technical specification checklist; do not duplicate it in a second task tracker. The group brief and persisted task graph are the plan. Do not create `tasks/plan.md`, `tasks/todo.md`, or external tracker items unless the user/project explicitly requires them. Checkpoints belong at risky decisions, dependency boundaries and meaningful integrated results, not after an arbitrary number of files or tasks. Ask the user only for consequential unresolved choices they have not delegated. Required independent final review remains unchanged.
+
+For example, when adding a feature with an uncertain storage contract, first confirm the storage behavior, approve the contract, then choose either one coherent data-to-UI slice or independent API/UI work with an explicit integration dependency. If the next feature builds on this one, release it after the prerequisite has been verified; if unrelated and memory permits, it can overlap. Do not perform a separate design run for an obvious one-line fix.
+
 ## Plan and submit
 
 Use the technical specification checklist in [the main skill](../SKILL.md#write-actionable-technical-specifications) for every implementation, fix, review and continuation. The orchestrator should investigate relevant code or obtain an explicit discovery handoff before specifying existing APIs. State known contracts, steps, constraints, failure cases, focused verification and handoff; adapt the level of implementation detail to model intelligence. Keep the shared requirements in the group brief, but do not rely on a vague reference when the task needs a precise contract.
