@@ -88,13 +88,15 @@ async fn handle(
             let Some(name) = params["name"].as_str() else {
                 return rpc_error(id, -32602, "Tool name required");
             };
+            if name == "run_model" {
+                return rpc_error(id, -32602, "run_model was removed: create or select a project chat in Chat mode, then call run_pi with project_id and project_session_id.");
+            }
             if !matches!(
                 name,
                 "inspect"
                     | "get_orchestrator_skill"
                     | "set_description"
                     | "manage_model"
-                    | "run_model"
                     | "run_pi"
                     | "list_projects"
                     | "save_project"
@@ -146,7 +148,7 @@ async fn handle(
                 }
                 detail.push_str(action);
             }
-            if matches!(name, "inspect" | "run_model")
+            if name == "inspect"
                 && let Some(tokens) = args["context_tokens"].as_u64()
                 && (1..=u64::from(u32::MAX)).contains(&tokens)
             {
@@ -374,18 +376,6 @@ fn tools() -> Value {
             "annotations": {"destructiveHint": false}
         }),
         json!({
-            "name": "run_model",
-            "description": "Generate a text response with an installed Ollama model without a Lyra output token cap.",
-            "inputSchema": {"type": "object", "properties": {
-                "model": {"type": "string", "description": "Model name from Lyra inspect"},
-                "prompt": {"type": "string", "minLength": 1, "description": "Text prompt."},
-                "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Manual context window for this call. Saved to the model when Ollama finishes. Omit for the saved setting or VRAM-aware Auto (not persisted); require_loaded preserves the existing loaded-runner behavior."},
-                "think": {"anyOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}], "description": "Optional Thinking override. Pass false for Off, true for On, or a model-supported level. Omit to use the Lyra model setting or the Ollama default."},
-                "require_loaded": {"type": "boolean", "description": "Use only a model already loaded with the requested or configured context"}
-            }, "required": ["model", "prompt"], "additionalProperties": false},
-            "annotations": {"destructiveHint": false}
-        }),
-        json!({
             "name": "list_projects",
             "description": "List projects and saved Pi chats with IDs and archive status.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
@@ -486,19 +476,19 @@ fn tools() -> Value {
         }),
         json!({
             "name": "run_pi",
-            "description": "Run Pi with an installed Ollama model in Chat or Work mode.",
+            "description": "Run an installed Ollama model in an existing saved project chat (Chat or Work mode). Both project_id and project_session_id are required. Create a project/chat first if necessary; queued tasks create their chats automatically.",
             "inputSchema": {"type": "object", "properties": {
                 "model": {"type": "string"},
-                "workspace": {"type": "string", "description": "Absolute folder path. Required for standalone runs. With project_id, choose a registered folder or omit for the default. Ordinary saved chats also inherit this default. Queued steps retain their reserved execution root."},
-                "project_id": {"type": "integer", "minimum": 1, "description": "Lyra project to use. Loads instructions from its registered folders."},
-                "project_session_id": {"type": "integer", "minimum": 1, "description": "Saved project chat to continue. Requires project_id."},
-                "mode": {"enum": ["chat", "work"], "description": "Expected saved mode for an existing chat. For runs without a saved chat, selects the mode and defaults to Work."},
+                "workspace": {"type": "string", "description": "Optional registered project folder. Omit for the default project workspace, including the internal workspace of a folderless project. Queued steps retain their reserved execution root."},
+                "project_id": {"type": "integer", "minimum": 1, "description": "Required ID of the active Lyra project. Loads instructions from its registered folders."},
+                "project_session_id": {"type": "integer", "minimum": 1, "description": "Required ID of an active saved chat belonging to project_id."},
+                "mode": {"enum": ["chat", "work"], "description": "Expected saved mode of the chat. Change it with set_project_session_mode if needed; omit to use the saved mode."},
                 "prompt": {"type": "string", "minLength": 1, "description": "Task prompt."},
                 "allow_commands": {"type": "boolean", "deprecated": true, "description": "Accepted for older clients. Lyra's global command mode controls approval."},
                 "skills": {"type": "array", "items": {"type": "string"}, "description": "Limit this run to enabled Lyra skill names. Omit for enabled non-role skills, or pass [] to run without optional skills. Disabled or removed names are rejected."},
                 "context_tokens": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "description": "Optional manual context window for this run. Omit for the saved setting or VRAM-aware Auto. Uses a separate model profile without changing the saved default."},
                 "role": worker_role
-            }, "required": ["model", "prompt"], "additionalProperties": false},
+            }, "required": ["model", "prompt", "project_id", "project_session_id"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
         }),
     ]);
@@ -516,7 +506,7 @@ fn tools() -> Value {
             "type": "string", "description": "Shared ID for related calls in the dashboard",
             "minLength": 1, "maxLength": 80, "pattern": "^[A-Za-z0-9._-]+$"
         });
-        if matches!(tool["name"].as_str(), Some("run_model" | "run_pi")) {
+        if tool["name"] == "run_pi" {
             tool["outputSchema"] = json!({
                 "type": "object",
                 "properties": {
@@ -572,17 +562,6 @@ struct SetDescription {
 struct ManageModel {
     model: String,
     action: ollama::ModelAction,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunModel {
-    model: String,
-    prompt: String,
-    context_tokens: Option<NonZeroU32>,
-    think: Option<ollama::Think>,
-    #[serde(default)]
-    require_loaded: bool,
 }
 
 #[derive(Deserialize)]
@@ -687,7 +666,6 @@ async fn call(
             }
         }
         "manage_model" => manage_model(app, arguments(args)?).await,
-        "run_model" => return run_model(app, arguments(args)?, trace).await,
         "run_pi" => {
             return run_pi(
                 app,
@@ -842,109 +820,11 @@ pub(super) fn validate_pi_generation(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_model(
-    app: Arc<App>,
-    request: RunModel,
-    trace: &mut Call,
-) -> Result<ToolOutput, String> {
-    validate_pi_generation(&request.prompt)?;
-    if matches!(&request.think, Some(ollama::Think::Level(level)) if level.trim().is_empty()) {
-        return Err("think must be a boolean or a non-empty supported level".into());
+fn require_saved_chat(project: Option<u64>, chat: Option<u64>) -> Result<(u64, u64), String> {
+    match (project, chat) {
+        (Some(project), Some(chat)) if project > 0 && chat > 0 => Ok((project, chat)),
+        _ => Err("Model inference requires an existing saved project chat: provide project_id and project_session_id. Use save_project and create_project_session first, or enqueue a project task.".into()),
     }
-    let model = installed_model(&request.model).await?;
-    let delegation = {
-        let _admission = app.context_admission.lock().await;
-        begin_delegation(&app, &model, DelegationScope::Standalone)?
-    };
-    let execution: Result<_, String> = async {
-        let settings = model_settings(&app, &model)?;
-        let requested = request.context_tokens.map(NonZeroU32::get);
-        let manual = requested.or(settings.context_tokens);
-        let auto = if request.require_loaded {
-            None
-        } else if manual.is_some() {
-            release_idle_profiles(&model, manual, false).await?;
-            None
-        } else {
-            select_idle_auto(&app, &model, 1, 1).await?.tokens
-        };
-        let store = app.clone();
-        let source = model.clone();
-        tokio::task::spawn_blocking(move || {
-            let tokens = settings.context_tokens;
-            let selected = requested.or(auto);
-            let reply = ollama::chat(
-                &source,
-                &request.prompt,
-                tokens,
-                selected,
-                request.require_loaded,
-                request.think.or(settings.think),
-            )?;
-            let saved = if requested.is_some() && requested != tokens && reply.completed() {
-                store
-                    .benchmarks
-                    .set_context(source, requested)
-                    .map(|()| true)
-            } else {
-                Ok(false)
-            };
-            Ok((reply, saved, selected.or(tokens)))
-        })
-        .await
-        .map_err(|_| "Ollama chat task failed".to_owned())?
-    }.await;
-    let context_changed = execution
-        .as_ref()
-        .is_ok_and(|(_, saved, _)| matches!(saved, Ok(true)));
-    finish_delegation(&app, delegation, execution.is_ok(), context_changed).await;
-    let (reply, saved, selected_context) = execution?;
-    if selected_context.is_none() {
-        trace.event(Kind::Pi, "Context window", "Auto unavailable or require_loaded: using Ollama's runner/default context (not a measured fit).", None);
-    }
-    trace.record_token_usage(
-        reply.prompt_eval_count,
-        reply.eval_count,
-        reply.stop_reason(),
-    );
-    let save_warning = saved.err().map_or_else(String::new, |error| {
-        format!("\nLyra could not save the context setting: {error}")
-    });
-    let had_thinking = reply.thinking().is_some();
-    let stop_reason = reply.stop_reason().map(str::to_owned);
-    let generation = Some(GenerationInfo {
-        truncated: stop_reason.as_deref() == Some("length") || !reply.completed(),
-        stop_reason,
-        text_only: None,
-        context: selected_context.map(|context_tokens| PiContext { context_tokens, notice: None }),
-        work_progress: None,
-    });
-    if let Some(thinking) = reply.thinking() {
-        trace.event(Kind::Thinking, "Ollama", thinking, None);
-    }
-    let (text, truncated) = match reply.into_text() {
-        Ok(answer) => answer,
-        Err(error) => {
-            return Ok(ToolOutput {
-                text: format!("{error}{save_warning}"),
-                is_error: true,
-                generation,
-            });
-        }
-    };
-    trace.event(Kind::Answer, "Ollama", &text, None);
-    let status = if truncated && had_thinking {
-        " (provider stopped at a generation/context limit after thinking)"
-    } else if truncated {
-        " (output limit reached)"
-    } else {
-        ""
-    };
-    Ok(ToolOutput {
-        text: format!("{model}{status}\n{text}{save_warning}"),
-        is_error: false,
-        generation,
-    })
 }
 
 async fn run_pi(
@@ -955,37 +835,20 @@ async fn run_pi(
     reserved: Option<u64>,
 ) -> Result<ToolOutput, String> {
     validate_pi_generation(&request.prompt)?;
-    let session_id = request.project_session_id;
-    let (project, workspace) = if let Some(id) = request.project_id {
-        let workspace = request.workspace;
-        let chat_session_id = request.chat_session_id.or(session_id);
-        let project = projects::work(app.clone(), move |app| {
-            app.projects.task(id, chat_session_id, workspace.as_deref())
-        })
-        .await
-        .map_err(|(_, error)| error)?;
-        if reserved.is_none() && session_id.is_some_and(|id| project.project.has_pending_task(id)) {
-            return Err("Дождитесь завершения задачи в очереди или отмените её.".into());
-        }
-        let workspace = project.workspace.clone();
-        (Some(project), workspace)
-    } else {
-        if session_id.is_some() {
-            return Err("project_session_id requires project_id".into());
-        }
-        let workspace = request.workspace.ok_or("Provide workspace or project_id")?;
-        if !workspace.is_absolute()
-            || !tokio::fs::metadata(&workspace)
-                .await
-                .is_ok_and(|metadata| metadata.is_dir())
-        {
-            return Err("workspace must be an absolute path to an existing directory".into());
-        }
-        let workspace = tokio::fs::canonicalize(&workspace)
-            .await
-            .map_err(|error| format!("Could not resolve workspace: {error}"))?;
-        (None, workspace)
-    };
+    let (project_id, owner_id) = require_saved_chat(request.project_id, request.project_session_id)?;
+    let session_id = Some(owner_id);
+    let requested_workspace = request.workspace;
+    let chat_session_id = request.chat_session_id.unwrap_or(owner_id);
+    let task_project = projects::work(app.clone(), move |app| {
+        app.projects.task(project_id, Some(chat_session_id), requested_workspace.as_deref())
+    })
+    .await
+    .map_err(|(_, error)| error)?;
+    if reserved.is_none() && task_project.project.has_pending_task(owner_id) {
+        return Err("Дождитесь завершения задачи в очереди или отмените её.".into());
+    }
+    let workspace = task_project.workspace.clone();
+    let project = Some(task_project);
     let saved_mode = project.as_ref().and_then(|project| project.mode);
     if let Some((expected, current)) = request.mode.zip(saved_mode)
         && expected != current
@@ -1038,13 +901,9 @@ async fn run_pi(
     })
     .await
     .map_err(|error| error.to_string())??;
-    let scope = if project.is_some() {
-        DelegationScope::Project {
-            session_id,
-            work: !text_only,
-        }
-    } else {
-        DelegationScope::Standalone
+    let scope = DelegationScope::Project {
+        session_id,
+        work: !text_only,
     };
     let mut selection = request.context_selection.unwrap_or_else(|| AutoChoice::manual(tokens));
     let delegation = match reserved {
@@ -1936,4 +1795,29 @@ fn room(memory: &telemetry::Memory, releasable: Option<u64>) -> u64 {
     memory
         .total
         .saturating_sub(memory.used.saturating_sub(releasable.unwrap_or(0)))
+}
+
+#[cfg(test)]
+mod saved_chat_policy_tests {
+    use super::*;
+
+    #[test]
+    fn direct_inference_requires_both_saved_ids() {
+        for (project, chat) in [(None, None), (Some(1), None), (None, Some(2)), (Some(0), Some(2)), (Some(1), Some(0))] {
+            assert!(require_saved_chat(project, chat).is_err());
+        }
+        assert_eq!(require_saved_chat(Some(1), Some(2)).unwrap(), (1, 2));
+    }
+
+    #[test]
+    fn mcp_advertises_only_saved_chat_inference() {
+        let definitions = tools();
+        let definitions = definitions.as_array().unwrap();
+        assert!(!definitions.iter().any(|tool| tool["name"] == "run_model"));
+        let run = definitions.iter().find(|tool| tool["name"] == "run_pi").unwrap();
+        let required = run["inputSchema"]["required"].as_array().unwrap();
+        for field in ["model", "prompt", "project_id", "project_session_id"] {
+            assert!(required.iter().any(|value| value == field));
+        }
+    }
 }
