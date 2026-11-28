@@ -712,8 +712,11 @@ pub(super) async fn run(
                         let task = task.as_ref().ok_or("Missing file delegation")?;
                         let app = task.trace.app();
                         let bridge_started = Instant::now();
-                        let request_meta = serde_json::from_str::<Value>(request).unwrap_or(Value::Null);
-                        let result = if request_meta["tool"] == "read"
+                        let (is_read, call_id) = {
+                            let metadata = serde_json::from_str::<Value>(request).unwrap_or(Value::Null);
+                            (metadata["tool"] == "read", metadata["tool_call_id"].as_str().map(str::to_owned))
+                        };
+                        let result = if is_read
                         {
                             file_versions.read(workspace, request)
                         } else {
@@ -742,7 +745,7 @@ pub(super) async fn run(
                         rpc_send(stdin, json!({
                             "type": "extension_ui_response", "id": id, "value": result.to_string()
                         })).await?;
-                        if let Some(call_id) = request_meta["tool_call_id"].as_str() {
+                        if let Some(call_id) = call_id.as_deref() {
                             tool_stream.record_bridge(call_id, bridge_started.elapsed());
                         }
                     }

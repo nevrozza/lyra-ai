@@ -67,10 +67,10 @@ export default function (pi) {
                     "FILE_CHANGED: reread and reconcile. FILE_LOCKED: work elsewhere or report the dependency. Never bypass via run_command."
                 ],
                 async execute(id, args, signal, _onUpdate, ctx) {
-                    const started = Date.now();
+                    const started = performance.now();
                     const request = JSON.stringify({ ...args, tool: name, tool_call_id: id });
                     const value = await ctx.ui.input("lyra:guarded-file", request, { signal });
-                    ctx.ui.notify("lyra:tool-rpc:" + JSON.stringify({ id, ms: Math.max(0, Date.now() - started) }));
+                    ctx.ui.notify("lyra:tool-rpc:" + JSON.stringify({ id, ms: Math.max(0, Math.round(performance.now() - started)) }));
                     if (value === undefined) throw new Error("Lyra did not return a file result");
                     const result = JSON.parse(value);
                     if (!result.ok) throw new Error(result.message);
