@@ -1,6 +1,7 @@
 import { element, get, createChatScroll } from './ui.js';
 import { createThinkingControl } from './chat-thinking.js';
 import { renderMarkdown } from './markdown.js';
+import { createLiveTools } from './tool-preview.js';
 
 const taskStatuses = {
   queued: 'В очереди', running: 'В работе', completed: 'Готово',
@@ -70,6 +71,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
   const chatScroll = createChatScroll(get('project-reading'), get('project-scroll-bottom'));
   const liveThinking = get('project-live-thinking');
   const liveThinkingText = liveThinking.querySelector('p');
+  const liveTools = createLiveTools(get('project-live-tools'), chatScroll.changed);
   const entryMenu = get('project-entry-menu');
   const groupDialog = get('project-group-dialog');
   const groupForm = get('project-group-form');
@@ -185,6 +187,7 @@ export function createProjects({ onSelection = () => {} } = {}) {
     const chat = selectedChat();
     const delegation = chatRun(chat?.id);
     renderLiveThinking(delegation);
+    liveTools.render(delegation);
     const owner = taskChat(chat);
     const queued = owner?.job?.status === 'queued';
     const contextPaused = owner?.job?.status === 'context_full';
@@ -247,8 +250,12 @@ export function createProjects({ onSelection = () => {} } = {}) {
       }
     }
     get('project-progress').hidden = !active;
+    const activeTools = delegation?.[1].live_tools ?? [];
+    const toolStatus = activeTools.some(tool => tool.phase === 'generating') ? 'Модель готовит вызов…'
+      : activeTools.some(tool => tool.phase === 'executing') ? 'Выполняем инструменты…'
+      : activeTools.length ? 'Ожидаем выполнение…' : 'Модель отвечает…';
     const progressText = stopping ? 'Останавливаем…' : contextNotice === 'compacting'
-      ? 'Сжимаем историю…' : delegation ? 'Модель отвечает…' : contextPaused ? 'Задача ждёт восстановления контекста…' : outputPaused ? 'Задача ждёт продолжения после лимита генерации…' : queued ? (owner.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
+      ? 'Сжимаем историю…' : delegation ? toolStatus : contextPaused ? 'Задача ждёт восстановления контекста…' : outputPaused ? 'Задача ждёт продолжения после лимита генерации…' : queued ? (owner.job.external ? 'Ждём результат от оркестратора…' : 'Задача в очереди…') : 'Отправляем…';
     const progress = get('project-progress-text');
     if (progress.textContent !== progressText) progress.textContent = progressText;
     get('project-empty').hidden = Boolean(active || history.length || sending.has(chatId));

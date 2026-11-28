@@ -42,17 +42,17 @@ export default function (pi) {
     if (guardedWrite) {
         const path = Type.String({ description: "Exact file path, relative to the primary working folder or absolute" });
         const definitions = [
-            ["read", "Read the current file and record its version. Optional 1-based offset and line limit.", Type.Object({
+            ["read", "Read a file and record its version. Optional 1-based offset and line limit.", Type.Object({
                 path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1 })),
             }), "Read current file contents before editing. Use offset and limit for large files."],
-            ["write", "Create a new file (missing parent directories are created automatically) or replace an existing file after a complete current read. Acquires a dynamic file lock.", Type.Object({ path, content: Type.String() }), "Create a new file or replace a fully read file."],
+            ["write", "Create a file or replace a fully read file. Parent directories are automatic. Generate content directly here, not in thinking.", Type.Object({ path, content: Type.String() }), "Create a new file or replace a fully read file."],
             ["copy_skill_resource", "Copy a resource from an available Lyra skill package to a new file in the project. Preserves binary bytes, including fonts and images. Never overwrites existing files; source is relative to the skill package root.", Type.Object({
                 skill: Type.String({ description: "Exact name of an available skill" }),
                 source: Type.String({ description: "Relative resource path within the package, e.g. assets/fonts/Example.ttf" }),
                 path,
             }), "Copy a skill asset to a new project file without reading its binary contents."],
             ["mkdir", "Create a directory and missing parent directories within the registered workspace. Existing directories are accepted.", Type.Object({ path }), "Create an empty or nested directory; write already creates parents for files."],
-            ["edit", "Replace exact, unique, non-overlapping text after reading the current file. Acquires a dynamic file lock.", Type.Object({
+            ["edit", "Replace exact, unique, non-overlapping text in a file read this run. Generate replacements directly here.", Type.Object({
                 path,
                 edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() }), { minItems: 1 }),
             }), "Apply exact oldText/newText replacements to a file you have read."],
@@ -66,9 +66,11 @@ export default function (pi) {
                     "Use the exact path and advertised argument schema. Existing files require a current read; new files can be created directly.",
                     "FILE_CHANGED: reread and reconcile. FILE_LOCKED: work elsewhere or report the dependency. Never bypass via run_command."
                 ],
-                async execute(_id, args, signal, _onUpdate, ctx) {
-                    const request = JSON.stringify({ ...args, tool: name });
+                async execute(id, args, signal, _onUpdate, ctx) {
+                    const started = performance.now();
+                    const request = JSON.stringify({ ...args, tool: name, tool_call_id: id });
                     const value = await ctx.ui.input("lyra:guarded-file", request, { signal });
+                    ctx.ui.notify("lyra:tool-rpc:" + JSON.stringify({ id, ms: Math.max(0, Math.round(performance.now() - started)) }));
                     if (value === undefined) throw new Error("Lyra did not return a file result");
                     const result = JSON.parse(value);
                     if (!result.ok) throw new Error(result.message);

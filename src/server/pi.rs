@@ -58,6 +58,8 @@ struct PiDiagnostics {
     provider_request_count: u64,
     last_provider_request: Option<Value>,
     elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_timings: Vec<tool_stream::Timing>,
 }
 
 impl Default for WorkProgress {
@@ -144,6 +146,7 @@ impl WorkProgress {
 const COMMAND_EXTENSION: &str = include_str!("commands/pi-extension.ts");
 
 mod review_diff;
+mod tool_stream;
 
 #[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -538,6 +541,13 @@ pub(super) async fn run(
     let mut background = None::<BackgroundCommand>;
     let mut first_thinking_delta = true;
     let mut history_dirty = false;
+    let mut tool_stream = tool_stream::Stream::default();
+    let publish_tools = |stream: &tool_stream::Stream| {
+        if let Some(task) = &task {
+            let tools = stream.live();
+            task.trace.app().task.send_if_modified(|snapshot| snapshot.set_chat_tools(task.delegation, tools));
+        }
+    };
     let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
 
     loop {
@@ -607,6 +617,14 @@ pub(super) async fn run(
                     }
                     Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:active-tools:")) => {
                         log(Kind::Pi, "Active tools", event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:active-tools:"), Some("ok"));
+                    }
+                    Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:tool-rpc:")) => {
+                        if let Some(raw) = event["message"].as_str().and_then(|message| message.strip_prefix("lyra:tool-rpc:"))
+                            && let Ok(value) = serde_json::from_str::<Value>(raw)
+                            && let (Some(id), Some(ms)) = (value["id"].as_str(), value["ms"].as_u64())
+                        {
+                            tool_stream.record_rpc(id, ms);
+                        }
                     }
                     Some("notify") if event["message"].as_str().is_some_and(|message| message.starts_with("lyra:provider-request:")) => {
                         let raw = event["message"].as_str().unwrap_or_default().trim_start_matches("lyra:provider-request:");
@@ -693,8 +711,12 @@ pub(super) async fn run(
                         let request = event["placeholder"].as_str().ok_or("Missing Pi file request")?;
                         let task = task.as_ref().ok_or("Missing file delegation")?;
                         let app = task.trace.app();
-                        let result = if serde_json::from_str::<Value>(request)
-                            .is_ok_and(|value| value["tool"] == "read")
+                        let bridge_started = Instant::now();
+                        let (is_read, call_id) = {
+                            let metadata = serde_json::from_str::<Value>(request).unwrap_or(Value::Null);
+                            (metadata["tool"] == "read", metadata["tool_call_id"].as_str().map(str::to_owned))
+                        };
+                        let result = if is_read
                         {
                             file_versions.read(workspace, request)
                         } else {
@@ -723,6 +745,9 @@ pub(super) async fn run(
                         rpc_send(stdin, json!({
                             "type": "extension_ui_response", "id": id, "value": result.to_string()
                         })).await?;
+                        if let Some(call_id) = call_id.as_deref() {
+                            tool_stream.record_bridge(call_id, bridge_started.elapsed());
+                        }
                     }
                     Some("input")
                         if ready
@@ -822,9 +847,14 @@ pub(super) async fn run(
             Some("message_start") if event["message"]["role"] == "assistant" => {
                 text_deltas.clear();
                 first_thinking_delta = true;
+                tool_stream.clear();
+                publish_tools(&tool_stream);
             }
             Some("message_update") => {
                 let update = &event["assistantMessageEvent"];
+                if tool_stream.update(update, &event["message"]) {
+                    publish_tools(&tool_stream);
+                }
                 if let Some(delta) = update["delta"].as_str() {
                     match update["type"].as_str() {
                         Some("thinking_delta") if !delta.is_empty() => {
@@ -848,6 +878,8 @@ pub(super) async fn run(
                 }
             }
             Some("tool_execution_start") => {
+                tool_stream.execution_start(&event);
+                publish_tools(&tool_stream);
                 let name = event["toolName"].as_str().unwrap_or("tool");
                 // A previous report no longer describes the final state after more tools.
                 if work_mode {
@@ -860,7 +892,17 @@ pub(super) async fn run(
                 log(Kind::Tool, name, path, Some("running"));
             }
             Some("tool_execution_end") => {
+                let timing = tool_stream.execution_end(&event);
+                publish_tools(&tool_stream);
+                let detail = timing.as_ref().map(|timing| serde_json::to_string(timing).unwrap_or_default()).unwrap_or_default();
+                if let Some(timing) = timing {
+                    if diagnostic.tool_timings.len() == 64 { diagnostic.tool_timings.remove(0); }
+                    diagnostic.tool_timings.push(timing);
+                }
                 let name = event["toolName"].as_str().unwrap_or("tool");
+                if commands.is_some() && name == "run_command" {
+                    log(Kind::Pi, "Tool timing", &detail, None);
+                }
                 if commands.is_some() && name == "run_command" {
                     continue;
                 }
@@ -875,7 +917,7 @@ pub(super) async fn run(
                     }
                     "ok"
                 };
-                log(Kind::Tool, name, "", Some(status));
+                log(Kind::Tool, name, &detail, Some(status));
             }
             Some("message_end") if event["message"]["role"] == "assistant" => {
                 if let Some(task) = &task {
@@ -886,6 +928,10 @@ pub(super) async fn run(
                 let message = &event["message"];
                 let reason = message["stopReason"].as_str();
                 stop_reason = reason.map(str::to_owned);
+                if matches!(reason, Some("error" | "aborted" | "length")) {
+                    tool_stream.clear();
+                    publish_tools(&tool_stream);
+                }
                 let usage = &message["usage"];
                 last_input_tokens = usage["input"].as_u64().map(|input| {
                     input
@@ -997,6 +1043,8 @@ pub(super) async fn run(
     }
     // A normal answer is only a received handoff, not proof that the task is done.
     let handoff_complete = last_error.is_none() && stop_reason.as_deref() == Some("stop") && !truncated && !answer.trim().is_empty();
+    tool_stream.clear();
+    publish_tools(&tool_stream);
     diagnostic.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if task.is_some() {
         let backend = backend.clone();
@@ -1091,7 +1139,7 @@ async fn write_project_instructions(
     } else if matches!(task.role, Some(Role::Review)) {
         text.push_str("\nReview is read-only: use read, grep, find and ls for inspection. The write, edit and mkdir tools are intentionally unavailable. Report fixes instead of editing.\n");
     } else {
-        text.push_str("\nWork mode: use read before editing existing files, write for creating new files or replacing fully read files, and edit for targeted changes. Write creates missing parent directories automatically (e.g. write path src/ui/View.kt). Use mkdir only to create directories explicitly, including empty directories. Use copy_skill_resource to copy an existing binary or text resource from a selected skill package to a new project file (no overwrite). Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
+        text.push_str("\nWork mode: think briefly about decisions and constraints, then act. Do not draft entire files, duplicate code, or serialize proposed tool arguments in thinking or chat. Generate the actual code once, directly in write/edit arguments. Call straightforward read, ls, grep and find immediately when their inputs are known; avoid narrating each call or re-planning settled steps. Preserve necessary reasoning, correctness and verification. Use read before editing existing files, write for new files or fully read replacements, and edit for targeted changes. Write creates missing parent directories automatically (e.g. write path src/ui/View.kt). Use mkdir only to create directories explicitly, including empty directories. Use copy_skill_resource to copy an existing binary or text resource from a selected skill package to a new project file (no overwrite). Lyra dynamically locks changed paths until this run ends and rejects stale versions. On FILE_CHANGED, read the file again and reconcile all changes; on READ_REQUIRED, read the current file; on FILE_LOCKED, continue independent work or report the dependency. Do not wait in a retry loop. NEVER bypass these restrictions using run_command, shell redirection, scripts, generators, formatters, git commands, subprocesses or any other indirect file modification. Shell commands are for inspection, checks and builds that do not modify shared source/configuration files or conflict with other agents' outputs. If a required change cannot be made safely using the guarded tools, report the blocker.\n");
     }
     if let Some(role) = task.role {
         text.push_str("\n\n");
