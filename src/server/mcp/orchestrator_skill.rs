@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{hash::{DefaultHasher, Hash, Hasher}, sync::LazyLock};
 
-pub(super) const INSTRUCTIONS: &str = "Lyra runs local workers; you own planning and acceptance. Before delegating a new task through Lyra, call get_orchestrator_skill (no arguments) to read the current orchestration guide, unless already loaded from this server for this task. Read its references on demand with the same tool's path argument or MCP resources. Do not start speculative dependent implementation before approving unsettled decisions. Respect user permissions and cancellation. Do not load the guide for unrelated work or repeat it for every tool call.";
+pub(super) const INSTRUCTIONS: &str = "Lyra runs local workers; you own planning and final acceptance. Default to one autonomous enqueue_and_wait graph of all settled implementation and integration steps, with after dependencies and follow_up.review for automatic independent review, fixes and repeat review. Do not supervise individual handoffs or routine fixes. Before delegating a new task through Lyra, call get_orchestrator_skill (no arguments) to read the current orchestration guide, unless already loaded from this server for this task. Read its references on demand with the same tool's path argument or MCP resources. Pause only a branch needing a genuinely unresolved consequential decision or an actionable blocker; otherwise let the full pipeline finish. Respect user permissions and cancellation. Do not load the guide for unrelated work or repeat it for every tool call.";
 
 const FILES: &[(&str, &str, &str)] = &[
     ("SKILL.md", "Lyra orchestrator guide", include_str!("../../../.agents/skills/lyra/SKILL.md")),
