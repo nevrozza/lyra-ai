@@ -281,14 +281,16 @@ fn tools() -> Value {
         }, "required": ["project_id", "project_session_id", "mode"], "additionalProperties": false},
         "annotations": {"idempotentHint": true, "destructiveHint": false}
     });
-    let mut tools = json!([
-        {
+    // Expand each tool independently: one large json! array grows macro recursion
+    // with every new tool, even though the individual schemas are small.
+    let mut tools = Value::Array(vec![
+        json!({
             "name": "list_mcp_servers",
             "description": "List configured MCP servers for local Lyra Work agents. Returns names, transport, enabled state and exposure, never secret values. Enabled does not mean connected. Local mode only.",
             "inputSchema": {"type":"object","properties":{},"additionalProperties":false},
             "annotations":{"readOnlyHint":true}
-        },
-        {
+        }),
+        json!({
             "name": "save_mcp_server",
             "description": "Add or patch one MCP server for subsequent Work runs. Only configure servers explicitly authorized by the user; local processes can execute code. Existing omitted fields are preserved; supplied maps/arrays replace those fields. Use environment references for secrets. Does not start or test the server. Local mode only.",
             "inputSchema": {"type":"object","properties":{
@@ -309,26 +311,26 @@ fn tools() -> Value {
                 },"additionalProperties":false,"description":"For new servers, provide command (stdio) or URL (HTTP). Changing transports removes incompatible fields. Omitted fields are unchanged on update."}
             },"required":["name","server"],"additionalProperties":false},
             "annotations":{"idempotentHint":true,"destructiveHint":true}
-        },
-        {
+        }),
+        json!({
             "name":"set_mcp_server_enabled",
             "description":"Enable or disable a configured MCP server for future Work runs. Does not interrupt existing runs. Local mode only.",
             "inputSchema":{"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"],"additionalProperties":false},
             "annotations":{"idempotentHint":true,"destructiveHint":false}
-        },
-        {
+        }),
+        json!({
             "name":"remove_mcp_server",
             "description":"Remove a server from Lyra configuration, not its installed files. Does not interrupt existing runs. Only remove on user request. Local mode only.",
             "inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},
             "annotations":{"idempotentHint":true,"destructiveHint":true}
-        },
-        {
+        }),
+        json!({
             "name":"test_mcp_server",
             "description":"Test a configured server (including disabled servers) with a real MCP initialize handshake and tools/list, without calling tools or loading a model. Starts configured stdio processes or connects over HTTP(S); only test user-authorized servers. Returns raw discovered tool names, not a guarantee of Pi exposure. Local mode only.",
             "inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},
             "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":true}
-        },
-        {
+        }),
+        json!({
             "name": "inspect",
             "description": "Read system load, local models, benchmarks, memory estimates, and Lyra queue settings.",
             "inputSchema": {"type": "object", "properties": {
@@ -337,8 +339,8 @@ fn tools() -> Value {
                 "system": {"type": "boolean"}
             }, "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
-        },
-        {
+        }),
+        json!({
             "name": "set_description",
             "description": "Replace the saved description of a model.",
             "inputSchema": {"type": "object", "properties": {
@@ -346,8 +348,8 @@ fn tools() -> Value {
                 "description": {"type": "string", "maxLength": 2000}
             }, "required": ["model", "description"], "additionalProperties": false},
             "annotations": {"idempotentHint": true}
-        },
-        {
+        }),
+        json!({
             "name": "manage_model",
             "description": "Load for 5 minutes, pin indefinitely, unpin for expiry after 5 minutes, or unload one installed Ollama model.",
             "inputSchema": {"type": "object", "properties": {
@@ -355,8 +357,8 @@ fn tools() -> Value {
                 "action": {"enum": ["load", "pin", "unpin", "unload"]}
             }, "required": ["model", "action"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
-        },
-        {
+        }),
+        json!({
             "name": "run_model",
             "description": "Generate a text response with an installed Ollama model without a Lyra output token cap.",
             "inputSchema": {"type": "object", "properties": {
@@ -367,14 +369,14 @@ fn tools() -> Value {
                 "require_loaded": {"type": "boolean", "description": "Use only a model already loaded with the requested or configured context"}
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
-        },
-        {
+        }),
+        json!({
             "name": "list_projects",
             "description": "List projects and saved Pi chats with IDs and archive status.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
-        },
-        {
+        }),
+        json!({
             "name": "archive_project",
             "description": "Archive or restore a project, a group with all its chats, or one saved chat.",
             "inputSchema": {"type": "object", "properties": {
@@ -384,8 +386,8 @@ fn tools() -> Value {
                 "archived": {"type": "boolean"}
             }, "required": ["project_id", "archived"], "additionalProperties": false},
             "annotations": {"idempotentHint": true, "destructiveHint": false}
-        },
-        {
+        }),
+        json!({
             "name": "save_project",
             "description": "Create a project or update its registered folders and metadata.",
             "inputSchema": {"type": "object", "properties": {
@@ -393,8 +395,8 @@ fn tools() -> Value {
                 "name": {"type": "string", "minLength": 1, "maxLength": 120},
                 "folders": {"type": "array", "maxItems": 16, "items": {"type": "string"}, "description": "Absolute directory paths. The first is the default. Omit on creation or pass [] to use the project's isolated internal workspace. Omitting on update keeps the existing folder list."}
             }, "required": ["name"], "additionalProperties": false}
-        },
-        {
+        }),
+        json!({
             "name": "create_project_session",
             "description": "Create a saved Pi chat in a project, optionally in a named task group.",
             "inputSchema": {"type": "object", "properties": {
@@ -405,8 +407,8 @@ fn tools() -> Value {
                 "group_brief": {"type": "string", "maxLength": 8000, "description": "Initial shared Markdown goal and constraints for a new group; requires group_name."},
                 "mode": {"enum": ["chat", "work"], "default": "work", "description": "Initial saved mode."}
             }, "required": ["project_id", "name"], "additionalProperties": false}
-        },
-        {
+        }),
+        json!({
             "name": "set_project_session_settings",
             "description": "Rename a saved chat. Its working folders are inherited from the project.",
             "inputSchema": {"type": "object", "properties": {
@@ -414,13 +416,13 @@ fn tools() -> Value {
                 "project_session_id": {"type": "integer", "minimum": 1},
                 "name": {"type": "string", "minLength": 1, "maxLength": 120}
             }, "required": ["project_id", "project_session_id", "name"], "additionalProperties": false}
-        },
-        {
+        }),
+        json!({
             "name": "enqueue_project_tasks",
             "description": "Queue project steps in an optional named group with dependencies and parallel file scopes. Multi-step batches and automatic workflows are grouped by default.",
             "inputSchema": enqueue_schema
-        },
-        {
+        }),
+        json!({
             "name": "get_project_tasks",
             "description": "Inspect task status, results and follow-ups once. Use await_project_tasks instead of repeated polling; wait_seconds is retained for older clients.",
             "inputSchema": {"type": "object", "properties": {
@@ -430,16 +432,16 @@ fn tools() -> Value {
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 25, "default": 0, "description": "Maximum wait for completion or a context pause."}
             }, "required": ["project_id"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
-        },
-        {
+        }),
+        json!({
             "name": "cancel_project_task",
             "description": "Cancel a queued or context-paused task and keep its chat.",
             "inputSchema": {"type": "object", "properties": {
                 "project_id": {"type": "integer", "minimum": 1},
                 "project_session_id": {"type": "integer", "minimum": 1}
             }, "required": ["project_id", "project_session_id"], "additionalProperties": false}
-        },
-        {
+        }),
+        json!({
             "name": "get_group_context",
             "description": "Read a group's generated CONTEXT.md, including the shared brief, committed chat/queue results and statuses. Read before editing the brief or planning dependent work.",
             "inputSchema": {"type": "object", "properties": {
@@ -447,8 +449,8 @@ fn tools() -> Value {
                 "group_id": {"type": "integer", "minimum": 1}
             }, "required": ["project_id", "group_id"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
-        },
-        {
+        }),
+        json!({
             "name": "set_group_context",
             "description": "Replace only the shared Markdown goal and constraints; automatic worker results are retained. Use brief_revision from get_group_context; stale edits are rejected.",
             "inputSchema": {"type": "object", "properties": {
@@ -457,8 +459,8 @@ fn tools() -> Value {
                 "brief": {"type": "string", "maxLength": 8000},
                 "brief_revision": {"type": "integer", "minimum": 0}
             }, "required": ["project_id", "group_id", "brief", "brief_revision"], "additionalProperties": false}
-        },
-        {
+        }),
+        json!({
             "name": "read_project_session",
             "description": "Read recent saved chat messages and compact tool calls/results, including confirmed operations and intentional user-stop notices. Pending or missing tool results are not proof of success. Never automatically resume a user-stopped task.",
             "inputSchema": {"type": "object", "properties": {
@@ -466,8 +468,8 @@ fn tools() -> Value {
                 "project_session_id": {"type": "integer", "minimum": 1}
             }, "required": ["project_id", "project_session_id"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
-        },
-        {
+        }),
+        json!({
             "name": "run_pi",
             "description": "Run Pi with an installed Ollama model in Chat or Work mode.",
             "inputSchema": {"type": "object", "properties": {
@@ -483,7 +485,7 @@ fn tools() -> Value {
                 "role": worker_role
             }, "required": ["model", "prompt"], "additionalProperties": false},
             "annotations": {"destructiveHint": false}
-        }
+        }),
     ]);
     tools.as_array_mut().expect("tool definitions").extend([
         complete_step,
