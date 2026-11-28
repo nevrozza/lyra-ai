@@ -430,10 +430,13 @@ h2 { font-size: .96rem; font-weight: 650; }
 .settings-actions button:hover:not(:disabled) { color: #edf0ea; background: #27362b; }
 .settings-actions button:disabled { opacity: .5; }
 .settings-actions button[data-delete]:hover:not(:disabled) { color: #f0ac9c; }
-.settings-actions .settings-switch { display: inline-flex; padding: 2px; width: 31px; height: 18px; border-radius: 10px; background: #3b4940; align-items: center; border: 1px solid #536453; margin-right: 4px; }
+.settings-actions .settings-switch, .pin-switch > .settings-switch { display: inline-flex; flex: 0 0 31px; padding: 2px; width: 31px; height: 18px; border-radius: 10px; background: #3b4940; align-items: center; border: 1px solid #536453; }
+.settings-actions .settings-switch { margin-right: 4px; }
+.pin-switch > input:focus-visible + .settings-switch { outline: 2px solid var(--accent); outline-offset: 4px; }
+.pin-switch > input:disabled + .settings-switch { opacity: .5; }
 .settings-switch::before { content: ''; display: block; width: 12px; height: 12px; border-radius: 50%; background: #b2bdb1; transition: transform var(--motion-fast); }
-.settings-actions .settings-switch[aria-checked="true"] { background: #597a49; }
-.settings-switch[aria-checked="true"]::before { transform: translateX(12px); background: #d4efb9; }
+.settings-actions .settings-switch[aria-checked="true"], .pin-switch > input:checked + .settings-switch { background: #597a49; }
+.settings-switch[aria-checked="true"]::before, .pin-switch > input:checked + .settings-switch::before { transform: translateX(12px); background: #d4efb9; }
 .mcp-servers-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .mcp-servers-note { font-size: .72rem; line-height: 1.45; }
 #mcp-servers-status:empty { display: none; }
