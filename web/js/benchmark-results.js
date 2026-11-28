@@ -8,7 +8,7 @@ const coldDelta = (point) => point.cold_isolated && point.gpu_memory?.length ? p
 const ramDelta = (point) => point.cold_isolated && point.system_ram?.samples > 0 ? Math.max(0, point.system_ram.sampled_peak_bytes - point.system_ram.baseline_bytes) : null;
 export const benchmarkStages = {
   preparing: 'Подготовка',
-  checking_pi: 'Проверка Pi',
+  checking_pi: 'Проверка работы агента',
   loading_and_prefill: 'Загрузка и промпт',
   prefill: 'Обработка промпта',
   generating: 'Генерация',

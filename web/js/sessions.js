@@ -2,7 +2,7 @@ import { duration, element, get } from './ui.js';
 
 const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const fullClock = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'medium' });
-const kinds = { mcp: 'MCP', pi: 'Pi', tool: 'Инструмент Pi', thinking: 'Thinking', answer: 'Ответ' };
+const kinds = { mcp: 'MCP', pi: 'Агент', tool: 'Инструмент агента', thinking: 'Thinking', answer: 'Ответ' };
 const statuses = { waiting: 'Ждёт подтверждения', running: 'В работе', ok: 'Готово', error: 'Ошибка' };
 
 export function groupCallEvents(events) {
