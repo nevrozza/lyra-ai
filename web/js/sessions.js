@@ -128,7 +128,9 @@ export function createSessions() {
   function render(view) {
     renderRecent(view.recent);
     message.hidden = view.sessions.length > 0;
-    message.textContent = 'Пока нет MCP-вызовов оркестратора.';
+    message.dataset.state = 'empty';
+    get('session-message-title').textContent = 'Пока нет вызовов';
+    get('session-message-text').textContent = 'Здесь появятся запросы оркестратора к Lyra.';
     const nextListKey = JSON.stringify([view.sessions, view.selected]);
     if (nextListKey !== listKey) {
       const focused = document.activeElement?.dataset.session;
@@ -205,7 +207,9 @@ export function createSessions() {
       }
     } catch {
       message.hidden = false;
-      message.textContent = 'Не удалось обновить MCP-вызовы оркестратора.';
+      message.dataset.state = 'error';
+      get('session-message-title').textContent = 'Журнал недоступен';
+      get('session-message-text').textContent = 'Не удалось обновить MCP-вызовы. Повторим при следующем обновлении.';
     } finally {
       reading = false;
       if (queued) {

@@ -66,8 +66,10 @@ export function createModelList({ selectModel, statusFor }) {
     modelList.hidden = installed.length === 0;
     const message = get('model-list-message');
     message.hidden = installed.length > 0;
-    message.textContent = names === undefined ? 'Получаем список моделей…' :
-      names === null ? 'Список Ollama недоступен.' : 'Локальных моделей пока нет. Добавьте модель через ollama pull.';
+    message.dataset.state = names === undefined ? 'loading' : names === null ? 'error' : 'empty';
+    get('model-list-message-title').textContent = names === undefined ? 'Загружаем модели' : names === null ? 'Ollama недоступна' : 'Нет локальных моделей';
+    get('model-list-message-text').textContent = names === undefined ? 'Ожидаем данные Ollama.' :
+      names === null ? 'Проверь, запущена ли Ollama.' : 'Добавь модель с помощью ollama pull.';
   }
 
   return {
